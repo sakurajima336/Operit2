@@ -162,6 +162,17 @@ jobs:
           RELEASE_KEY_PASSWORD=$env:ANDROID_RELEASE_KEY_PASSWORD
           "@ | Set-Content -Path (Join-Path $secretsDir "android-signing.properties") -Encoding utf8
 
+      - name: Install plugin build tools
+        shell: pwsh
+        run: |
+          python -m venv .venv
+          .\.venv\Scripts\python.exe -c "import sys; print(sys.version)"
+          corepack enable
+          corepack prepare pnpm@10.7.0 --activate
+          corepack pnpm --version
+          New-Item -ItemType Directory -Force -Path .ci-tools/typescript | Out-Null
+          npm install --no-audit --no-fund --prefix .ci-tools/typescript typescript@5.9.2
+          npm install --no-audit --no-fund --no-save --no-package-lock esbuild@0.25.10 fflate@0.8.2 typescript@5.9.2
       - name: Check build environment
         shell: pwsh
         run: python tools/build_scripts/check_build_environment.py --products app --github-runner

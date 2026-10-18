@@ -229,14 +229,14 @@ class AndroidRuntimeHost(context: Context) {
     fun defaultStoragePathsMap(): Map<String, String> {
         val base = applicationContext.filesDir
         return mapOf(
-            "runtimeRoot" to File(base, "runtime").absolutePath,
-            "workspaceRoot" to File(base, "workspaces").absolutePath,
+            "runtimeRoot" to canonicalFile(File(base, "runtime")).absolutePath,
+            "workspaceRoot" to canonicalFile(File(base, "workspaces")).absolutePath,
         )
     }
 
     /** Returns the platform default Runtime root used to locate client bootstrap state. */
     fun defaultRuntimeRootPath(): String {
-        return File(applicationContext.filesDir, "runtime").absolutePath
+        return canonicalFile(File(applicationContext.filesDir, "runtime")).absolutePath
     }
 
     /** Returns normalized storage paths without creating the runtime. */
@@ -323,11 +323,14 @@ class AndroidRuntimeHost(context: Context) {
     }
 
     /** Validates one required absolute storage root. */
+    /** Resolves app-namespace path aliases such as /data/user/0 -> /data/data. */
+    private fun canonicalFile(file: File): File = runCatching { file.canonicalFile }.getOrElse { file }
+
     private fun requiredAbsoluteRoot(path: String?, label: String): File {
         val value = path?.trim()
         require(!value.isNullOrEmpty()) { "$label is required" }
         val root = File(value)
         require(root.isAbsolute) { "$label must be an absolute path" }
-        return root.absoluteFile.normalize()
+        return canonicalFile(root.absoluteFile.normalize())
     }
 }
