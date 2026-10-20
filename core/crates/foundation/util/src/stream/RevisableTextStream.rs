@@ -1,5 +1,6 @@
 use crate::stream::HotStream::{
-    mutable_shared_stream, share, MutableSharedStreamImpl, SharedStream, StreamStart,
+    mutable_shared_stream, share, MutableSharedStreamImpl, SharedStream, SharedStreamTail,
+    StreamStart,
 };
 use crate::stream::Stream::{CollectFuture, Stream};
 use crate::stream::TextStreamRevisionTracker::TextStreamRevisionTracker;
@@ -28,6 +29,11 @@ pub enum ResponseStreamItem {
 enum ResponseItemStream {
     Chunks,
     Ordered(MutableSharedStreamImpl<ResponseStreamItem>),
+}
+
+enum ResponseTail {
+    Chunks(SharedStreamTail<String>),
+    Ordered(SharedStreamTail<ResponseStreamItem>),
 }
 
 pub trait TextStreamEventCarrier {
@@ -263,9 +269,9 @@ impl DelegatingRevisableSharedTextStream {
             .expect("shared text stream rendered segment mutex poisoned")
             .append(&chunk);
         if let ResponseItemStream::Ordered(orderedItems) = &self.item_stream {
-            orderedItems.emit(ResponseStreamItem::Chunk(chunk.clone()));
+            orderedItems.emit_live(ResponseStreamItem::Chunk(chunk.clone()));
         }
-        self.upstream.emit(chunk);
+        self.upstream.emit_live(chunk);
     }
 
     /// Emits one response revision to both legacy and ordered subscribers.
@@ -287,7 +293,7 @@ impl DelegatingRevisableSharedTextStream {
         let ResponseItemStream::Ordered(orderedItems) = &self.item_stream else {
             panic!("revisable response stream must preserve item order");
         };
-        orderedItems.emit(ResponseStreamItem::Revision(event.clone()));
+        orderedItems.emit_live(ResponseStreamItem::Revision(event.clone()));
         self.event_channel.emit(event);
     }
 
@@ -400,24 +406,45 @@ impl RevisableTextStream for DelegatingRevisableSharedTextStream {
         DelegatingRevisableSharedTextStream::terminal_failure(self)
     }
 
-    /// Collects chunks and revisions with the configured ordering contract.
+    /// Delivers the current rendered text, then values emitted after subscription.
     fn collect_ordered<'a>(
         &'a mut self,
         collector: &'a mut dyn FnMut(ResponseStreamItem),
     ) -> CollectFuture<'a> {
-        match &self.item_stream {
+        let rendered = self
+            .renderedSegment
+            .lock()
+            .expect("shared text stream rendered segment mutex poisoned");
+        let initial = self
+            .initialContent
+            .lock()
+            .expect("shared text stream initial content mutex poisoned");
+        let snapshot = format!("{initial}{}", rendered.current_content());
+        let tail = match &self.item_stream {
             ResponseItemStream::Ordered(orderedItems) => {
-                let mut orderedItems = orderedItems.clone();
-                Box::pin(async move {
-                    orderedItems.collect(collector).await;
-                })
+                ResponseTail::Ordered(orderedItems.listen_tail())
             }
-            ResponseItemStream::Chunks => Box::pin(async move {
-                self.upstream
-                    .collect(&mut |chunk| collector(ResponseStreamItem::Chunk(chunk)))
-                    .await;
-            }),
-        }
+            ResponseItemStream::Chunks => ResponseTail::Chunks(self.upstream.listen_tail()),
+        };
+        drop(initial);
+        drop(rendered);
+        Box::pin(async move {
+            if !snapshot.is_empty() {
+                collector(ResponseStreamItem::Chunk(snapshot));
+            }
+            match tail {
+                ResponseTail::Ordered(mut ordered) => {
+                    while let Some(item) = ordered.recv().await {
+                        collector(item);
+                    }
+                }
+                ResponseTail::Chunks(mut chunks) => {
+                    while let Some(chunk) = chunks.recv().await {
+                        collector(ResponseStreamItem::Chunk(chunk));
+                    }
+                }
+            }
+        })
     }
 }
 

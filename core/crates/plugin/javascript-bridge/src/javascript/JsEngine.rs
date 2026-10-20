@@ -1201,7 +1201,7 @@ impl JsEngineState {
                     installThreadLocalCallContext(&pending.context);
                     self.cancelJavaScriptExecution(&callId);
                 }
-                Ok(())
+                self.advanceJavaScriptExecutions(interrupt)
             }
         }
     }
@@ -1584,12 +1584,7 @@ impl JsEngineState {
     /// Cancels one JavaScript call and releases its call-scoped callbacks and timers.
     #[allow(non_snake_case)]
     fn cancelJavaScriptExecution(&mut self, callId: &str) {
-        if let Err(error) = self.runtime.cancelHostJavaScriptPromises(callId) {
-            AppLogger::e(
-                TAG,
-                &format!("cancel structured JavaScript promises failed: {error}"),
-            );
-        }
+        // Retire the session before rejecting host waits: Web can run their cleanup jobs immediately.
         if let Err(error) = self.runtime.callHostJavaScriptFunction(
             "__operitCancelCallSession",
             &[Value::String(callId.to_string())],
@@ -1597,6 +1592,12 @@ impl JsEngineState {
             AppLogger::e(
                 TAG,
                 &format!("cancel JavaScript execution failed callId={callId}: {error}"),
+            );
+        }
+        if let Err(error) = self.runtime.cancelHostJavaScriptPromises(callId) {
+            AppLogger::e(
+                TAG,
+                &format!("cancel structured JavaScript promises failed: {error}"),
             );
         }
     }

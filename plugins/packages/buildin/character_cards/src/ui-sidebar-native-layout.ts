@@ -1,4 +1,4 @@
-import type { ComposeDslContext, ComposeLazyItems, ComposeNode } from '../../../../types/compose-dsl';
+import type { ComposeDslContext, ComposeNode } from '../../../../types/compose-dsl';
 import type { CharacterSidebarSection, ConversationSidebarGroup, CurrentSidebar, SidebarCatalog, SidebarChatSummary } from './ui-sidebar';
 
 export interface SidebarLayoutState {
@@ -26,7 +26,7 @@ export const legacySidebarMetrics = Object.freeze({
 
 type SidebarRowBuilder = () => ComposeNode;
 
-/** Builds row factories without materializing any row node until the lazy viewport requests it. */
+/** Builds the visible hierarchy for the host-owned sidebar scroll surface. */
 function sidebarRowBuilders(ctx: ComposeDslContext, current: CurrentSidebar, state: SidebarLayoutState,
   actions: SidebarLayoutActions, defaultAvatar: string | null): SidebarRowBuilder[] {
   const colors = ctx.MaterialTheme.colorScheme, m = legacySidebarMetrics;
@@ -181,14 +181,8 @@ function sidebarRowBuilders(ctx: ComposeDslContext, current: CurrentSidebar, sta
   return rows;
 }
 
-/** Produces only the initial conversation rows; later rows are requested by the host viewport. */
-export function nativeSidebarLazyItems(ctx: ComposeDslContext, current: CurrentSidebar, state: SidebarLayoutState,
-  actions: SidebarLayoutActions, defaultAvatar: string | null): ComposeLazyItems {
-  const builders = sidebarRowBuilders(ctx, current, state, actions, defaultAvatar);
-  return ctx.lazyItems({
-    key: 'sidebar-conversation-rows',
-    itemCount: builders.length,
-    itemExtent: legacySidebarMetrics.chatHeight,
-    initialItemCount: 24,
-  }, index => builders[index]());
+/** Materializes expanded rows once, so scrolling never needs a plugin round trip. */
+export function nativeSidebarRows(ctx: ComposeDslContext, current: CurrentSidebar, state: SidebarLayoutState,
+  actions: SidebarLayoutActions, defaultAvatar: string | null): ComposeNode[] {
+  return sidebarRowBuilders(ctx, current, state, actions, defaultAvatar).map(build => build());
 }

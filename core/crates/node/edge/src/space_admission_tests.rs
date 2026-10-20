@@ -969,6 +969,67 @@ mod core_edge {
         result.unwrap();
     }
 
+    /// The motivating reverse-direction case: the Edge initiated the pairing,
+    /// so the Core holds only the inbound credential. Joining the Edge's Space
+    /// must not depend on that direction — the applicant's join request rides
+    /// the connection the Edge opened, and the Edge still grants membership
+    /// only by explicit approval on its own Space.
+    #[tokio::test]
+    async fn edge_initiated_pairing_lets_the_dialed_core_join_the_edge_space() {
+        let _guard = TEST_LOCK.lock().await;
+        let core = core_node();
+        let edge = fresh_edge();
+        start(&core, &edge).await;
+        let result = tokio::time::timeout(Duration::from_secs(30), async {
+            let core_id = core.router.localNodeId();
+            let edge_id = edge.service.localNodeId();
+            pair(&edge.peers, &core.peers, &core.storage, core_id.clone()).await;
+            let core_projection = &core.peers.pairedPeers().unwrap()[0];
+            assert!(core_projection.inbound && !core_projection.outbound,
+                "the Core answered the pairing, so it holds no outbound credential");
+            let edge_projection = &edge.peers.pairedPeers().unwrap()[0];
+            assert!(edge_projection.outbound && !edge_projection.inbound);
+            assert_eq!(edge.service.spaceChannelScope(&core_id).unwrap(), None);
+            // The dialer side may always call the peer it dialed; this
+            // pre-admission snapshot probe also opens the return route that
+            // the Core's own join request then rides.
+            let snapshot = edge.peers.call(&core_id, RoutedCoreRequest {
+                spaceId: "pre-join-probe".into(),
+                originNodeId: edge_id.clone(),
+                targetNodeId: core_id.clone(),
+                ttl: 0,
+                routeKind: RoutedCoreRequestKind::Target,
+                payload: CoreCallRequest::new("pre-join-snapshot", NODE_SPACE_TARGET, "snapshot", CoreValue::Null),
+            }).await;
+            assert!(snapshot.result.is_ok(), "paired dialer may probe the peer's space: {:?}", snapshot.result);
+            // The applicant is the dialed side: no outbound credential exists,
+            // so the request must ride the Edge's own connection.
+            let request = core.service.requestDeviceSpaceJoin(edge_id.clone()).await.unwrap();
+            assert_eq!(request.status, SpaceJoinStatus::Pending);
+            assert!(!edge.service.spaceStore().space().unwrap().members.contains(&core_id));
+            let incoming = edge.service.incomingDeviceSpaceJoins().await.unwrap();
+            assert_eq!(incoming.len(), 1);
+            assert!(incoming[0].canApprove);
+            let approved = edge.service
+                .decideDeviceSpaceJoin(request.requestId.clone(), request.assignmentVersion, true)
+                .await
+                .unwrap();
+            assert_eq!(approved.status, SpaceJoinStatus::Approved);
+            assert_eq!(
+                core.service.refreshDeviceSpaceJoin(request.requestId).await.unwrap().status,
+                SpaceJoinStatus::Joined
+            );
+            assert_eq!(
+                core.service.deviceSpace().unwrap(),
+                edge.service.spaceStore().space().unwrap()
+            );
+        })
+        .await;
+        core.peers.stop().await.unwrap();
+        edge.peers.stop().await.unwrap();
+        result.unwrap();
+    }
+
     /// Reproduce the physical device scenario: the SAME Core keeps the former
     /// group (including Edge) while Edge leaves and creates a new singleton.
     #[tokio::test]

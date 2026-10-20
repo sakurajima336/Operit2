@@ -2,7 +2,7 @@ import type { ComposeDslContext, ComposeNode } from "../../../../types/compose-d
 import { reconcileSidebarCatalog, parseCurrentSidebar, preparedSidebar, sidebarCatalogKey, type CurrentSidebar, type SidebarCatalog, type ConversationSidebarGroup, type ConversationSidebarScope } from "./ui-sidebar";
 import { callMainDomain, encodeSelection } from "./ui-contributions";
 import { createChatInput } from "./chat-lifecycle";
-import { nativeSidebarLazyItems } from "./ui-sidebar-native-layout";
+import { nativeSidebarRows } from "./ui-sidebar-native-layout";
 import { deleteConversationGroupMembers, type SidebarDeletionProgress } from "./sidebar-group-delete";
 
 /** Native local state, with no browser controller, resource, or DOM lifecycle. */
@@ -16,6 +16,7 @@ interface SidebarState {
 export function renderSidebarScreen(ctx: ComposeDslContext): ComposeNode {
   const [input] = ctx.useState<CurrentSidebar["input"] | null>("input", null);
   const [chatSidebar] = ctx.useState<CurrentSidebar["chatSidebar"] | null>("chatSidebar", null);
+  const [capabilities] = ctx.useState<{ openInWindow?: boolean } | null>("chatSidebarCapabilities", null);
   // Host snapshots only change on input updates. A viewport action should not
   // revalidate and clone the entire history or change every lazy dependency.
   const parsed = ctx.useMemo('native-sidebar-inputs', () => parseCurrentSidebar({ input, chatSidebar }), [input, chatSidebar]);
@@ -180,6 +181,13 @@ export function renderSidebarScreen(ctx: ComposeDslContext): ComposeNode {
     });
   }
   function longPress(id: string): void { dialog("chatActions", id, chatFor(id).title); }
+  /** Requests host window creation without activating or mutating the current conversation. */
+  function openInWindow(id: string): { type: string; chatId: string } {
+    assertCurrent(); chatFor(id);
+    if (capabilities?.openInWindow !== true) throw new Error("Detached chat windows are not available");
+    update({ dialog: null });
+    return { type: "toolpkg.chat.openInWindow", chatId: id };
+  }
   async function changeFlag(id: string, pinned: boolean): Promise<void> {
     await run(async () => {
       const chat = chatFor(id);
@@ -298,6 +306,7 @@ export function renderSidebarScreen(ctx: ComposeDslContext): ComposeNode {
     ? state.collapsed.filter(key => key !== id) : [...state.collapsed, id] });
   const toggleGroup = (id: string): void => update({ expandedGroups: state.expandedGroups.includes(id)
     ? state.expandedGroups.filter(key => key !== id) : [...state.expandedGroups, id] });
+  const searchActive = state.search || state.query.trim() !== "";
   const rows: ComposeNode[] = [ctx.UI.Row({ key: "sidebar-toolbar", fillMaxWidth: true,
     verticalAlignment: "center", spacing: 8, paddingStart: 14, paddingEnd: 12, paddingBottom: 8 }, [
     ctx.UI.Surface({ key: "sidebar-create-bar", weight: 1, height: 34,
@@ -324,28 +333,34 @@ export function renderSidebarScreen(ctx: ComposeDslContext): ComposeNode {
     ])),
     ctx.UI.Row({ key: "sidebar-search-toggle", width: 34, height: 34, verticalAlignment: "center", horizontalArrangement: "center",
       onClick: () => update({ search: !state.search }), modifier: ctx.Modifier.clip({ cornerRadius: 6 }),
-      background: state.search ? colors.secondaryContainer.copy({ alpha: 0.35 }) : colors.surface.copy({ alpha: 0 }) },
-      ctx.UI.Icon({ name: state.search ? "SearchOff" : "Search", size: 17, tint: colors.onSurfaceVariant.copy({ alpha: 0.78 }), contentDescription: state.search ? "收起搜索" : "搜索对话" })),
+      background: searchActive ? colors.secondaryContainer.copy({ alpha: 0.35 }) : colors.surface.copy({ alpha: 0 }) },
+      ctx.UI.Icon({ name: state.search ? "SearchOffRounded" : "SearchRounded", size: 17, tint: searchActive ? colors.primary : colors.onSurfaceVariant.copy({ alpha: 0.78 }), contentDescription: state.search ? "收起搜索" : "搜索对话" })),
   ])];
-  if (state.search) rows.push(ctx.UI.TextField({ key: "sidebar-search", value: state.query,
-    onValueChange: query => update({ query }), placeholder: "搜索对话", singleLine: true,
-    fillMaxWidth: true, paddingHorizontal: 12, paddingBottom: 12, ...{ shape: { cornerRadius: 14 } } }));
+  rows.push(ctx.UI.Box({ key: "sidebar-search-container", fillMaxWidth: true,
+    animation: { durationMillis: 180, curve: "easeOutCubic", animateContentSize: true } },
+    state.search ? ctx.UI.Column({ fillMaxWidth: true, paddingHorizontal: 12, paddingBottom: 12 },
+      ctx.UI.TextField({ key: "sidebar-search", value: state.query,
+        onValueChange: query => update({ query }), placeholder: "搜索对话", singleLine: true, fillMaxWidth: true,
+        style: { color: colors.onSurface },
+        leadingIcon: ctx.UI.Icon({ name: "Search", size: 20, tint: colors.onSurfaceVariant.copy({ alpha: 0.72 }) }),
+        decoration: { isDense: true, filled: true, fillColor: colors.surfaceContainerLow.copy({ alpha: 0.72 }),
+          cornerRadius: 14, focusedBorderColor: colors.primary,
+          hintStyle: { color: colors.onSurfaceVariant.copy({ alpha: 0.62 }) },
+          contentPadding: { horizontal: 12, vertical: 10 } } })) : ctx.UI.Spacer({ height: 0 })));
   if (state.error !== "") rows.push(ctx.UI.Text({ key: "sidebar-error", text: state.error, fontSize: 11, color: colors.error, paddingHorizontal: 20, paddingVertical: 6 }));
-  let lazyItems: ReturnType<typeof nativeSidebarLazyItems> | null = null;
   if (data !== null) {
     const actions = { activate, toggleSection, toggleGroup, menu, longPress,
       rename: renameChat, confirmSwipeDelete, drop };
-    // Cached row callbacks read this stable table, whose methods belong to the latest render.
+    // Retained row callbacks read the actions from the latest render.
     const layoutActions = ctx.useRef("native-sidebar-layout-actions", actions);
     Object.assign(layoutActions.current, actions);
-    lazyItems = nativeSidebarLazyItems(ctx, current.current, { data, query: state.query,
+    rows.push(...nativeSidebarRows(ctx, current.current, { data, query: state.query,
       collapsed: state.collapsed, expandedGroups: state.expandedGroups, busy: state.busy },
-      layoutActions.current, state.defaultAvatar);
+      layoutActions.current, state.defaultAvatar));
   }
   else if (state.loading) rows.push(ctx.UI.Box({ fillMaxWidth: true, height: 80, contentAlignment: "center" },
     ctx.UI.LoadingIndicator({ size: 24 })));
-  const staticItemCount = rows.length;
-  const content: ComposeNode[] = lazyItems === null ? [...rows] : [...rows, ...lazyItems.content];
+  const content: ComposeNode[] = [...rows];
   if (state.dialog !== null) {
     const staged = state.dialog, body: ComposeNode[] = [ctx.UI.Text({ text: { create: "新建分组", rename: "重命名分组", delete: "删除分组及其对话", renameUngrouped: "重命名分组", deleteUngrouped: "删除分组及其对话", renameChat: "编辑对话名称", deleteChat: "删除对话", chatActions: "聊天记录" }[staged.kind], fontSize: 16, fontWeight: "600" })];
     if (staged.kind === "create" || staged.kind === "rename" || staged.kind === "renameUngrouped" || staged.kind === "renameChat") body.push(ctx.UI.TextField({ key: "sidebar-group-name", value: staged.name, label: staged.kind === "renameChat" ? "对话名称" : "分组名称", onValueChange: name => update({ dialog: { ...staged, name } }), enabled: !state.busy }));
@@ -353,12 +368,13 @@ export function renderSidebarScreen(ctx: ComposeDslContext): ComposeNode {
     if (staged.kind === "chatActions") {
       const chat = chatFor(staged.id), ids = orderNeighbours(staged.id), index = ids.indexOf(staged.id);
       body.push(ctx.UI.Text({ text: chat.title, fillMaxWidth: true, maxLines: 2, style: "titleMedium", color: colors.onSurfaceVariant }));
-      const tile = (label: string, icon: string, callback: () => void | Promise<void>, enabled = true, danger = false): ComposeNode =>
+      const tile = (label: string, icon: string, callback: () => void, enabled = true, danger = false): ComposeNode =>
         ctx.UI.Surface({ fillMaxWidth: true, onClick: enabled ? callback : undefined, shape: { cornerRadius: 12 }, color: colors.surface },
           ctx.UI.Row({ fillMaxWidth: true, paddingHorizontal: 16, paddingVertical: 10, verticalAlignment: "center", spacing: 12 }, [
             ctx.UI.Icon({ name: icon, size: 20, tint: danger ? colors.error : colors.onSurfaceVariant }),
             ctx.UI.Text({ text: label, weight: 1, fontSize: 14, color: danger ? colors.error : colors.onSurface }),
           ]));
+      if (capabilities?.openInWindow === true) body.push(tile("在新窗口打开", "OpenInNew", () => openInWindow(chat.id)));
       body.push(tile("编辑名称", "Edit", () => renameChat(chat.id)),
         tile("上移", "KeyboardArrowUp", () => moveRelative(chat.id, -1), index > 0),
         tile("下移", "KeyboardArrowDown", () => moveRelative(chat.id, 1), index >= 0 && index < ids.length - 1),
@@ -376,10 +392,6 @@ export function renderSidebarScreen(ctx: ComposeDslContext): ComposeNode {
   // background so the initial lifecycle command does not wait on catalog IPC;
   // an authoritative response still replaces the projection when it arrives.
   const onLoad = prepared === null ? refresh : () => { void Promise.resolve().then(refresh).catch(() => {}); };
-  if (lazyItems !== null) {
-    const viewport = { ...lazyItems.viewport, staticItemCount };
-    return ctx.UI.LazyColumn({ key: "native-character-sidebar", fillMaxWidth: true, paddingBottom: 16, spacing: 0,
-      viewport, onLoad, onInputsChanged: refreshInputs }, content);
-  }
-  return ctx.UI.LazyColumn({ key: "native-character-sidebar", fillMaxWidth: true, paddingBottom: 16, spacing: 0, onLoad, onInputsChanged: refreshInputs }, content);
+  return ctx.UI.Column({ key: "native-character-sidebar", fillMaxWidth: true, paddingBottom: 16, spacing: 0,
+    onLoad, onInputsChanged: refreshInputs }, content);
 }

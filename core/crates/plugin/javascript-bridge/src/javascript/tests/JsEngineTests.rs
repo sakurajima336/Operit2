@@ -1780,11 +1780,13 @@ async fn call_environment_updates_survive_state_turns() {
     engine.destroy();
 }
 
-/// Abandoning an async request must cancel its session on the owning affine thread.
+/// Abandoning a host wait must run JavaScript cleanup before the affine cancellation step finishes.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn abandoned_async_request_cancels_affine_session() {
-    let engine = newTestJsEngine(Arc::new(TestPluginConfigExecutionHost::default()));
+    let host = Arc::new(TestPluginConfigExecutionHost::default());
+    let toolHost = host.clone();
+    let engine = newTestJsEngine(host.clone());
     let caller = engine.clone();
     let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let signal = started.clone();
@@ -1800,9 +1802,15 @@ fn abandoned_async_request_cancels_affine_session() {
         let task = tokio::task::spawn_local(async move {
             caller
                 .execute_script_function_async(
-                    r#"exports.wait = async function() {
-                    __operitSendIntermediateResult(globalThis.__operitCurrentCallId, 'started');
-                    return await new Promise(function() {});
+                    r#"/** Releases shared state when the owning host wait is cancelled. */
+                    exports.wait = async function() {
+                    globalThis.cancelledCleanupCount = 0;
+                    try {
+                        __operitSendIntermediateResult(globalThis.__operitCurrentCallId, 'started');
+                        return await toolCall('gate', {});
+                    } finally {
+                        globalThis.cancelledCleanupCount++;
+                    }
                 };"#
                     .to_string(),
                     "wait".to_string(),
@@ -1823,6 +1831,9 @@ fn abandoned_async_request_cancels_affine_session() {
             started.load(Ordering::Acquire),
             "aborted request must have started"
         );
+        tokio::time::timeout(Duration::from_secs(1), toolHost.gatedToolStarted.notified())
+            .await
+            .expect("host wait must have started before cancellation");
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
     });
@@ -1836,16 +1847,23 @@ fn abandoned_async_request_cancels_affine_session() {
                 1_000,
                 Box::new(|state, _| {
                     let state = state.downcast_mut::<JsEngineState>().unwrap();
-                    Ok(Box::new(state.pendingScriptExecutions.len()))
+                    let cleanup = state.runtime.evaluateHostJavaScriptString(
+                        "cancellation-cleanup",
+                        "String(globalThis.cancelledCleanupCount)",
+                    )?;
+                    Ok(Box::new((state.pendingScriptExecutions.len(), cleanup)))
                 }),
             )
             .unwrap();
-        if *output.downcast::<usize>().unwrap() == 0 {
+        let (pending, cleanup) = *output.downcast::<(usize, String)>().unwrap();
+        if pending == 0 {
+            assert_eq!(cleanup, "1", "cancelled host wait must run its finally block");
             break;
         }
         assert!(Instant::now() < deadline, "abandoned affine session leaked");
         std::thread::sleep(Duration::from_millis(1));
     }
+    finishGatedTool(&host);
     engine.destroy();
 }
 
@@ -3944,6 +3962,136 @@ async fn shared_initialization_promise_preserves_each_waiting_call_context() {
     assert_eq!(expect_js_output(first.await.unwrap(), "shared initialization owner"), "\"initializer\"");
     assert_eq!(expect_js_output(second.await.unwrap(), "shared initialization consumer"), "\"consumer\"");
     assert_eq!(executionSessionCounts(&engine).await, (0, 0));
+    engine.destroy();
+}
+
+/// A completed asynchronous call must not resurrect its cleaned id for a suspended caller.
+///
+/// The reported failure was a memory query that resumed after an unrelated async hook had
+/// finished: the hook's completion restored the suspended call's id, then the continuation
+/// wrapper wrote the hook's now-deleted id back over it.
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test(flavor = "current_thread")]
+async fn completed_async_call_keeps_a_suspended_call_context_alive() {
+    let engine = newTestJsEngine(Arc::new(TestPluginConfigExecutionHost::default()));
+    let awaiter_engine = engine.clone();
+    let awaiter = tokio::spawn(async move {
+        awaiter_engine
+            .execute_script_function(
+                r#"exports.awaiter = async function() {
+                    await new Promise(function(resolve) { setTimeout(resolve, 100); });
+                    var callId = String(globalThis.__operitCurrentCallId || '');
+                    return JSON.stringify({
+                        callId: callId,
+                        callStateAvailable: !!(callId && globalThis.__operitGetCallState(callId))
+                    });
+                };"#,
+                "awaiter",
+                &testParams(),
+                &BTreeMap::new(),
+                None,
+                true,
+                2,
+                None,
+            )
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    engine
+        .execute_script_function(
+            r#"exports.hook = async function() { return 'hook'; };"#,
+            "hook",
+            &testParams(),
+            &BTreeMap::new(),
+            None,
+            true,
+            2,
+            None,
+        )
+        .await
+        .expect("independent async call must complete");
+    let output = awaiter.await.expect("awaiter task must not panic");
+    let encoded = expect_js_output(output, "suspended call context");
+    let json = serde_json::from_str::<String>(&encoded).expect("suspended call context string");
+    let report: Value =
+        serde_json::from_str(&json).expect("suspended call context must be JSON");
+    assert_eq!(
+        report["callStateAvailable"], true,
+        "suspended call must keep a live call state: {report}"
+    );
+    engine.destroy();
+}
+
+/// A hook that finishes while another call is suspended must hand the execution id back
+/// to the suspended call instead of clearing it.
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test(flavor = "current_thread")]
+async fn completed_hook_restores_a_concurrently_suspended_call() {
+    let engine = newTestJsEngine(Arc::new(TestPluginConfigExecutionHost::default()));
+    let (started_sender, mut started) = tokio::sync::mpsc::unbounded_channel();
+    let hook_engine = engine.clone();
+    let hook = tokio::spawn(async move {
+        hook_engine
+            .execute_script_function(
+                r#"exports.hook = async function() {
+                    sendIntermediateResult('hook-started');
+                    await new Promise(function(resolve) { setTimeout(resolve, 25); });
+                    return 'hook';
+                };"#,
+                "hook",
+                &testParams(),
+                &BTreeMap::new(),
+                Some(Arc::new(move |value| { started_sender.send(value).unwrap(); })),
+                true,
+                2,
+                None,
+            )
+            .await
+    });
+    started.recv().await.expect("hook must start before the probe");
+    let probe_engine = engine.clone();
+    let probe = tokio::spawn(async move {
+        probe_engine
+            .execute_script_function(
+                r#"exports.probe = async function() {
+                    var owner = String(globalThis.__operitCurrentCallId || '');
+                    await new Promise(function(resolve) { setTimeout(resolve, 100); });
+                    var current = String(globalThis.__operitCurrentCallId || '');
+                    return JSON.stringify({
+                        owner: owner,
+                        current: current,
+                        sameOwner: current === owner,
+                        callStateAvailable: !!(current && globalThis.__operitGetCallState(current))
+                    });
+                };"#,
+                "probe",
+                &testParams(),
+                &BTreeMap::new(),
+                None,
+                true,
+                2,
+                None,
+            )
+            .await
+    });
+    expect_js_output(
+        hook.await.expect("hook task must not panic"),
+        "hook completion",
+    );
+    let encoded = expect_js_output(
+        probe.await.expect("probe task must not panic"),
+        "suspended call after hook completion",
+    );
+    let json = serde_json::from_str::<String>(&encoded).expect("probe report string");
+    let report: Value = serde_json::from_str(&json).expect("probe report JSON");
+    assert_eq!(
+        report["callStateAvailable"], true,
+        "suspended call must keep a live state: {report}"
+    );
+    assert_eq!(
+        report["sameOwner"], true,
+        "suspended call must keep its own execution id: {report}"
+    );
     engine.destroy();
 }
 

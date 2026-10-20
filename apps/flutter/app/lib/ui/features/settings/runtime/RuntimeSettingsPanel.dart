@@ -346,8 +346,7 @@ class _RuntimeSettingsPanelState extends State<RuntimeSettingsPanel>
           onPressed: _busy ? null : () => _showJoinProgress(request),
           child: Text(l10n.deviceSpaceViewRequest),
         ),
-      if (device.outbound &&
-          !pendingJoin &&
+      if (!pendingJoin &&
           !member &&
           probeState == _PairedRemoteProbeState.online)
         MenuItemButton(
@@ -994,9 +993,6 @@ class _RuntimeSettingsPanelState extends State<RuntimeSettingsPanel>
   Future<void> _offerJoiningExistingPairedDeviceSpace(
     generated.RuntimePairedDevice device,
   ) async {
-    if (!device.outbound) {
-      throw StateError('joining a device space requires an outbound pairing');
-    }
     final deviceInfo = device.deviceInfo;
     setState(() => _busy = true);
     try {

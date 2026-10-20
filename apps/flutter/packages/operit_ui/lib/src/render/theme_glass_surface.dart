@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 enum ThemeGlassSurfaceLayer { panel, card, control }
 
 class ThemeGlassSurface extends StatelessWidget {
+  /// Creates the original frosted material for general theme surfaces.
   const ThemeGlassSurface({
     super.key,
     required this.child,
@@ -34,6 +35,7 @@ class ThemeGlassSurface extends StatelessWidget {
   final bool enableBackdropFilter;
   final bool clip;
 
+  /// Builds the configured opaque or frosted surface.
   @override
   Widget build(BuildContext context) {
     final content = material
@@ -82,6 +84,7 @@ class ThemeGlassSurface extends StatelessWidget {
     );
   }
 
+  /// Applies the requested corner clipping to the decorated content.
   Widget _clipIfNeeded(Widget child) {
     if (!clip) {
       return child;
@@ -89,6 +92,7 @@ class ThemeGlassSurface extends StatelessWidget {
     return ClipRRect(borderRadius: borderRadius, child: child);
   }
 
+  /// Bounds the blur region even when rounded content clipping is disabled.
   Widget _clipBackdrop(Widget child) {
     if (!clip) {
       return ClipRect(child: child);
@@ -98,12 +102,14 @@ class ThemeGlassSurface extends StatelessWidget {
 }
 
 class _ThemeGlassSurfaceStyle {
+  /// Stores the original blur radius and tint strength for each surface layer.
   const _ThemeGlassSurfaceStyle({required this.blur, required this.alpha});
 
   final double blur;
   final double alpha;
 }
 
+/// Returns the established frosted styling for a theme surface layer.
 _ThemeGlassSurfaceStyle _styleForLayer(ThemeGlassSurfaceLayer layer) {
   return switch (layer) {
     ThemeGlassSurfaceLayer.panel => const _ThemeGlassSurfaceStyle(

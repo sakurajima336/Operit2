@@ -36,6 +36,15 @@ pub const VERBOSE_LEVEL_6: i32 = 6;
 
 const TOOLPKG_LOG_TAG: &str = "ToolPkg";
 
+/// Size cap for one log file; crossing it evicts the oldest records.
+const LOG_FILE_MAX_BYTES: i64 = 4 * 1024 * 1024;
+/// Newest bytes kept after one log file eviction pass.
+const LOG_FILE_KEEP_BYTES: i64 = 2 * 1024 * 1024;
+/// Cap for the in-memory entry history.
+const MAX_MEMORY_ENTRIES: usize = 4096;
+/// Entries kept after one in-memory eviction pass.
+const KEEP_MEMORY_ENTRIES: usize = 2048;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// One in-memory and file-backed application log entry.
 pub struct LogEntry {
@@ -91,6 +100,7 @@ impl Drop for LogFileWriteBatch {
         });
         for write in writes {
             let _ = write.host.writeFile(&write.path, &write.content, true);
+            evict_log_file_oldest(&write.host, &write.path);
         }
     }
 }
@@ -429,8 +439,10 @@ fn write_entry(
         log_file,
         package_log_file,
     ) = {
-        let mut guard = state().lock().expect("AppLogger mutex poisoned");
-        if guard.retain_entries { guard.entries.push(entry.clone()); }
+            let mut guard = state().lock().expect("AppLogger mutex poisoned");
+        if guard.retain_entries {
+            push_entry_capped(&mut guard.entries, entry.clone());
+        }
         (
             guard.enable_file_logging,
             guard.enable_console_logging,
@@ -493,6 +505,55 @@ fn append_line(file_system_host: &Arc<dyn FileSystemHost>, path: &str, line: &st
     });
     if !batched {
         let _ = file_system_host.writeFile(path, line, true);
+        evict_log_file_oldest(file_system_host, path);
+    }
+}
+
+/// Appends one entry, evicting the oldest records once the history exceeds its cap.
+fn push_entry_capped(entries: &mut Vec<LogEntry>, entry: LogEntry) {
+    entries.push(entry);
+    let overflow = entries.len().saturating_sub(MAX_MEMORY_ENTRIES);
+    if overflow > 0 {
+        entries.drain(0..entries.len() - KEEP_MEMORY_ENTRIES);
+    }
+}
+
+/// Drops the oldest records of one log file once it exceeds the size cap.
+/// Best effort and silent: failures must never recurse back into logging.
+fn evict_log_file_oldest(file_system_host: &Arc<dyn FileSystemHost>, path: &str) {
+    let Ok(metadata) = file_system_host.fileExists(path) else {
+        return;
+    };
+    if !metadata.exists || metadata.isDirectory || metadata.size <= LOG_FILE_MAX_BYTES {
+        return;
+    }
+    let Ok(content) = file_system_host.readFile(path) else {
+        return;
+    };
+    let Some(kept) = newest_log_records(&content, LOG_FILE_KEEP_BYTES as usize) else {
+        return;
+    };
+    let mut trimmed = format!(
+        "{} I/AppLogger: log file exceeded the size limit; oldest records evicted\n",
+        format_timestamp_ms(operit_host_api::TimeUtils::currentTimeMillisU128())
+    );
+    trimmed.push_str(&kept);
+    let _ = file_system_host.writeFile(path, &trimmed, false);
+}
+
+/// Returns the newest records of one log text, keeping at most `keep_bytes`
+/// bytes and starting at a record boundary; `None` when nothing can be kept.
+fn newest_log_records(content: &str, keep_bytes: usize) -> Option<String> {
+    if content.len() <= keep_bytes {
+        return Some(content.to_string());
+    }
+    let mut cut = content.len() - keep_bytes;
+    while cut < content.len() && !content.is_char_boundary(cut) {
+        cut += 1;
+    }
+    match content[cut..].find('\n') {
+        Some(offset) => Some(content[cut + offset + 1..].to_string()),
+        None => None,
     }
 }
 
@@ -518,6 +579,9 @@ fn ensure_log_file(file_system_host: &Arc<dyn FileSystemHost>, path: &str) -> Re
         file_system_host
             .writeFile(path, "", false)
             .map_err(|error| format!("Cannot create log file '{path}': {}", error.message))?;
+    } else if !metadata.isDirectory {
+        // Trims oversized logs left behind by previous runs at bind time.
+        evict_log_file_oldest(file_system_host, path);
     }
     Ok(())
 }

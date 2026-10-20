@@ -366,7 +366,6 @@ impl GithubReleaseUtil {
 
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let targetAssetName = target.assetName()?;
             let url = format!(
                 "{GITHUB_API_BASE}/repos/{repoOwner}/{repoName}/releases?page=1&per_page=30"
             );
@@ -394,7 +393,7 @@ impl GithubReleaseUtil {
             let releases = response
                 .json::<Vec<GitHubRelease>>()
                 .map_err(|error| error.to_string())?;
-            selectLatestReleaseInfo(releases, &targetAssetName, channel)
+            selectLatestReleaseInfo(releases, &target, channel)
         }
     }
 
@@ -461,19 +460,31 @@ impl FullUpdateTarget {
         Self::new("app", platform, arch)
     }
 
-    /// Builds the expected release asset name for this target.
+    /// Builds the release asset name for the installed package version.
     pub fn assetName(&self) -> Result<String, String> {
+        self.assetNameForVersion(env!("CARGO_PKG_VERSION"))
+    }
+
+    /// Builds the exact release filename from its full semantic version.
+    pub fn assetNameForVersion(&self, releaseVersion: &str) -> Result<String, String> {
         validateTarget(&self.product, &self.platform, &self.arch)?;
+        parseVersion(releaseVersion)?;
+        let arch = match (self.product.as_str(), self.platform.as_str()) {
+            ("app", "macos") => "universal",
+            _ => self.arch.as_str(),
+        };
         Ok(format!(
-            "operit2-{}-{}-{}.{}",
+            "operit2-{}-{}-{}-{}.{}",
             self.product,
             self.platform,
-            self.arch,
+            arch,
+            releaseVersion.trim().trim_start_matches('v'),
             packageExtension(&self.product, &self.platform)?
         ))
     }
 }
 
+/// Validates supported product, platform, and architecture tuples.
 #[allow(non_snake_case)]
 fn validateTarget(product: &str, platform: &str, arch: &str) -> Result<(), String> {
     match product {
@@ -481,13 +492,18 @@ fn validateTarget(product: &str, platform: &str, arch: &str) -> Result<(), Strin
         _ => return Err(format!("Unsupported update product: {product}")),
     }
     match platform {
-        "windows" | "linux" | "macos" | "android" => {}
+        "windows" | "linux" | "macos" | "android" | "ios" | "ohos" => {}
         _ => return Err(format!("Unsupported update platform: {platform}")),
     }
-    if product == "cli" && platform == "android" {
-        return Err("Operit2 CLI update assets are not published for Android".to_string());
+    if product == "cli" && matches!(platform, "android" | "ios" | "ohos") {
+        return Err(format!("Operit2 CLI update assets are not published for {platform}"));
     }
     match platform {
+        "ios" | "ohos" => match arch {
+            "arm64" => Ok(()),
+            _ => Err(format!("Unsupported {platform} update arch: {arch}")),
+        },
+        "macos" if product == "app" && arch == "universal" => Ok(()),
         "android" => match arch {
             "arm64-v8a" | "armeabi-v7a" | "x86_64" => Ok(()),
             _ => Err(format!("Unsupported Android update arch: {arch}")),
@@ -500,12 +516,14 @@ fn validateTarget(product: &str, platform: &str, arch: &str) -> Result<(), Strin
     }
 }
 
+/// Returns the extension used by the platform packaging entry point.
 #[allow(non_snake_case)]
 fn packageExtension(product: &str, platform: &str) -> Result<&'static str, String> {
     match (product, platform) {
         ("app", "android") => Ok("apk"),
-        ("app", "windows") | ("cli", "windows") => Ok("zip"),
-        ("app", "linux") | ("app", "macos") | ("cli", "linux") | ("cli", "macos") => Ok("tar.gz"),
+        ("app", "ohos") => Ok("hap"),
+        ("app", "windows" | "macos" | "ios") | ("cli", "windows") => Ok("zip"),
+        ("app", "linux") | ("cli", "linux" | "macos") => Ok("tar.gz"),
         _ => Err(format!("Unsupported update target: {product}/{platform}")),
     }
 }
@@ -750,10 +768,11 @@ fn validateReleaseChannelMarker(
     Ok(())
 }
 
+/// Selects the newest release containing the exact target asset.
 #[allow(non_snake_case)]
 fn selectLatestReleaseInfo(
     releases: Vec<GitHubRelease>,
-    targetAssetName: &str,
+    target: &FullUpdateTarget,
     channel: FullUpdateChannel,
 ) -> Result<Option<ReleaseInfo>, String> {
     let mut selected: Option<(ParsedVersion, GitHubRelease, GitHubReleaseAsset)> = None;
@@ -761,10 +780,11 @@ fn selectLatestReleaseInfo(
         if release.draft {
             continue;
         }
+        let expectedAssetName = target.assetNameForVersion(&release.tag_name)?;
         let Some(packageAsset) = release
             .assets
             .iter()
-            .find(|asset| asset.name == targetAssetName)
+            .find(|asset| asset.name == expectedAssetName)
             .cloned()
         else {
             continue;
@@ -1054,33 +1074,35 @@ mod tests {
         GitHubReleaseAsset, GithubReleaseUtil,
     };
 
+    /// Builds installed-version CLI names for the supported desktop targets.
     #[test]
     fn builds_cli_asset_names_from_release_spec() {
         let windows = FullUpdateTarget::new("cli", "windows", "x86_64").unwrap();
         assert_eq!(
             windows.assetName().unwrap(),
-            "operit2-cli-windows-x86_64.zip"
+            format!("operit2-cli-windows-x86_64-{}.zip", env!("CARGO_PKG_VERSION"))
         );
 
         let linux = FullUpdateTarget::new("cli", "linux", "aarch64").unwrap();
         assert_eq!(
             linux.assetName().unwrap(),
-            "operit2-cli-linux-aarch64.tar.gz"
+            format!("operit2-cli-linux-aarch64-{}.tar.gz", env!("CARGO_PKG_VERSION"))
         );
     }
 
+    /// Builds installed-version App names with the packaged platform architecture.
     #[test]
     fn builds_app_asset_names_from_release_spec() {
         let android = FullUpdateTarget::new("app", "android", "arm64-v8a").unwrap();
         assert_eq!(
             android.assetName().unwrap(),
-            "operit2-app-android-arm64-v8a.apk"
+            format!("operit2-app-android-arm64-v8a-{}.apk", env!("CARGO_PKG_VERSION"))
         );
 
         let macos = FullUpdateTarget::new("app", "macos", "x86_64").unwrap();
         assert_eq!(
             macos.assetName().unwrap(),
-            "operit2-app-macos-x86_64.tar.gz"
+            format!("operit2-app-macos-universal-{}.zip", env!("CARGO_PKG_VERSION"))
         );
     }
 
@@ -1090,6 +1112,7 @@ mod tests {
         assert!(FullUpdateTarget::new("app", "windows", "x86").is_err());
     }
 
+    /// Selects a release by its own version and exact product target.
     #[test]
     fn selects_release_by_exact_target_asset() {
         let releases = vec![GitHubRelease {
@@ -1100,16 +1123,16 @@ mod tests {
             draft: false,
             prerelease: true,
             assets: vec![GitHubReleaseAsset {
-                name: "operit2-cli-windows-x86_64.zip".to_string(),
+                name: "operit2-cli-windows-x86_64-2.0.0-preview.1.zip".to_string(),
                 browser_download_url:
-                    "https://github.com/AAswordman/Operit2/releases/download/v2.0.0-preview.1/operit2-cli-windows-x86_64.zip"
+                    "https://github.com/AAswordman/Operit2/releases/download/v2.0.0-preview.1/operit2-cli-windows-x86_64-2.0.0-preview.1.zip"
                         .to_string(),
             }],
         }];
 
         let cli = selectLatestReleaseInfo(
             releases.clone(),
-            "operit2-cli-windows-x86_64.zip",
+            &FullUpdateTarget::new("cli", "windows", "x86_64").unwrap(),
             FullUpdateChannel::Preview,
         )
         .unwrap();
@@ -1117,11 +1140,100 @@ mod tests {
 
         let app = selectLatestReleaseInfo(
             releases,
-            "operit2-app-windows-x86_64.zip",
+            &FullUpdateTarget::new("app", "windows", "x86_64").unwrap(),
             FullUpdateChannel::Preview,
         )
         .unwrap();
         assert!(app.is_none());
+    }
+
+    /// Matches full versions, products, and architectures for every packaged platform.
+    #[test]
+    fn selects_all_platforms_by_exact_versioned_asset() {
+        let targets = [
+            ("app", "windows", "x86_64", "x86_64", "zip"),
+            ("app", "windows", "aarch64", "aarch64", "zip"),
+            ("app", "linux", "x86_64", "x86_64", "tar.gz"),
+            ("app", "linux", "aarch64", "aarch64", "tar.gz"),
+            ("app", "macos", "x86_64", "universal", "zip"),
+            ("app", "macos", "aarch64", "universal", "zip"),
+            ("app", "macos", "universal", "universal", "zip"),
+            ("app", "android", "arm64-v8a", "arm64-v8a", "apk"),
+            ("app", "android", "armeabi-v7a", "armeabi-v7a", "apk"),
+            ("app", "android", "x86_64", "x86_64", "apk"),
+            ("app", "ios", "arm64", "arm64", "zip"),
+            ("app", "ohos", "arm64", "arm64", "hap"),
+            ("cli", "windows", "x86_64", "x86_64", "zip"),
+            ("cli", "windows", "aarch64", "aarch64", "zip"),
+            ("cli", "linux", "x86_64", "x86_64", "tar.gz"),
+            ("cli", "linux", "aarch64", "aarch64", "tar.gz"),
+            ("cli", "macos", "x86_64", "x86_64", "tar.gz"),
+            ("cli", "macos", "aarch64", "aarch64", "tar.gz"),
+        ];
+        for (product, platform, arch, packagedArch, extension) in targets {
+            let target = FullUpdateTarget::new(product, platform, arch).unwrap();
+            for version in ["2.0.0-preview.16", "2.0.0"] {
+                let stem = format!("operit2-{product}-{platform}-{packagedArch}");
+                let expected = format!("{stem}-{version}.{extension}");
+                assert_eq!(target.assetNameForVersion(version).unwrap(), expected);
+                for (name, accepted) in [
+                    (expected.clone(), true),
+                    (format!("{expected}.sig"), false),
+                    (format!("{stem}-1.9.0.{extension}"), false),
+                    (format!("{stem}.{extension}"), false),
+                    (format!("operit2-other-{platform}-{packagedArch}-{version}.{extension}"), false),
+                ] {
+                    let release = GitHubRelease {
+                        tag_name: format!("v{version}"),
+                        body: None,
+                        html_url: "https://example.com/release".to_string(),
+                        draft: false,
+                        prerelease: version == "2.0.0-preview.16",
+                        assets: vec![GitHubReleaseAsset {
+                            name,
+                            browser_download_url: "https://example.com/update".to_string(),
+                        }],
+                    };
+                    let selected = selectLatestReleaseInfo(
+                        vec![release], &target, FullUpdateChannel::Preview,
+                    ).unwrap();
+                    assert_eq!(selected.is_some(), accepted, "{expected}");
+                    if let Some(info) = selected {
+                        assert_eq!(info.assetName, expected);
+                        assert_eq!(info.version, version);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Orders matching packages by release SemVer rather than lexical filenames.
+    #[test]
+    fn selects_newest_versioned_package_for_channel() {
+        let target = FullUpdateTarget::new("cli", "linux", "aarch64").unwrap();
+        let releases = ["2.0.0-preview.9", "2.0.0-preview.16", "2.0.0"]
+            .into_iter()
+            .map(|version| GitHubRelease {
+                tag_name: format!("v{version}"),
+                body: None,
+                html_url: "https://example.com/release".to_string(),
+                draft: false,
+                prerelease: version != "2.0.0",
+                assets: vec![GitHubReleaseAsset {
+                    name: target.assetNameForVersion(version).unwrap(),
+                    browser_download_url: "https://example.com/update".to_string(),
+                }],
+            })
+            .collect::<Vec<_>>();
+        for channel in [FullUpdateChannel::Preview, FullUpdateChannel::Stable] {
+            let selected = selectLatestReleaseInfo(releases.clone(), &target, channel)
+                .unwrap().unwrap();
+            assert_eq!(selected.version, "2.0.0");
+        }
+        let selected = selectLatestReleaseInfo(
+            releases[..2].to_vec(), &target, FullUpdateChannel::Preview,
+        ).unwrap().unwrap();
+        assert_eq!(selected.version, "2.0.0-preview.16");
     }
 
     #[test]

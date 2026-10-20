@@ -1354,6 +1354,14 @@
   "settingsAppearanceBubbleImageAdjustAi": "调整 AI 气泡图片",
   "settingsAppearanceBubbleImagePreview": "预览",
   "settingsAppearanceBubbleImagePreviewText": "这是一条气泡预览，切线展示九宫格区域",
+  "settingsAppearanceBubbleImageImportFailed": "气泡图片没有生效：{error}",
+  "@settingsAppearanceBubbleImageImportFailed": {
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
   "settingsAppearanceBubbleImageCrop": "裁切",
   "settingsAppearanceBubbleImageRepeat": "重复区域",
   "settingsAppearanceBubbleImageScale": "图片缩放",
@@ -1813,6 +1821,7 @@
   "pluginLoadingFailed": "加载失败",
   "pluginLoadingWaiting": "等待中",
   "pluginLoadingKindPackage": "包",
+  "pluginLoadingKindPlugin": "插件",
   "pluginLoadingKindMcp": "MCP",
   "pluginLoadingCompleteSuccess": "包和插件已全部加载",
   "pluginLoadingCompleteWithFailures": "部分包或插件加载失败",
@@ -1822,6 +1831,9 @@
   "chatRouteRemoteOffline": "远程{platform} 离线",
   "chatRouteLoading": "正在读取运行设备",
   "chatRouteUnknown": "运行设备状态未知",
+  "chatRouteClaimHostPrompt": "当前设备宿主未找到，是否切换为当前设备？",
+  "chatRouteClaimHostYes": "是",
+  "chatRouteClaimHostNo": "否",
   "@chatRouteRemote": {
     "placeholders": {
       "platform": {
@@ -2186,5 +2198,22 @@
   "settingsAppearanceLoadFailed": "无法加载外观设置",
   "settingsAppearanceRepairHint": "已保存的外观没有被替换。修复资源后可以重试，也可以主动重置外观。重置会保留头像和已保存的配置，并切换到自定义外观。",
   "settingsAppearanceRetry": "重试",
-  "settingsAppearanceResetAfterError": "重置外观"
+  "settingsAppearanceResetAfterError": "重置外观",
+  "backgroundWorkIdle": "当前没有正在运行的工作",
+  "backgroundWorkRunningCount": "项工作正在运行",
+  "backgroundWorkWaiting": "等待你确认",
+  "backgroundWorkWaitingCount": "项待确认",
+  "backgroundWorkCompleted": "已完成",
+  "backgroundWorkFailed": "执行失败，打开查看详情",
+  "backgroundWorkCancelled": "已停止",
+  "backgroundWorkProcessing": "正在准备",
+  "backgroundWorkConnecting": "正在连接",
+  "backgroundWorkReceiving": "正在生成回复",
+  "backgroundWorkTool": "正在执行工具",
+  "backgroundWorkToolResult": "正在处理工具结果",
+  "backgroundWorkSummarizing": "正在整理上下文",
+  "backgroundWorkPlan": "正在执行计划",
+  "backgroundWorkOpen": "查看会话",
+  "backgroundWorkReview": "查看并确认",
+  "backgroundWorkStop": "停止"
 }

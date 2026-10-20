@@ -16,6 +16,7 @@ from pathlib import Path
 
 from common import (
     DIST_DIR,
+    release_asset_name,
     FLUTTER_APP_DIR,
     REPO_ROOT,
     copy_required_file,
@@ -81,7 +82,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output",
         type=Path,
-        default=DIST_DIR / "operit2-app-ohos-arm64.hap",
+        default=DIST_DIR / release_asset_name("app", "ohos", "arm64", "hap"),
     )
     parser.add_argument("--build-name")
     parser.add_argument("--build-number")

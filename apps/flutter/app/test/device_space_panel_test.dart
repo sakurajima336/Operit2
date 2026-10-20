@@ -493,6 +493,48 @@ void main() {
     },
   );
 
+  testWidgets(
+    'an inbound-only paired device outside the Space still offers joining',
+    (tester) async {
+      // The pairing direction is transport history: this device answered the
+      // pairing, so only the inbound credential exists, and the join entry
+      // must not depend on holding the outbound side.
+      final bridge =
+          DeviceSpacePanelBridge(
+              topology: _topology(
+                selfCapabilities: _administratorCapabilities,
+                selfIdentityName: 'Administrator',
+              ),
+              control: _control(),
+            )
+            ..paired = <Map<String, Object?>>[
+              <String, Object?>{
+                'deviceId': 'stranger',
+                'deviceInfo': <String, Object?>{
+                  'platform': 'android',
+                  'model': 'stranger',
+                },
+                'inbound': true,
+                'outbound': false,
+              },
+            ]
+            ..statuses = <String, String>{'stranger': 'Online'};
+      await mountPanel(tester, bridge);
+      expect(find.text('android-stranger'), findsOneWidget);
+      expect(find.textContaining('已配对'), findsWidgets);
+      final menus = find.byIcon(Icons.more_vert_outlined);
+      await tester.tap(menus.first);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(find.widgetWithText(MenuItemButton, '加入设备空间'), findsOneWidget);
+      expect(find.widgetWithText(MenuItemButton, '解除配对'), findsOneWidget);
+      expect(find.widgetWithText(MenuItemButton, '断开设备'), findsNothing);
+      expect(find.widgetWithText(MenuItemButton, '移除设备'), findsNothing);
+      expect(tester.takeException(), isNull);
+      await unmount(tester, bridge);
+    },
+  );
+
   testWidgets('the identity panel never repeats the device list', (
     tester,
   ) async {

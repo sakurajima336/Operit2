@@ -2751,6 +2751,11 @@ class AppLocalizationsZh extends AppLocalizations {
   String get settingsAppearanceBubbleImagePreviewText => '这是一条气泡预览，切线展示九宫格区域';
 
   @override
+  String settingsAppearanceBubbleImageImportFailed(String error) {
+    return '气泡图片没有生效：$error';
+  }
+
+  @override
   String get settingsAppearanceBubbleImageCrop => '裁切';
 
   @override
@@ -3527,6 +3532,9 @@ class AppLocalizationsZh extends AppLocalizations {
   String get pluginLoadingKindPackage => '包';
 
   @override
+  String get pluginLoadingKindPlugin => '插件';
+
+  @override
   String get pluginLoadingKindMcp => 'MCP';
 
   @override
@@ -3556,6 +3564,15 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get chatRouteUnknown => '运行设备状态未知';
+
+  @override
+  String get chatRouteClaimHostPrompt => '当前设备宿主未找到，是否切换为当前设备？';
+
+  @override
+  String get chatRouteClaimHostYes => '是';
+
+  @override
+  String get chatRouteClaimHostNo => '否';
 
   @override
   String edgePairingCodeTitle(String deviceName) {
@@ -4007,4 +4024,55 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get settingsAppearanceResetAfterError => '重置外观';
+
+  @override
+  String get backgroundWorkIdle => '当前没有正在运行的工作';
+
+  @override
+  String get backgroundWorkRunningCount => '项工作正在运行';
+
+  @override
+  String get backgroundWorkWaiting => '等待你确认';
+
+  @override
+  String get backgroundWorkWaitingCount => '项待确认';
+
+  @override
+  String get backgroundWorkCompleted => '已完成';
+
+  @override
+  String get backgroundWorkFailed => '执行失败，打开查看详情';
+
+  @override
+  String get backgroundWorkCancelled => '已停止';
+
+  @override
+  String get backgroundWorkProcessing => '正在准备';
+
+  @override
+  String get backgroundWorkConnecting => '正在连接';
+
+  @override
+  String get backgroundWorkReceiving => '正在生成回复';
+
+  @override
+  String get backgroundWorkTool => '正在执行工具';
+
+  @override
+  String get backgroundWorkToolResult => '正在处理工具结果';
+
+  @override
+  String get backgroundWorkSummarizing => '正在整理上下文';
+
+  @override
+  String get backgroundWorkPlan => '正在执行计划';
+
+  @override
+  String get backgroundWorkOpen => '查看会话';
+
+  @override
+  String get backgroundWorkReview => '查看并确认';
+
+  @override
+  String get backgroundWorkStop => '停止';
 }

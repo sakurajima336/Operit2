@@ -156,6 +156,7 @@ def check_common_tools(products: str) -> list[CheckResult]:
         check_command("dart", ["--version"]),
         check_command("node", ["--version"]),
         check_command("npm", ["--version"]),
+        check_command("corepack", ["--version"]),
         check_file("Flutter FVM pin", FLUTTER_APP_DIR / ".fvmrc"),
         check_file("Flutter pubspec lock", FLUTTER_APP_DIR / "pubspec.lock"),
     ]
@@ -195,6 +196,7 @@ def check_native_app_tools(include_ios: bool) -> list[CheckResult]:
                 check_command("pkg-config", ["--version"]),
                 check_command("clang", ["--version"]),
                 check_pkg_config_package("gtk+-3.0"),
+                check_pkg_config_package("ayatana-appindicator3-0.1"),
                 check_pkg_config_package("gstreamer-1.0"),
                 check_pkg_config_package("gstreamer-app-1.0"),
                 check_pkg_config_package("gstreamer-audio-1.0"),

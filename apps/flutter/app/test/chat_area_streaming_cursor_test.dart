@@ -27,8 +27,59 @@ import 'package:operit2/ui/features/chat/components/style/cursor/CursorStyleChat
 import 'package:operit2/ui/features/chat/viewmodel/ChatViewModel.dart';
 import 'package:operit2/ui/theme/OperitTheme.dart';
 
+/// Counts how many positions the owner controller holds at once.
+class _PositionPeakController extends ScrollController {
+  var peak = 0;
+
+  /// Records the high-water mark after each viewport registration.
+  @override
+  void attach(ScrollPosition position) {
+    super.attach(position);
+    if (positions.length > peak) {
+      peak = positions.length;
+    }
+  }
+}
+
 /// Verifies transcript rendering and scroll ownership across asynchronous updates.
 void main() {
+  testWidgets(
+    'replacing the chat viewport keeps one origin on the owner controller',
+    (tester) async {
+      final scrollController = _PositionPeakController();
+      final autoScrollToBottom = ValueNotifier<bool>(true);
+      addTearDown(scrollController.dispose);
+      addTearDown(autoScrollToBottom.dispose);
+      final messages = List.generate(4, (index) => _heightTestMessage(index));
+      await tester.pumpWidget(
+        _chatArea(
+          messages: messages,
+          isLoading: false,
+          scrollController: scrollController,
+          autoScrollToBottom: autoScrollToBottom,
+        ),
+      );
+      await tester.pump();
+
+      await tester.pumpWidget(
+        _chatArea(
+          currentChatId: 'chat-next',
+          messages: messages,
+          isLoading: false,
+          scrollController: scrollController,
+          autoScrollToBottom: autoScrollToBottom,
+        ),
+      );
+      await tester.pump();
+
+      expect(tester.takeException(), isNull);
+      expect(scrollController.peak, 1);
+      expect(scrollController.positions, hasLength(1));
+      expect(scrollController.offset, isA<double>());
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
   testWidgets(
     'keeps measured scroll extent stable during a manual upward drag',
     (tester) async {

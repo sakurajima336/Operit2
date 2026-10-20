@@ -2320,6 +2320,8 @@ pub enum ComposeAnimationCurve {
 }
 /// Generic implicit transition options; animation frames are rendered by the host.
 pub struct ComposeBoxAnimation {
+    /// Animates intrinsic child size changes, including inserting or removing content.
+    pub animateContentSize: Option<bool>,
     /// Transition duration in milliseconds; zero applies changes immediately.
     pub durationMillis: Option<u32>,
     /// Easing curve, defaulting to linear.
@@ -2398,6 +2400,25 @@ pub struct MarkdownProps {
     /// Tag used to associate incremental Markdown updates with one stream.
     pub streamTagName: Option<String>,
 }
+/// Optional native input decoration overrides; omitted fields inherit the host theme.
+pub struct ComposeTextFieldDecoration {
+    /// Uses compact vertical layout for the input decoration.
+    pub isDense: Option<bool>,
+    /// Paints the input container with its fill color.
+    pub filled: Option<bool>,
+    /// Background paint inside the input border.
+    pub fillColor: Option<ComposeColor>,
+    /// Rounded outline radius; the resting outline is hidden unless borderColor is supplied.
+    pub cornerRadius: Option<f64>,
+    /// Resting outline color.
+    pub borderColor: Option<ComposeColor>,
+    /// Outline color while the field has focus.
+    pub focusedBorderColor: Option<ComposeColor>,
+    /// Insets around editable input content.
+    pub contentPadding: Option<ComposePadding>,
+    /// Typography and color overrides for the placeholder.
+    pub hintStyle: Option<ComposeTextFieldStyle>,
+}
 /// State, decoration, validation, and typography for an editable text field.
 /// Standard themed input frame for arbitrary plugin-owned content.
 /// Controlled horizontally swipeable pages.
@@ -2424,6 +2445,8 @@ pub struct InputDecoratorProps {
 }
 /// State, decoration, validation, and typography for an editable text field.
 pub struct TextFieldProps {
+    /// Optional native input decoration overrides.
+    pub decoration: Option<ComposeTextFieldDecoration>,
     /// Optional width constraint for suffix icon content.
     pub suffixIconWidth: Option<f64>,
     /// Optional height constraint for suffix icon content.

@@ -1,5 +1,6 @@
 import type { CharacterChanges, CharacterRecord, DomainInput, DomainOperation, DomainOutput, GroupChanges, GroupRecord, MemoryRecord, TagChanges, TagRecord } from "./api";
 import { jsonValue, parseCharacterChanges, parseDomainPayload, parseGroupChanges, parseJsonObject, parseMemoryIdentifier, parseTagChanges, record } from "./domain";
+import { parseImportSource, readImportSource } from "./import-source";
 import { dispatchDomain } from "./service-runtime";
 import { ACTIVE_PROMPT_USAGE, CHARACTER_MEMORY_USAGE, CHARACTER_USAGE, GROUP_USAGE, ITEM_USAGE, LINK_USAGE, MEMORY_USAGE, MOUNT_USAGE, SHARED_MEMORY_USAGE, TAG_USAGE, UNMOUNT_USAGE, USER_USAGE } from "./command-spec";
 import type { CommandFamily } from "./command-spec";
@@ -11,9 +12,14 @@ export interface DomainInvocation {
   payload: DomainInput<DomainOperation>;
   execute: () => Promise<ToolPkg.CoreCommandResult>;
 }
+/** Describes an invocation whose file argument is read only when the command executes. */
+export interface DeferredInvocation {
+  kind: "deferred";
+  execute: () => Promise<ToolPkg.CoreCommandResult>;
+}
 /** Describes explicit help output without touching stored domain data. */
 export interface UsageInvocation { kind: "usage"; usage: readonly string[] }
-export type CommandInvocation = DomainInvocation | UsageInvocation;
+export type CommandInvocation = DomainInvocation | DeferredInvocation | UsageInvocation;
 
 /** Produces host text and structured JSON from the same successful domain result. */
 function result(stdout: string, json: unknown): ToolPkg.CoreCommandResult { return { stdout, json: jsonValue(json) }; }
@@ -78,7 +84,6 @@ function characterField(field: string, raw: string): CharacterChanges {
     case "avatarUri": case "chatProviderId": case "chatModelId": case "ttsConfigId": case "sharedMemoryId": value = optionalIdentifier(raw); break;
     case "attachedTagIds": value = csv(raw); break;
     case "sharedMemoryMounts": case "toolAccessConfig": value = json(raw, field); break;
-    case "isDefault": value = bool(raw, field); break;
     case "createdAt": case "updatedAt": value = integer(raw, field); break;
     default: throw new Error(`unsupported character field: ${field}`);
   }
@@ -546,6 +551,12 @@ function parseLinks(ownerKey: string, args: readonly string[]): CommandInvocatio
     default: throw new Error(`unknown memory link action: ${args[0]}; use memory <owner> link help`);
   }
 }
+/** Builds one validated memory import invocation once its document is available. */
+function memoryImportInvocation(ownerKey: string, strategy: string, content: string): DomainInvocation {
+  const payload = parseDomainPayload("memory.import", { ownerKey, strategy, content });
+  /** Returns the repository's real memory and link import counts. */
+  return invocation("memory.import", payload, value => result(lines([`Imported memory backup for ${ownerKey}`]), value));
+}
 /** Parses an owner subtree after namespace and identifier validation. */
 function parseOwner(ownerKey: string, args: readonly string[], usage: readonly string[]): CommandInvocation {
   parseDomainPayload("memory.graph", { ownerKey });
@@ -565,10 +576,18 @@ function parseOwner(ownerKey: string, args: readonly string[], usage: readonly s
       return invocation("memory.export", { ownerKey }, value => result(value.content, value));
     }
     case "import": {
-      arity(args, 3, 3, "operit2 memory <owner> import <SKIP|UPDATE|CREATE_NEW> <json-content>");
-      const payload = parseDomainPayload("memory.import", { ownerKey, strategy: args[1], content: args[2] });
-      /** Returns the repository's real memory and link import counts. */
-      return invocation("memory.import", payload, value => result(lines([`Imported memory backup for ${ownerKey}`]), value));
+      arity(args, 3, 3, "operit2 memory <owner> import <SKIP|UPDATE|CREATE_NEW> <json-content|file-path>");
+      const source = parseImportSource(args[2]), strategy = args[1];
+      if (source.kind === "inline") return memoryImportInvocation(ownerKey, strategy, source.content);
+      /** Rejects an invalid strategy before reading a potentially large file. */
+      if (strategy !== "SKIP" && strategy !== "UPDATE" && strategy !== "CREATE_NEW") throw new Error("memory.import.strategy must be SKIP | UPDATE | CREATE_NEW");
+      /** Reads the path only after argument validation and before domain dispatch. */
+      return {
+        kind: "deferred",
+        async execute(): Promise<ToolPkg.CoreCommandResult> {
+          return memoryImportInvocation(ownerKey, strategy, await readImportSource(source)).execute();
+        },
+      };
     }
     case "settings": {
       const help = ["operit2 memory <owner> settings show", "operit2 memory <owner> settings write <settings-json>"];

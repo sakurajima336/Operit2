@@ -88,6 +88,8 @@ void main() {
             '/app/data/cache/toolpkg_resource_exports/operit-avatar.png',
         '/mnt/macos/Users/test/avatar.png': '/mnt/macos/Users/test/avatar.png',
         'file:///app/data/avatar.png': '/app/data/avatar.png',
+        'file:///app/data/avatar%20one.png': '/app/data/avatar one.png',
+        'file://localhost/app/data/avatar.png': '/app/data/avatar.png',
         'vfs:///app/data/avatar.png': '/app/data/avatar.png',
         'operit-vfs://app/data/avatar.png': '/app/data/avatar.png',
         'runtime/data/user_assets/avatar.png':

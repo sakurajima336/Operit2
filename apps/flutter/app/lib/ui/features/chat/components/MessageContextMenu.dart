@@ -170,13 +170,15 @@ class _MessageContextMenuState extends State<MessageContextMenu> {
     _longPressPointer = null;
   }
 
+  /// Positions the route menu in its owning Navigator overlay coordinates.
   Future<void> _showContextMenu() async {
     _cancelLongPress();
     final position = _menuPosition;
     if (position == null) {
       return;
     }
-    final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
+    final overlay =
+        Navigator.of(context).overlay!.context.findRenderObject()! as RenderBox;
     final localPosition = overlay.globalToLocal(position);
     final rect = RelativeRect.fromRect(
       localPosition & const Size(1, 1),
@@ -243,6 +245,11 @@ class _MessageContextMenuState extends State<MessageContextMenu> {
           value: _MessageMenuAction.regenerate,
           icon: Icons.refresh,
           label: '重新生成',
+        ),
+        _menuItem(
+          value: _MessageMenuAction.modifyMemory,
+          icon: Icons.auto_fix_high,
+          label: '修改记忆',
         ),
         _menuItem(
           value: _MessageMenuAction.playVoice,
@@ -361,6 +368,7 @@ class _MessageContextMenuState extends State<MessageContextMenu> {
         );
         break;
       case _MessageMenuAction.editAndResend:
+      case _MessageMenuAction.modifyMemory:
         widget.onSelectMessageToEdit?.call(widget.message);
         break;
       case _MessageMenuAction.rollback:
@@ -639,6 +647,7 @@ class _MessageContextMenuState extends State<MessageContextMenu> {
 enum _MessageMenuAction {
   copy,
   editAndResend,
+  modifyMemory,
   rollback,
   regenerate,
   deleteVariant,

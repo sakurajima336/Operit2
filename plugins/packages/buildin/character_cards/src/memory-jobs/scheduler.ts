@@ -70,8 +70,11 @@ export async function enqueueCandidate(input: CandidateRequest, repository: Char
       /** Uses the full owner-scoped source identity for genuine hook idempotency. */
       candidate => candidate.chatId === input.chatId && candidate.triggerMessageTimestamp === input.timestamp && candidate.triggerVariantIndex === input.variantIndex && candidate.sourceType === input.sourceType,
     );
-    if (previous.length > 1) throw new Error("Duplicate persisted memory candidate source");
-    if (previous.length === 1) { result.candidateIds.push(previous[0].id); continue; }
+    if (previous.length !== 0) {
+      // Keep every historical task's status and expose its identity without enqueueing another request.
+      for (const candidate of previous) result.candidateIds.push(candidate.id);
+      continue;
+    }
     const id = await repository.allocateRecordId();
     space.candidates.push({ id, chatId: input.chatId, triggerMessageTimestamp: input.timestamp, triggerVariantIndex: input.variantIndex, createdAt: now, updatedAt: now, status: "pending", attemptCount: 0, lastError: "", sourceType: input.sourceType });
     if (space.settings.autoSaveIntervalMinutes > 0 && space.settings.nextAutoSaveRunAtMs === 0) space.settings.nextAutoSaveRunAtMs = now + space.settings.autoSaveIntervalMinutes * 60000;

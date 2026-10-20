@@ -1,3 +1,4 @@
+import { uuid } from "./identity";
 import type { CharacterRepository } from "./canonical";
 import type { ActivePrompt, BackupImportResult, Card, ChatBinding, CharacterDirectories, CharacterState, ConversationGroupRecord, Group, Memory, MemoryAutoSaveStatus, MemoryGraph, MemoryImportResult, MemoryLink, MemoryLinkUpdate, MemoryLinkValues, MemoryRebuildProgress, MemorySearchConfig, MemorySearchOptions, MemorySettings, MemorySpace, MemoryValues, ModelSummary, Store, Tag, TagValues, ToolCatalog, TtsConfig, UserDocument, UserDocumentWrite } from "./model";
 import { assertBoolean, assertCard, assertConversationGroups, assertGroup, assertMemory, assertMemorySettings, assertMemoryValues, assertNumber, assertSearchConfig, assertSearchOptions, assertString, assertTag, assertTagValues, normalizeNames, requireId, requireName } from "./validation";
@@ -35,17 +36,6 @@ function folder(value: string | null): string | null {
   );
   for (const part of parts) if (part === "." || part === "..") throw new Error("Relative folder traversal is not allowed");
   return parts.length === 0 ? null : parts.join("/");
-}
-/** Creates a UUID for a new memory and never changes an existing memory UUID. */
-function uuid(): string {
-  const bytes: number[] = [];
-  for (let index = 0; index < 16; index += 1) bytes.push(Math.floor(Math.random() * 256));
-  bytes[6] = (bytes[6] & 15) | 64; bytes[8] = (bytes[8] & 63) | 128;
-  const text = bytes.map(
-    /** Encodes every byte as two hexadecimal digits. */
-    byte => byte.toString(16).padStart(2, "0"),
-  ).join("");
-  return text.slice(0, 8) + "-" + text.slice(8, 12) + "-" + text.slice(12, 16) + "-" + text.slice(16, 20) + "-" + text.slice(20);
 }
 /** Implements domain operations on one private snapshot; no method writes Core or a second database. */
 export class RepositorySession implements CharacterRepository {
@@ -97,14 +87,14 @@ export class RepositorySession implements CharacterRepository {
   /** Creates all character fields and its genuine initialized memory space. */
   async createCharacter(card: Card): Promise<Card> {
     assertCard(card); const name = requireName(card.name, "character name"); uniqueName(this.state.cards, name, "");
-    const now = Date.now(), saved = { ...copy(card), id: uuid(), name, isDefault: false, createdAt: now, updatedAt: now };
+    const now = Date.now(), saved = { ...copy(card), id: uuid(), name, createdAt: now, updatedAt: now };
     this.state.cards.push(saved); this.addSpace("character:" + saved.id); return copy(saved);
   }
   /** Writes the full editable character while preserving its stable creation identity. */
   async updateCharacter(card: Card): Promise<Card> {
     assertCard(card); const original = get(this.state.cards, card.id, "character"), name = requireName(card.name, "character name");
     uniqueName(this.state.cards, name, card.id);
-    const saved = { ...copy(card), name, isDefault: original.isDefault, createdAt: original.createdAt, updatedAt: Date.now() };
+    const saved = { ...copy(card), name, createdAt: original.createdAt, updatedAt: Date.now() };
     Object.assign(original, saved); return copy(original);
   }
   /** Removes a non-active character and all of its owned records. */
@@ -311,8 +301,8 @@ export class RepositorySession implements CharacterRepository {
   async createMemory(ownerKey: string, values: MemoryValues): Promise<Memory> {
     assertMemoryValues(values); const now = Date.now();
     return this.saveMemory(ownerKey, { ...values, id: "", uuid: "", title: requireName(values.title, "memory title"), folderPath: folder(values.folderPath), documentPath: null, isDocumentNode: false, chunkIndexFilePath: null, createdAt: now, updatedAt: now, lastAccessedAt: now, tags: normalizeNames(values.tags).map(
-      /** Initializes explicit new tag records using decimal identities. */
-      (name, index) => ({ id: String(index + 1), name }),
+      /** Initializes explicit new tag records with independent UUIDs. */
+      name => ({ id: uuid(), name }),
     ), properties: [] });
   }
   /** Saves the entire memory record and preserves all fields not explicitly changed. */
@@ -344,7 +334,7 @@ export class RepositorySession implements CharacterRepository {
     assertMemoryValues(values); const original = get(this.space(ownerKey).memories, id, "memory");
     return this.saveMemory(ownerKey, { ...copy(original), ...values, tags: normalizeNames(values.tags).map(
       /** Allocates the explicit replacement tag list without changing the memory identity. */
-      (name, index) => ({ id: String(index + 1), name }),
+      name => ({ id: uuid(), name }),
     ) });
   }
   /** Deletes a memory and all referencing chunks and links in this operation. */

@@ -1,7 +1,8 @@
-use std::collections::{BTreeMap, VecDeque};
+use crate::process::background_command;
+
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
@@ -308,7 +309,7 @@ impl TerminalHost for WindowsTerminalHost {
     ) -> HostResult<TerminalCommandOutput> {
         let normalizedSessionId = nonBlank(sessionId, "session_id")?;
         let normalizedCommand = nonBlank(command, "command")?;
-        let (terminalType, kind, commandOutput) = {
+        let (terminalType, kind, commandOutput, renderer) = {
             let mut state = self.lockState()?;
             let session = state
                 .ptySessions
@@ -316,6 +317,7 @@ impl TerminalHost for WindowsTerminalHost {
                 .ok_or_else(|| {
                     HostError::new(format!("Terminal session does not exist: {sessionId}"))
                 })?;
+            let renderer = ptyScreenRenderer(session)?;
             session.commandRunning = true;
             clearPtyCommandOutput(&session.commandOutput)?;
             let commandInput = format!("{normalizedCommand}\r");
@@ -329,11 +331,17 @@ impl TerminalHost for WindowsTerminalHost {
                 session.terminalType.clone(),
                 session.kind,
                 session.commandOutput.clone(),
+                renderer,
             )
         };
 
-        let result =
-            executePtyCommandInSession(commandOutput, kind, &normalizedCommand, timeoutMs)?;
+        let result = executePtyCommandInSession(
+            commandOutput,
+            kind,
+            &normalizedCommand,
+            timeoutMs,
+            renderer,
+        )?;
         {
             let mut state = self.lockState()?;
             if let Some(session) = state.ptySessions.get_mut(&normalizedSessionId) {
@@ -611,7 +619,7 @@ fn ptyCommand(kind: TerminalKind, workingDir: &str) -> HostResult<CommandBuilder
 #[allow(non_snake_case)]
 /// Resolves the Bash executable from the active Git for Windows installation.
 fn gitBashExecutable() -> HostResult<PathBuf> {
-    let output = Command::new("git")
+    let output = background_command("git")
         .arg("--exec-path")
         .output()
         .map_err(|error| {
@@ -821,6 +829,7 @@ fn executePtyCommandInSession(
     kind: TerminalKind,
     command: &str,
     timeoutMs: u64,
+    renderer: TerminalTextRenderer,
 ) -> HostResult<SessionCommandResult> {
     let deadline = Instant::now() + Duration::from_millis(timeoutMs);
     let mut collected = Vec::new();
@@ -840,7 +849,13 @@ fn executePtyCommandInSession(
                     continue;
                 }
             }
-            let output = ptyCommandOutputText(&collected, kind, command, Some(&marker.workingDir))?;
+            let output = ptyCommandOutputText(
+                &collected,
+                kind,
+                command,
+                Some(&marker.workingDir),
+                renderer,
+            )?;
             return Ok(SessionCommandResult {
                 output,
                 exitCode: marker.exitCode,
@@ -849,7 +864,7 @@ fn executePtyCommandInSession(
             });
         }
         if Instant::now() >= deadline {
-            let output = ptyCommandOutputText(&collected, kind, command, None)?;
+            let output = ptyCommandOutputText(&collected, kind, command, None, renderer)?;
             return Ok(SessionCommandResult {
                 output,
                 exitCode: -1,
@@ -972,17 +987,17 @@ fn findBytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 #[allow(non_snake_case)]
-/// Converts raw PTY output into terminal-specific command output text.
+/// Renders command output from the captured viewport and removes the shell-owned echo and prompt.
 fn ptyCommandOutputText(
     raw: &[u8],
     kind: TerminalKind,
     command: &str,
     workingDir: Option<&str>,
+    mut renderer: TerminalTextRenderer,
 ) -> HostResult<String> {
-    let visibleBytes = stripPtyPromptMarkers(raw);
-    let text = String::from_utf8_lossy(&visibleBytes);
-    let clean = renderTerminalText(&text);
-    let withoutEcho = dropCommandEcho(clean, command);
+    let startRow = renderer.logicalLineStart();
+    renderer.write(&String::from_utf8_lossy(raw));
+    let withoutEcho = dropCommandEcho(renderer.textFrom(startRow), command);
     let Some(workingDir) = workingDir else {
         return Ok(withoutEcho.trim().to_string());
     };
@@ -993,15 +1008,23 @@ fn ptyCommandOutputText(
 }
 
 #[allow(non_snake_case)]
-fn ptyScreenContent(session: &PtySession) -> HostResult<String> {
+/// Reconstructs the terminal viewport and scrollback using the session's actual dimensions.
+fn ptyScreenRenderer(session: &PtySession) -> HostResult<TerminalTextRenderer> {
+    let size = session.master.get_size().map_err(toHostError)?;
     let buffer = session
         .screenOutput
         .lock()
         .map_err(|_| HostError::new("pty screen output mutex poisoned"))?;
     let bytes = buffer.iter().copied().collect::<Vec<_>>();
-    let visibleBytes = stripPtyPromptMarkers(&bytes);
-    let text = String::from_utf8_lossy(&visibleBytes);
-    Ok(renderTerminalText(&text))
+    let mut renderer = TerminalTextRenderer::new(usize::from(size.rows), usize::from(size.cols));
+    renderer.write(&String::from_utf8_lossy(&bytes));
+    Ok(renderer)
+}
+
+#[allow(non_snake_case)]
+/// Returns the rendered session transcript without exposing internal completion markers.
+fn ptyScreenContent(session: &PtySession) -> HostResult<String> {
+    Ok(ptyScreenRenderer(session)?.textFrom(0))
 }
 
 #[allow(non_snake_case)]
@@ -1040,9 +1063,12 @@ fn stripPtyDeviceStatusReports(raw: &[u8]) -> Vec<u8> {
     output
 }
 
-#[derive(Default)]
 struct TerminalTextRenderer {
     lines: Vec<Vec<char>>,
+    wrappedRows: BTreeSet<usize>,
+    viewportStart: usize,
+    rows: usize,
+    cols: usize,
     row: usize,
     col: usize,
     savedRow: usize,
@@ -1050,9 +1076,14 @@ struct TerminalTextRenderer {
 }
 
 impl TerminalTextRenderer {
-    fn new() -> Self {
+    /// Starts a viewport whose absolute cursor coordinates remain separate from scrollback.
+    fn new(rows: usize, cols: usize) -> Self {
         Self {
             lines: vec![Vec::new()],
+            wrappedRows: BTreeSet::new(),
+            viewportStart: 0,
+            rows,
+            cols,
             row: 0,
             col: 0,
             savedRow: 0,
@@ -1060,6 +1091,7 @@ impl TerminalTextRenderer {
         }
     }
 
+    /// Applies terminal output while retaining logical lines that have scrolled out of view.
     fn write(&mut self, value: &str) {
         let chars = value.chars().collect::<Vec<_>>();
         let mut index = 0usize;
@@ -1074,12 +1106,30 @@ impl TerminalTextRenderer {
         }
     }
 
-    fn text(&self) -> String {
-        self.lines
-            .iter()
-            .map(|line| line.iter().collect::<String>())
-            .collect::<Vec<_>>()
-            .join("\n")
+    /// Locates the logical start of the current line across automatic terminal wrapping.
+    fn logicalLineStart(&self) -> usize {
+        let mut row = self.row;
+        while row > 0 && self.wrappedRows.contains(&(row - 1)) {
+            row -= 1;
+        }
+        row
+    }
+
+    /// Joins soft-wrapped rows and retains explicit newlines from the requested transcript row.
+    fn textFrom(&self, startRow: usize) -> String {
+        let mut text = String::new();
+        for (row, line) in self.lines.iter().enumerate().skip(startRow) {
+            let content = line.iter().collect::<String>();
+            if self.wrappedRows.contains(&row) || row + 1 == self.lines.len() {
+                text.push_str(&content);
+            } else {
+                text.push_str(content.trim_end());
+                if row + 1 < self.lines.len() {
+                    text.push('\n');
+                }
+            }
+        }
+        text
     }
 
     fn consumeEscape(&mut self, chars: &[char], index: usize) -> usize {
@@ -1133,17 +1183,19 @@ impl TerminalTextRenderer {
         index
     }
 
+    /// Resolves absolute cursor addresses against the visible viewport rather than scrollback.
     fn applyCsi(&mut self, params: &str, command: char) {
         let values = csiParams(params);
         match command {
             'A' => self.moveRowUp(csiValue(&values, 0, 1)),
             'B' => self.moveRowDown(csiValue(&values, 0, 1)),
-            'C' => self.col += csiValue(&values, 0, 1),
+            'C' => self.col = (self.col + csiValue(&values, 0, 1)).min(self.cols - 1),
             'D' => self.col = self.col.saturating_sub(csiValue(&values, 0, 1)),
-            'G' => self.col = csiValue(&values, 0, 1).saturating_sub(1),
+            'G' => self.col = csiValue(&values, 0, 1).saturating_sub(1).min(self.cols - 1),
             'H' | 'f' => {
-                self.row = csiValue(&values, 0, 1).saturating_sub(1);
-                self.col = csiValue(&values, 1, 1).saturating_sub(1);
+                self.row = self.viewportStart
+                    + csiValue(&values, 0, 1).saturating_sub(1).min(self.rows - 1);
+                self.col = csiValue(&values, 1, 1).saturating_sub(1).min(self.cols - 1);
                 self.ensureCursorLine();
             }
             'J' => self.eraseDisplay(csiValue(&values, 0, 0)),
@@ -1162,20 +1214,21 @@ impl TerminalTextRenderer {
         }
     }
 
+    /// Distinguishes explicit line feeds from terminal column wrapping.
     fn writeChar(&mut self, ch: char) {
         match ch {
             '\r' => self.col = 0,
             '\n' => {
-                self.row += 1;
+                self.wrappedRows.remove(&self.row);
+                self.advanceLine();
                 self.col = 0;
-                self.ensureCursorLine();
             }
             '\x08' => {
                 self.col = self.col.saturating_sub(1);
             }
             '\t' => {
-                let nextStop = ((self.col / 8) + 1) * 8;
-                while self.col < nextStop {
+                let spaces = 8 - self.col % 8;
+                for _ in 0..spaces {
                     self.putChar(' ');
                 }
             }
@@ -1184,7 +1237,13 @@ impl TerminalTextRenderer {
         }
     }
 
+    /// Wraps at the right margin and records continuation rows before writing a cell.
     fn putChar(&mut self, ch: char) {
+        if self.col >= self.cols {
+            self.wrappedRows.insert(self.row);
+            self.advanceLine();
+            self.col = 0;
+        }
         self.ensureCursorLine();
         let line = &mut self.lines[self.row];
         while line.len() < self.col {
@@ -1198,33 +1257,47 @@ impl TerminalTextRenderer {
         self.col += 1;
     }
 
+    /// Moves upward within the visible viewport without changing scrollback.
     fn moveRowUp(&mut self, count: usize) {
-        self.row = self.row.saturating_sub(count);
+        self.row = self.row.saturating_sub(count).max(self.viewportStart);
         self.ensureCursorLine();
     }
 
+    /// Moves downward within the visible viewport without scrolling.
     fn moveRowDown(&mut self, count: usize) {
-        self.row += count;
+        self.row = (self.row + count).min(self.viewportStart + self.rows - 1);
         self.ensureCursorLine();
     }
 
+    /// Advances output and moves the viewport when a line passes its bottom margin.
+    fn advanceLine(&mut self) {
+        self.row += 1;
+        if self.row >= self.viewportStart + self.rows {
+            self.viewportStart = self.row + 1 - self.rows;
+        }
+        self.ensureCursorLine();
+    }
+
+    /// Erases the requested screen region while preserving its cursor and scrollback coordinates.
     fn eraseDisplay(&mut self, mode: usize) {
         match mode {
             0 => {
                 self.eraseLine(0);
                 self.lines.truncate(self.row + 1);
+                self.wrappedRows.retain(|row| *row < self.row);
             }
             1 => {
-                for row in 0..self.row {
+                for row in self.viewportStart..self.row {
                     self.lines[row].clear();
                 }
                 self.eraseLine(1);
             }
             2 | 3 => {
-                self.lines.clear();
-                self.lines.push(Vec::new());
-                self.row = 0;
-                self.col = 0;
+                let start = if mode == 3 { 0 } else { self.viewportStart };
+                for row in start..self.lines.len() {
+                    self.lines[row].clear();
+                    self.wrappedRows.remove(&row);
+                }
             }
             _ => {}
         }
@@ -1264,13 +1337,6 @@ impl TerminalTextRenderer {
             self.lines.push(Vec::new());
         }
     }
-}
-
-#[allow(non_snake_case)]
-fn renderTerminalText(value: &str) -> String {
-    let mut renderer = TerminalTextRenderer::new();
-    renderer.write(value);
-    renderer.text()
 }
 
 #[allow(non_snake_case)]
@@ -1517,7 +1583,7 @@ fn nonBlank(value: &str, paramName: &str) -> HostResult<String> {
 
 #[allow(non_snake_case)]
 fn commandStarts(program: &str, args: &[&str]) -> bool {
-    Command::new(program).args(args).output().is_ok()
+    background_command(program).args(args).output().is_ok()
 }
 
 #[allow(non_snake_case)]
@@ -1621,6 +1687,103 @@ mod tests {
         assert!(!result.timedOut);
         assert_eq!(result.exitCode, 0);
         assert_eq!(result.output, "git-bash-ok");
+    }
+
+    /// Keeps viewport cursor corrections from overwriting rows retained in scrollback.
+    #[test]
+    fn terminal_cursor_addresses_are_relative_to_the_viewport() {
+        let mut renderer = TerminalTextRenderer::new(3, 8);
+        renderer.write("one\r\ntwo\r\n1234567\r\n\x1b[2;8H89abc\r\nnext");
+        assert_eq!(renderer.textFrom(0), "one\ntwo\n123456789abc\nnext");
+    }
+
+    /// Expands a tab at a pending wrap without looping across the terminal margin.
+    #[test]
+    fn terminal_tab_wraps_at_the_right_margin() {
+        let mut renderer = TerminalTextRenderer::new(3, 8);
+        renderer.write("12345678\tend");
+        assert_eq!(renderer.textFrom(0), "12345678        end");
+    }
+
+    /// Preserves PowerShell pipeline output when the completion marker precedes its final display writes.
+    #[test]
+    fn powershell_scrolled_output_preserves_wrapped_lines() {
+        let host = WindowsTerminalHost::new();
+        let session = host
+            .createOrGetSession("terminal_powershell_scrolled")
+            .expect("create PowerShell terminal session");
+        let warmup = host
+            .executeInSession(
+                &session.sessionId,
+                "1..40 | ForEach-Object { \"warmup-$_\" }",
+                5000,
+            )
+            .expect("scroll the PowerShell viewport");
+        assert_eq!(warmup.exitCode, 0);
+        let result = host
+            .executeInSession(
+                &session.sessionId,
+                "1..8 | ForEach-Object { ('x' * 110) + $_ }",
+                5000,
+            )
+            .expect("parse wrapped PowerShell pipeline output");
+        assert!(!result.timedOut);
+        assert_eq!(result.exitCode, 0);
+        assert_eq!(
+            result.output,
+            (1..=8)
+                .map(|index| format!("{}{index}", "x".repeat(110)))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+
+    /// Preserves all wrapped output after scrolling and keeps subsequent commands usable.
+    #[test]
+    fn git_bash_scrolled_output_preserves_wrapped_lines_and_session() {
+        let host = WindowsTerminalHost::new();
+        let session = host
+            .createOrGetTypedSession("terminal_git_bash_scrolled", "bash")
+            .expect("create Git Bash terminal session");
+        let warmup = host
+            .executeInSession(&session.sessionId, "printf 'warmup-%s\\n' {1..40}", 5000)
+            .expect("scroll the terminal viewport");
+        assert_eq!(warmup.exitCode, 0);
+        assert_eq!(
+            warmup.output,
+            (1..=40)
+                .map(|index| format!("warmup-{index}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        let result = host
+            .executeInSession(&session.sessionId, "printf '%0120d\\n' {1..8}", 5000)
+            .expect("parse wrapped output in a scrolled terminal");
+        assert!(!result.timedOut);
+        assert_eq!(result.exitCode, 0);
+        assert_eq!(
+            result.output,
+            (1..=8)
+                .map(|index| format!("{index:0120}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        let failure = host
+            .executeInSession(&session.sessionId, "printf problem; (exit 7)", 5000)
+            .expect("retain command output and its real nonzero status");
+        assert_eq!(failure.output, "problem");
+        assert_eq!(failure.exitCode, 7);
+        let next = host
+            .executeInSession(&session.sessionId, "printf ready", 5000)
+            .expect("execute a subsequent command in the same session");
+        assert_eq!(next.output, "ready");
+        assert_eq!(next.exitCode, 0);
+        assert!(
+            !host
+                .getSessionScreen(&session.sessionId)
+                .unwrap()
+                .commandRunning
+        );
     }
 
     #[test]

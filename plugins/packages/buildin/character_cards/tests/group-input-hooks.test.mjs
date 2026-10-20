@@ -78,11 +78,11 @@ test("registered group input leaves unassociated, card, and native sequence inpu
   await runtime.seedBinding("selector-chat", { version: 1, selection: "card:outside-group" });
   runtime.disk.clearCalls();
   assert.equal(await runtime.submit(), null);
-  assert.equal(runtime.disk.calls.filter(call => call.method === "storage.transaction").length, 0);
+  assert.equal(runtime.disk.calls.filter(call => call.method === "storage.commit").length, 0);
   await runtime.seedBinding("selector-chat", { version: 99, selection: "group:invalid" });
   runtime.disk.clearCalls();
   await assert.rejects(runtime.submit(), /version/);
-  assert.equal(runtime.disk.calls.filter(call => call.method === "storage.transaction").length, 0);
+  assert.equal(runtime.disk.calls.filter(call => call.method === "storage.commit").length, 0);
 });
 
 /** Rejects missing runtime, contradictory attachments, empty input and failed namespace reads before any admission. */
@@ -91,7 +91,7 @@ test("registered group input validates the actual envelope and propagates namesp
   await assert.rejects(runtime.submit(event({ runtime: null })), /runtime slot/);
   await assert.rejects(runtime.submit(event({ attachmentCount: 1 })), /counts differ/);
   await assert.rejects(runtime.submit(event({ text: "" })), /actual text or attachments/);
-  runtime.failNext("storage.query", new Error("Exact namespace read failure"));
+  runtime.failNext("storage.preferences.data", new Error("Exact namespace read failure"));
   await assert.rejects(runtime.submit(), /Exact namespace read failure/);
   assert.equal(await runtime.groupExecution({ action: "current", chatId: "selector-chat" }), null);
   await assert.rejects(runtime.groupExecution({ action: "current", chatId: "selector-chat", submissionId: "extra" }), /unexpected/);

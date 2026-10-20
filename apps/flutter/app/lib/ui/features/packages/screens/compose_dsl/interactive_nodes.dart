@@ -431,11 +431,18 @@ extension _ComposeInteractiveNodes on _ComposeDslRendererState {
       ),
       isError: node.props['isError'] == true,
       textStyle: _textFieldStyle(context, node.props['style']),
+      decoration: _textFieldDecoration(context, node.props['decoration']),
       labelText: labelSlot == null ? _plainSlotText('label') : null,
       label: labelSlot,
       hintText: placeholderSlot == null ? _plainSlotText('placeholder') : null,
       hint: placeholderSlot,
-      prefixIcon: _hasSlot('leadingIcon') ? _slotColumn('leadingIcon') : null,
+      prefixIcon: _hasSlot('leadingIcon')
+          ? Center(
+              widthFactor: 1,
+              heightFactor: 1,
+              child: _slotInline('leadingIcon'),
+            )
+          : null,
       suffixIconConstraints:
           node.props['suffixIconWidth'] != null ||
               node.props['suffixIconHeight'] != null
@@ -444,7 +451,13 @@ extension _ComposeInteractiveNodes on _ComposeDslRendererState {
               height: _number(node.props['suffixIconHeight']),
             )
           : null,
-      suffixIcon: _hasSlot('trailingIcon') ? _slotColumn('trailingIcon') : null,
+      suffixIcon: _hasSlot('trailingIcon')
+          ? Center(
+              widthFactor: 1,
+              heightFactor: 1,
+              child: _slotInline('trailingIcon'),
+            )
+          : null,
       prefix: _hasSlot('prefix') ? _slotColumn('prefix') : null,
       suffix: _hasSlot('suffix') ? _slotColumn('suffix') : null,
       supportingText: supportingSlot,

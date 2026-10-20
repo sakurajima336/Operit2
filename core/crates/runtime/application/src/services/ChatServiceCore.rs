@@ -397,6 +397,10 @@ impl ChatServiceCore {
         self.chatHistoryDelegate = ChatHistoryDelegate::new(self.selectionMode.clone());
         self.messageProcessingDelegate = MessageProcessingDelegate::default();
         self.messageProcessingDelegate.fileSystemHost = Some(self.fileSystemHost.clone());
+        let summaryCancellationDelegate = self.messageProcessingDelegate.clone_for_core();
+        self.chatHistoryDelegate.setBeforeDestructiveHistoryMutation(move |chatId| {
+            summaryCancellationDelegate.cancelSummaryTasks(Some(&chatId));
+        });
         let messageProcessingDelegate = self.messageProcessingDelegate.clone_for_core();
         self.messageCoordinationDelegate = Some(MessageCoordinationDelegate::new(
             self.chatHistoryDelegate.clone_for_core(),

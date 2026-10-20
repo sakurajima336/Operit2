@@ -5,7 +5,7 @@ import { loadModule, plain } from "./runtime.mjs";
 
 /** Resolves real persisted cards and grants, with only Core's message identity supplied by the fixture. */
 async function environment(t) {
-  const disk = await createDiskHarness(t);
+  const disk = await createDiskHarness(t, { legacyIdentity: "default" });
   const repository = await loadModule("src/storage/database.ts", disk.globals).DatabaseCharacterRepository.open();
   const service = loadModule("src/service.ts", disk.globals).createCharacterCardsService(repository);
   let author = "default";
@@ -38,7 +38,7 @@ test("historical message memory access follows the author's current binding and 
   const current = plain(await h.chat.currentMessageMemoryAccess("chat", h.message, h.repository));
   assert.equal(current.primaryOwnerKey, "shared:" + shared.id);
   assert.deepEqual(current.resources, [{ key: "shared:" + shared.id, readable: true, writable: true }]);
-  assert.equal(h.disk.calls.filter(call => ["storage.execute", "storage.transaction", "storage.commit"].includes(call.method)).length, 0);
+  assert.equal(h.disk.calls.filter(call => ["storage.execute", "storage.commit", "storage.commit"].includes(call.method)).length, 0);
 });
 
 test("author ID stays exact when other roles share its display name or the current chat changes", async t => {

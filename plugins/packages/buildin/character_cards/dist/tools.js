@@ -670,12 +670,6 @@ function timeBoundary(input, name) {
 }
 
 // src/validation.ts
-function requireDecimal(value, label, positive = false) {
-  if (typeof value !== "string" || !/^(0|[1-9][0-9]*)$/.test(value)) throw new Error(`${label} must be a canonical decimal string`);
-  const integer2 = BigInt(value);
-  if (integer2 > 9223372036854775807n || positive && integer2 === 0n) throw new Error(`${label} is outside its i64 range`);
-  return value;
-}
 function assertObject(value, label) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} \u5FC5\u987B\u662F\u5BF9\u8C61`);
 }
@@ -719,12 +713,12 @@ function assertMemory(value) {
   if (!Array.isArray(value.tags) || !Array.isArray(value.properties)) throw new Error("\u8BB0\u5FC6\u6807\u7B7E\u548C\u5C5E\u6027\u5FC5\u987B\u662F\u6570\u7EC4");
   for (const tag of value.tags) {
     assertObject(tag, "\u8BB0\u5FC6\u6807\u7B7E");
-    requireDecimal(tag.id, "\u8BB0\u5FC6\u6807\u7B7E\u6807\u8BC6");
+    requireId(tag.id, "\u8BB0\u5FC6\u6807\u7B7E\u6807\u8BC6");
     assertString(tag.name, "\u8BB0\u5FC6\u6807\u7B7E\u540D\u79F0");
   }
   for (const property2 of value.properties) {
     assertObject(property2, "\u8BB0\u5FC6\u5C5E\u6027");
-    requireDecimal(property2.id, "\u8BB0\u5FC6\u5C5E\u6027\u6807\u8BC6");
+    requireId(property2.id, "\u8BB0\u5FC6\u5C5E\u6027\u6807\u8BC6");
     assertString(property2.key, "\u8BB0\u5FC6\u5C5E\u6027\u952E");
     assertString(property2.value, "\u8BB0\u5FC6\u5C5E\u6027\u503C");
   }
@@ -754,6 +748,7 @@ function assertSearchConfig(value) {
 // src/memory-jobs/embeddings.ts
 function assertEmbedding(value) {
   assertObject(value, "embedding");
+  requireId(value.id, "embedding id");
   requireName(value.endpoint, "embedding endpoint");
   requireName(value.model, "embedding model");
   assertString(value.text, "embedding text");
@@ -835,7 +830,6 @@ function assertMemorySpace(value) {
     if (indices.has(identity)) throw new Error("Duplicate document chunk index");
     indices.add(identity);
   }
-  const candidateSources = /* @__PURE__ */ new Set();
   for (const candidate of value.candidates) {
     assertObject(candidate, "candidate");
     requireId(candidate.id, "candidate id");
@@ -845,9 +839,6 @@ function assertMemorySpace(value) {
     if (candidate.status !== "pending" && candidate.status !== "processing" && candidate.status !== "failed") throw new Error("Invalid candidate status");
     if (candidate.sourceType !== "reply_finalized_auto" && candidate.sourceType !== "selected_user_message") throw new Error("Invalid candidate source type");
     if (typeof candidate.triggerVariantIndex !== "number" || candidate.triggerVariantIndex > 2147483647) throw new Error("Candidate message variant exceeds the host range");
-    const sourceKey = JSON.stringify([candidate.chatId, candidate.triggerMessageTimestamp, candidate.triggerVariantIndex, candidate.sourceType]);
-    if (candidateSources.has(sourceKey)) throw new Error("Duplicate persisted candidate source");
-    candidateSources.add(sourceKey);
   }
   assertMemorySettings(value.settings);
   assertSearchConfig(value.searchConfig);
@@ -1051,7 +1042,6 @@ var characterFields = {
   sharedMemoryId: optional(nullable(text)),
   sharedMemoryMounts: optional(array2(mount)),
   toolAccessConfig: optional(toolAccess),
-  isDefault: optional(boolean),
   createdAt: optional(integer),
   updatedAt: optional(integer)
 };
@@ -1690,6 +1680,6 @@ async function list_character_cards(input) {
   const records = await callDomain("character.list", {});
   return { totalCount: records.length, cards: records.map(
     /** Preserves the historical tool projection from actual complete stored card records. */
-    (card) => ({ id: card.id, name: card.name, description: card.description, isDefault: card.isDefault, createdAt: card.createdAt, updatedAt: card.updatedAt })
+    (card) => ({ id: card.id, name: card.name, description: card.description, createdAt: card.createdAt, updatedAt: card.updatedAt })
   ) };
 }

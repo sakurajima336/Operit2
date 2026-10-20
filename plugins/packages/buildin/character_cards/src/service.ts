@@ -1,9 +1,11 @@
+import { characterModelBindingMode, sameCharacterModelBinding } from "./model-binding";
 import type { DomainInput, DomainOperation, DomainOutput } from "./api";
 import { executeDomain, resolveConfiguration } from "./operations";
 import { parseDomainPayload } from "./domain";
 import type { ChatConfigurationService } from "./domain";
 import { combineCharacterPrompt } from "./character-prompt";
 import { findChatBinding } from "./chat-storage";
+import { listBindableChats } from "./chat-binding-catalog";
 import { parseChatSelection } from "./chat-bindings";
 import { MemoryJobRunner } from "./memory-jobs/scheduler";
 import { listMemoryChats } from "./memory-jobs/chat";
@@ -85,6 +87,8 @@ interface TagPlan {
   attachedIds: string[];
 }
 export interface CharacterCardsService extends ChatConfigurationService {
+  /** Activates the opened chat's persisted selection through the shared configuration application queue. */
+  activateChatSelection(chatId: string): Promise<void>;
   readGlobalMemoryPreferences(): Promise<
     import("./model").GlobalMemoryPreferences
   >;
@@ -125,6 +129,8 @@ export function createCharacterCardsService(
     switch (request.action) {
       case "snapshot":
         return owner.readConfigurationSnapshot();
+      case "listBindableChats":
+        return listBindableChats();
       case "listMemoryChats":
         return listMemoryChats(request.ownerKey, owner);
       case "readGlobalMemoryPreferences":
@@ -159,6 +165,18 @@ export function createCharacterCardsService(
     );
   }
   const service: CharacterCardsService = {
+    /** Applies the exact persisted actor through the same validated operations used by explicit selection. */
+    async activateChatSelection(chatId: string): Promise<void> {
+      requireId(chatId, "chat id");
+      const binding = await findChatBinding(chatId);
+      if (binding === null) return;
+      const selection = parseChatSelection(binding.selection);
+      switch (selection.kind) {
+        case "card": await service.dispatchDomain("activePrompt.setCard", { id: selection.id }); break;
+        case "group": await service.dispatchDomain("activePrompt.setGroup", { id: selection.id }); break;
+        case "model": await service.dispatchDomain("activePrompt.setModel", {}); break;
+      }
+    },
     /** Runs the private job scheduler without constructing another store or business service. */
     runMemoryJobs: () => jobs.tick(),
     /** Reads only the metadata flags needed by prompt composition. */
@@ -489,24 +507,24 @@ async function commitTagChanges(
   return normalizeNames(ids);
 }
 
-/** Normalizes every editable character field while retaining complete binding and policy records. */
+/** Validates an explicitly created or changed model binding before publishing it. */
+function assertCharacterModelBinding(card: Card): void {
+  const mode = characterModelBindingMode(card.chatModelBindingMode);
+  if (mode !== "FOLLOW_GLOBAL" && mode !== "FIXED_MODEL")
+    throw new Error("聊天模型绑定模式无效，请重新绑定模型");
+  if (mode === "FIXED_MODEL") {
+    requireId(card.chatProviderId, "固定聊天模型提供商");
+    requireId(card.chatModelId, "固定聊天模型");
+  }
+}
+
+/** Normalizes editable content while preserving stored model and memory selections for unrelated edits. */
 function normalizedCharacter(card: Card): Card {
-  if (
-    card.chatModelBindingMode !== "FOLLOW_GLOBAL" &&
-    card.chatModelBindingMode !== "FIXED_MODEL"
-  )
-    throw new Error("聊天模型绑定模式无效");
   if (
     card.memoryBindingMode !== "CHARACTER" &&
     card.memoryBindingMode !== "SHARED"
   )
     throw new Error("记忆绑定模式无效");
-  if (card.chatModelBindingMode === "FIXED_MODEL") {
-    requireId(card.chatProviderId, "固定聊天模型提供商");
-    requireId(card.chatModelId, "固定聊天模型");
-  }
-  if (card.memoryBindingMode === "SHARED")
-    requireId(card.sharedMemoryId, "共享记忆库");
   if (card.ttsConfigId !== null) requireId(card.ttsConfigId, "TTS 配置");
   if (card.themeConfigId !== null) requireId(card.themeConfigId, "主题配置");
   const policy = card.toolAccessConfig;
@@ -559,16 +577,19 @@ export async function saveCharacter(
   assertCard(card);
   assertBoolean(create, "角色新建标识");
   let value = normalizedCharacter(card);
+  let validateMemoryBinding = create;
   if (create) {
-    value = { ...value, id: "", isDefault: false, createdAt: 0, updatedAt: 0 };
+    assertCharacterModelBinding(value);
+    value = { ...value, id: "", createdAt: 0, updatedAt: 0 };
   } else {
     const id = requireId(value.id, "角色卡标识");
     const original = await host.getCharacter(id);
     assertCard(original);
+    if (!sameCharacterModelBinding(original, value)) assertCharacterModelBinding(value);
+    validateMemoryBinding = original.memoryBindingMode !== value.memoryBindingMode || original.sharedMemoryId !== value.sharedMemoryId;
     value = {
       ...value,
       id: original.id,
-      isDefault: original.isDefault,
       createdAt: original.createdAt,
     };
   }
@@ -594,7 +615,7 @@ export async function saveCharacter(
   records(tags, assertTag, "标签列表");
   records(stores, assertStore, "共享记忆库列表");
   const plan = prepareTagChanges(value.attachedTagIds, tagChanges, tags);
-  if (value.memoryBindingMode === "SHARED")
+  if (validateMemoryBinding && value.memoryBindingMode === "SHARED")
     findRecord(
       stores,
       requireId(value.sharedMemoryId, "共享记忆库标识"),
@@ -729,7 +750,7 @@ export function parseOwner(ownerKey: string): MemoryOwner {
   throw new Error("记忆库命名空间无效");
 }
 
-/** Matches the original menu's explicit-card and active-card memory owner rules entirely in the plugin. */
+/** Resolves memory only from an explicitly bound character without assuming an installation card. */
 async function menuMemoryOwner(
   chatId: string,
   host: CharacterRepository,
@@ -740,12 +761,7 @@ async function menuMemoryOwner(
     binding === null ? null : parseChatSelection(binding.selection);
   if (selection?.kind === "model") throw new Error("Model-only conversations have no role memory owner");
   if (selection?.kind === "card") return resolveMemoryOwner(selection.id, host);
-  const active = await host.readActive();
-  if ("Model" in active) throw new Error("Model-only selection has no role memory owner");
-  return resolveMemoryOwner(
-    "CharacterCard" in active ? active.CharacterCard.id : "default",
-    host,
-  );
+  throw new Error("Select a character memory owner for this conversation");
 }
 
 /** Requires the selected owner to exist in the canonical character or shared store registry. */
@@ -994,6 +1010,8 @@ export async function dispatch(
       assertActive(active);
       return active;
     }
+    case "listBindableChats":
+      return listBindableChats();
     case "readChatBinding":
       return executeDomain(
         "chat.configuration.binding.read",

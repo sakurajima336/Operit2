@@ -65,6 +65,45 @@
         return ensureCallRegistry()[resolvedCallId] || null;
     }
 
+    /** Returns an id only while its session still exists, so a finished call is never restored. */
+    function liveCallId(callId) {
+        var resolvedCallId = normalizeCallId(callId);
+        return resolvedCallId && getCallState(resolvedCallId) ? resolvedCallId : '';
+    }
+
+    var callActivationSequence = 0;
+
+    /** Advances the ordering that selects the most recently activated live call. */
+    function nextCallActivation() {
+        callActivationSequence += 1;
+        return callActivationSequence;
+    }
+
+    /** Picks the newest call that can still own JavaScript work besides the excluded one. */
+    function mostRecentLiveCallId(excludeCallId) {
+        var registry = ensureCallRegistry();
+        var excluded = normalizeCallId(excludeCallId);
+        var selected = '';
+        var selectedAt = -1;
+        Object.keys(registry).forEach(function(callId) {
+            var state = registry[callId];
+            if (!state || state.completed || callId === excluded) return;
+            var activatedAt = Number(state.activatedAt || 0);
+            if (activatedAt >= selectedAt) {
+                selectedAt = activatedAt;
+                selected = callId;
+            }
+        });
+        return selected;
+    }
+
+    /** Restores a live call, preferring the supplied id before the newest active call. */
+    function restoreLiveCallId(preferredCallId, excludeCallId) {
+        var preferred = liveCallId(preferredCallId);
+        if (preferred) return preferred;
+        return mostRecentLiveCallId(excludeCallId);
+    }
+
     function registerCallSession(callId, params) {
         var resolvedCallId = normalizeCallId(callId);
         if (!resolvedCallId) {
@@ -74,6 +113,7 @@
         var state = registry[resolvedCallId];
         var callState = state && typeof state === 'object' ? state : {};
         callState.callId = resolvedCallId;
+        callState.activatedAt = nextCallActivation();
         callState.params = params && typeof params === 'object' ? params : {};
         callState.completed = false;
         callState.resultCompleted = false;
@@ -172,6 +212,7 @@
     function activateCall(callId) {
         var state = getCallState(callId);
         if (!state || state.completed) return false;
+        state.activatedAt = nextCallActivation();
         root.__operitCurrentCallId = callId;
         root.__operit_call_runtime_ref = state.callRuntime;
         return true;
@@ -180,23 +221,51 @@
     // Explicit Promise continuations (including lowered async functions) belong to
     // their subscribing call, not to the call which happens to resolve a shared Promise.
     var originalThen = Promise.prototype.then;
+    /** Captures subscription ownership even after that call's session was cancelled. */
     Promise.prototype.then = function(onFulfilled, onRejected) {
         var ownerCallId = normalizeCallId(root.__operitCurrentCallId);
-        if (!getCallState(ownerCallId)) {
+        if (!ownerCallId) {
             return originalThen.call(this, onFulfilled, onRejected);
         }
+        /** Runs each continuation under its subscribing call's exact identity. */
         function bindContinuation(handler) {
             if (typeof handler !== 'function') return handler;
+            /** Isolates cancelled callbacks from the surrounding live runtime. */
             return function(value) {
-                var previousCallId = root.__operitCurrentCallId;
+                var ownerState = getCallState(ownerCallId);
+                var previousCallId = normalizeCallId(root.__operitCurrentCallId);
                 var previousRuntime = root.__operit_call_runtime_ref;
-                // Never borrow another session if the originating call was cancelled.
+                if (!ownerState) {
+                    root.__operitCurrentCallId = ownerCallId;
+                    delete root.__operit_call_runtime_ref;
+                    try { return handler(value); }
+                    finally {
+                        if (normalizeCallId(root.__operitCurrentCallId) === ownerCallId) {
+                            root.__operitCurrentCallId = liveCallId(previousCallId);
+                            if (root.__operitCurrentCallId && previousRuntime && typeof previousRuntime === 'object') {
+                                root.__operit_call_runtime_ref = previousRuntime;
+                            } else {
+                                delete root.__operit_call_runtime_ref;
+                            }
+                        }
+                    }
+                }
+                ownerState.activatedAt = nextCallActivation();
                 root.__operitCurrentCallId = ownerCallId;
-                root.__operit_call_runtime_ref = (getCallState(ownerCallId) || {}).callRuntime;
+                root.__operit_call_runtime_ref = ownerState.callRuntime;
                 try { return handler(value); }
                 finally {
-                    root.__operitCurrentCallId = previousCallId;
-                    root.__operit_call_runtime_ref = previousRuntime;
+                    // Completing the owning call already restored the surviving context.
+                    // Writing the captured value back would resurrect a cleaned call id and
+                    // leave an unrelated suspended call pointing at a deleted session.
+                    if (normalizeCallId(root.__operitCurrentCallId) === ownerCallId) {
+                        root.__operitCurrentCallId = restoreLiveCallId(previousCallId, ownerCallId);
+                        if (previousRuntime && typeof previousRuntime === 'object') {
+                            root.__operit_call_runtime_ref = previousRuntime;
+                        } else if (root.__operit_call_runtime_ref === ownerState.callRuntime) {
+                            delete root.__operit_call_runtime_ref;
+                        }
+                    }
                 }
             };
         }
@@ -245,7 +314,7 @@
         }
         callState.completed = true;
         if (root.__operitCurrentCallId === resolvedCallId) {
-            root.__operitCurrentCallId = normalizeCallId(callState.previousCallId);
+            root.__operitCurrentCallId = restoreLiveCallId(callState.previousCallId, resolvedCallId);
         }
         if (root.__operit_call_runtime_ref === callState.callRuntime) {
             if (callState.previousCallRuntime && typeof callState.previousCallRuntime === 'object') {
@@ -297,6 +366,7 @@
     });
     expose('__operitCleanupCallSession', cleanupCallSession);
     expose('__operitCancelCallSession', cancelCallSession);
+    expose('__operitRestoreLiveCallId', restoreLiveCallId);
     expose('__operitBuildRuntimeContext', buildRuntimeContext);
 
     expose('__operitGetActiveModuleExports', function() {

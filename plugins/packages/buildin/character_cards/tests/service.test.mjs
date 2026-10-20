@@ -67,7 +67,7 @@ test("Operit import and export are pure domain operations with complete binding 
   const exported = serialization.encodeCharacterExport(record, "operit", data.snapshot.tags);
   assert.deepEqual(JSON.parse(exported), record);
   const plan = serialization.decodeCharacterImport(exported, "operit", data.snapshot.tags);
-  assert.deepEqual(plain(plan.card), { ...record, id: "", isDefault: false, createdAt: 0, updatedAt: 0 });
+  assert.deepEqual(plain(plan.card), { ...record, id: "", createdAt: 0, updatedAt: 0 });
   assert.deepEqual(plain(plan.tagChanges), { created: [], updated: [], deleted: [] });
   assert.throws(() => serialization.decodeCharacterImport("{", "operit", data.snapshot.tags), { name: "SyntaxError" });
 });

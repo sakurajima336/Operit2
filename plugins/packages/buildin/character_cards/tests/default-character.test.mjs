@@ -7,8 +7,8 @@ const state = loadModule("src/storage/state.ts");
 
 test("the installation card retains the Operit template and exact packaged avatar", async () => {
   const card = state.createInstalledCharacter(123);
-  assert.equal(card.id, "default"); assert.equal(card.name, "Operit");
-  assert.equal(card.isDefault, false);
+  assert.match(card.id, /^[0-9a-f-]{36}$/); assert.equal(card.name, "Operit");
+  assert.equal(Object.hasOwn(card, "isDefault"), false);
   assert.equal(card.description, "系统默认的角色卡配置");
   assert.equal(card.characterSetting, "你是Operit，一个全能AI助手，旨在解决用户提出的任何任务。");
   assert.equal(card.otherContentChat, "保持有帮助的语气，并清楚地传达限制。");
@@ -24,8 +24,8 @@ test("initial state installs the template card as an ordinary card", () => {
   const initial = state.createInitialState(123);
   state.assertCharacterState(initial);
   assert.equal(initial.cards[0].name, "Operit");
-  assert.deepEqual(plain(initial.active), { CharacterCard: { id: "default" } });
-  assert.equal(initial.owners[0].ownerKey, "character:default");
+  assert.deepEqual(plain(initial.active), { CharacterCard: { id: initial.cards[0].id } });
+  assert.equal(initial.owners[0].ownerKey, "character:" + initial.cards[0].id);
   assert.equal(state.decodeCharacterState, undefined);
 });
 

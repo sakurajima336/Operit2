@@ -1,7 +1,8 @@
+use crate::process::background_command;
+
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::Path;
-use std::process::Command;
 use std::time::UNIX_EPOCH;
 
 use globset::GlobBuilder;
@@ -489,7 +490,7 @@ $item.InvokeVerb("share")
             folder = powershell_string_literal(&parent.display().to_string()),
             file_name = powershell_string_literal(fileName),
         );
-        let output = Command::new("powershell.exe")
+        let output = background_command("powershell.exe")
             .arg("-NoProfile")
             .arg("-Command")
             .arg(script)

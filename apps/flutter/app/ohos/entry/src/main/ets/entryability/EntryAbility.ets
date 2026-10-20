@@ -1,3 +1,4 @@
+import OperitKeepAlivePlugin from 'operit_keep_alive';
 
 import { FlutterAbility, FlutterEngine } from '@ohos/flutter_ohos';
 import promptAction from '@ohos.promptAction';
@@ -134,6 +135,11 @@ export default class EntryAbility extends FlutterAbility {
   /// Parses and forwards the Operit notification activation embedded in one Want.
   private recordNotificationActivation(want: Want): void {
     const parameters = want.parameters as Record<string, Object> | undefined
+    const workActivation = parameters?.['operitKeepAliveWorkAction']
+    if (typeof workActivation === 'string') {
+      OperitKeepAlivePlugin.receiveWorkActivation(workActivation)
+      return
+    }
     const encodedActivation = parameters?.['operitNotificationActivation']
     if (typeof encodedActivation !== 'string') {
       return

@@ -6,7 +6,7 @@ use std::sync::{
     mpsc, Arc,
 };
 use std::thread::{self, JoinHandle};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use operit_host_api::{
     logHostError, HostError, HostResult, HostRuntimeEventHost, HostRuntimeEventRegistration,
@@ -41,6 +41,8 @@ impl LinuxHostRuntimeEventHost {
 pub struct LinuxHostRuntimeEventRegistration {
     running: Arc<AtomicBool>,
     workers: Vec<JoinHandle<()>>,
+    systemConnection: Option<Connection>,
+    sessionConnection: Option<Connection>,
 }
 
 impl HostRuntimeEventRegistration for LinuxHostRuntimeEventRegistration {}
@@ -48,8 +50,31 @@ impl HostRuntimeEventRegistration for LinuxHostRuntimeEventRegistration {}
 impl Drop for LinuxHostRuntimeEventRegistration {
     fn drop(&mut self) {
         self.running.store(false, Ordering::SeqCst);
-        for worker in self.workers.drain(..) {
-            let _ = worker.join();
+        // Blocking workers park inside the message iterator until the next
+        // signal shows up, so closing each bus connection is what wakes them.
+        // A quiet bus can still leave a worker parked, so the join itself is
+        // bounded: no shutdown path may block process exit forever.
+        for connection in self
+            .systemConnection
+            .take()
+            .into_iter()
+            .chain(self.sessionConnection.take())
+        {
+            let _ = connection.close();
+        }
+        let workers = std::mem::take(&mut self.workers);
+        let (finishedSender, finishedReceiver) = mpsc::channel::<()>();
+        let joined = thread::Builder::new()
+            .name("operit-linux-host-runtime-event-join".to_string())
+            .spawn(move || {
+                for worker in workers {
+                    let _ = worker.join();
+                }
+                let _ = finishedSender.send(());
+            })
+            .is_ok();
+        if joined {
+            let _ = finishedReceiver.recv_timeout(Duration::from_millis(500));
         }
     }
 }
@@ -64,8 +89,8 @@ impl HostRuntimeEventHost for LinuxHostRuntimeEventHost {
         let sessionRunning = running.clone();
         let systemSink = sink.clone();
         let sessionSink = sink.clone();
-        let (systemSender, systemReceiver) = mpsc::channel::<Result<(), String>>();
-        let (sessionSender, sessionReceiver) = mpsc::channel::<Result<(), String>>();
+        let (systemSender, systemReceiver) = mpsc::channel::<Result<Connection, String>>();
+        let (sessionSender, sessionReceiver) = mpsc::channel::<Result<Connection, String>>();
         let systemWorker = thread::Builder::new()
             .name("operit-linux-host-runtime-event-system".to_string())
             .spawn(move || run_system_dbus_event_loop(systemSink, systemRunning, systemSender))
@@ -78,7 +103,7 @@ impl HostRuntimeEventHost for LinuxHostRuntimeEventHost {
             .map_err(|error| {
                 HostError::new(format!("spawn linux session event worker failed: {error}"))
             })?;
-        systemReceiver
+        let systemConnection = systemReceiver
             .recv()
             .map_err(|error| {
                 HostError::new(format!(
@@ -86,7 +111,7 @@ impl HostRuntimeEventHost for LinuxHostRuntimeEventHost {
                 ))
             })?
             .map_err(HostError::new)?;
-        sessionReceiver
+        let sessionConnection = sessionReceiver
             .recv()
             .map_err(|error| {
                 HostError::new(format!(
@@ -97,6 +122,8 @@ impl HostRuntimeEventHost for LinuxHostRuntimeEventHost {
         Ok(Box::new(LinuxHostRuntimeEventRegistration {
             running,
             workers: vec![systemWorker, sessionWorker],
+            systemConnection: Some(systemConnection),
+            sessionConnection: Some(sessionConnection),
         }))
     }
 }
@@ -104,7 +131,7 @@ impl HostRuntimeEventHost for LinuxHostRuntimeEventHost {
 fn run_system_dbus_event_loop(
     sink: HostRuntimeEventSink,
     running: Arc<AtomicBool>,
-    init: mpsc::Sender<Result<(), String>>,
+    init: mpsc::Sender<Result<Connection, String>>,
 ) {
     let connection = match Connection::system() {
         Ok(connection) => connection,
@@ -125,7 +152,7 @@ fn run_system_dbus_event_loop(
             return;
         }
     };
-    let _ = init.send(Ok(()));
+    let _ = init.send(Ok(connection.clone()));
     while running.load(Ordering::SeqCst) {
         let Some(message) = iterator.next() else {
             break;
@@ -160,7 +187,7 @@ fn run_system_dbus_event_loop(
 fn run_session_dbus_event_loop(
     sink: HostRuntimeEventSink,
     running: Arc<AtomicBool>,
-    init: mpsc::Sender<Result<(), String>>,
+    init: mpsc::Sender<Result<Connection, String>>,
 ) {
     let connection = match Connection::session() {
         Ok(connection) => connection,
@@ -181,7 +208,7 @@ fn run_session_dbus_event_loop(
             return;
         }
     };
-    let _ = init.send(Ok(()));
+    let _ = init.send(Ok(connection.clone()));
     while running.load(Ordering::SeqCst) {
         let Some(message) = iterator.next() else {
             break;

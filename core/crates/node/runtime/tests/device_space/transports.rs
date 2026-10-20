@@ -164,30 +164,32 @@ async fn tcpAdmissionReturnChannel(macBind: &str) {
         assert_eq!(response.result.unwrap_err().code, "LOCAL_MANAGEMENT_ONLY");
         assert!(mac.pairedDeviceOnline("tcp-ios".into()).unwrap());
         assert!(ios.pairedDeviceOnline("tcp-mac".into()).unwrap());
-        // Admission establishes a scoped return channel, never a reverse pairing.
+        // Pre-admission applicant traffic rides the gateway's own connection:
+        // the join snapshot succeeds over the return route without an outbound
+        // credential or any Space scope. Admission still establishes the scoped
+        // return channel, never a reverse pairing.
         let request = mac.requestDeviceSpaceJoin("tcp-ios".into()).await.unwrap();
         assert!(iosRouter.spaceChannelScope("tcp-mac").unwrap().is_none());
         assert!(macRouter.spaceChannelScope("tcp-ios").unwrap().is_none());
-        assert_eq!(
-            iosPeer
-                .call(
+        let pendingReturn = iosPeer
+            .call(
+                "tcp-mac",
+                makeRequest(
+                    "tcp-ios",
                     "tcp-mac",
-                    makeRequest(
-                        "tcp-ios",
-                        "tcp-mac",
-                        CoreCallRequest::new(
-                            "pending-return",
-                            NODE_SPACE_TARGET,
-                            "snapshot",
-                            CoreValue::Null
-                        )
+                    CoreCallRequest::new(
+                        "pending-return",
+                        NODE_SPACE_TARGET,
+                        "snapshot",
+                        CoreValue::Null
                     )
                 )
-                .await
-                .result
-                .unwrap_err()
-                .code,
-            "PEER_OUTBOUND_NOT_AUTHORIZED"
+            )
+            .await;
+        assert!(
+            pendingReturn.result.is_ok(),
+            "pre-admission join traffic rides the paired connection: {:?}",
+            pendingReturn.result
         );
         ios.incomingDeviceSpaceJoins().await.unwrap();
         ios.decideDeviceSpaceJoin(request.requestId.clone(), request.assignmentVersion, true)

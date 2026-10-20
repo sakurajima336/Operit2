@@ -93,14 +93,48 @@ test('Web host Promise cancellation is scoped and settlements are exact once', a
   const first = context.request('first', {});
   const second = context.request('second', {});
   let cancelledCompleted = false;
-  first.then(() => { cancelledCompleted = true; });
+  const cancelled = first.then(() => { cancelledCompleted = true; });
+  const rejected = assert.rejects(cancelled, reason => reason === 'JavaScript execution was cancelled');
   registry.cancel('first');
   registry.settle(calls[0][0], 'cancelled', false);
   registry.settle(calls[1][0], 'second', false);
   registry.settle(calls[1][0], 'duplicate', false);
   assert.equal(await second, 'second');
-  await Promise.resolve();
+  await rejected;
   assert.equal(cancelledCompleted, false);
+});
+
+/** Ensures cancellation unwinds a suspended operation and releases an already waiting successor. */
+test('Web host cancellation runs finally and releases the next lifecycle operation', async () => {
+  const { context, calls, registry } = runtime();
+  const first = vm.runInContext(`
+    globalThis.completed = [];
+    globalThis.release = null;
+    globalThis.available = new Promise(resolve => { release = resolve; });
+    (async function() {
+      try {
+        await request('weather', {});
+        completed.push('weather');
+      } finally {
+        completed.push('released');
+        release();
+      }
+    })();
+  `, context);
+  const rejected = assert.rejects(first, reason => reason === 'JavaScript execution was cancelled');
+  const next = vm.runInContext(`
+    (async function() {
+      await available;
+      completed.push('before_create');
+      return 'new chat';
+    })();
+  `, context);
+  registry.cancel('weather');
+  await rejected;
+  assert.equal(await next, 'new chat');
+  registry.settle(calls[0][0], 'late weather result', false);
+  await Promise.resolve();
+  assert.deepEqual([...context.completed], ['released', 'before_create']);
 });
 
 /** Ensures submission exceptions release their pending slot and later requests remain usable. */

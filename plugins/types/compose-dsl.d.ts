@@ -2774,6 +2774,10 @@ export type ComposeAnimationCurve = "linear" | "easeOutCubic" | "easeInOut" | "e
  */
 export interface ComposeBoxAnimation {
   /**
+   * Animates intrinsic child size changes, including inserting or removing content.
+   */
+  animateContentSize?: boolean;
+  /**
    * Transition duration in milliseconds; zero applies changes immediately.
    */
   durationMillis?: number;
@@ -2918,6 +2922,44 @@ export interface MarkdownProps extends ComposeCommonProps {
 }
 
 /**
+ * Optional native input decoration overrides; omitted fields inherit the host theme.
+ */
+export interface ComposeTextFieldDecoration {
+  /**
+   * Uses compact vertical layout for the input decoration.
+   */
+  isDense?: boolean;
+  /**
+   * Paints the input container with its fill color.
+   */
+  filled?: boolean;
+  /**
+   * Background paint inside the input border.
+   */
+  fillColor?: ComposeColor;
+  /**
+   * Rounded outline radius; the resting outline is hidden unless borderColor is supplied.
+   */
+  cornerRadius?: number;
+  /**
+   * Resting outline color.
+   */
+  borderColor?: ComposeColor;
+  /**
+   * Outline color while the field has focus.
+   */
+  focusedBorderColor?: ComposeColor;
+  /**
+   * Insets around editable input content.
+   */
+  contentPadding?: ComposePadding;
+  /**
+   * Typography and color overrides for the placeholder.
+   */
+  hintStyle?: ComposeTextFieldStyle;
+}
+
+/**
  * State, decoration, validation, and typography for an editable text field.
  * Standard themed input frame for arbitrary plugin-owned content.
  * Controlled horizontally swipeable pages.
@@ -2959,6 +3001,10 @@ export interface InputDecoratorProps extends ComposeCommonProps {
  * State, decoration, validation, and typography for an editable text field.
  */
 export interface TextFieldProps extends ComposeCommonProps {
+  /**
+   * Optional native input decoration overrides.
+   */
+  decoration?: ComposeTextFieldDecoration;
   /**
    * Optional width constraint for suffix icon content.
    */

@@ -81,7 +81,7 @@ test("resolver rejects historical configuration inputs before reading current st
 
 /** Exercises the actual file service with a creation draft and strictly disallowed host chat capabilities. */
 test("draft resolver consumes supplied chatExtension and returns a complete persisted-domain send snapshot without querying a nonexistent chat", async t => {
-  const disk = await createDiskHarness(t), calls = [], files = loadModule("src/storage/database.ts", disk.globals);
+  const disk = await createDiskHarness(t, { legacyIdentity: "default" }), calls = [], files = loadModule("src/storage/database.ts", disk.globals);
   const repository = await files.DatabaseCharacterRepository.open(controlledDirectories(calls));
   const service = loadModule("src/service.ts", disk.globals).createCharacterCardsService(repository);
   const result = plain(await service.dispatchDomain("chat.configuration.resolve", request({ version: 1, selection: "card:default" }, null)));

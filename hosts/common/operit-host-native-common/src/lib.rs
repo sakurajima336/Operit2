@@ -3,6 +3,9 @@
 pub mod DartPort;
 pub mod SharedBuffer;
 
+#[cfg(feature = "daemon")]
+pub mod DaemonHost;
+
 #[cfg(all(feature = "serial", not(any(target_os = "ios", target_os = "espidf", target_arch = "wasm32"))))]
 mod SerialPort;
 #[cfg(all(feature = "serial", not(any(target_os = "ios", target_os = "espidf", target_arch = "wasm32"))))]

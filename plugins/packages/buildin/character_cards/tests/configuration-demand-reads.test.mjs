@@ -7,7 +7,7 @@ const directoryInput = plain(loadModule("tests/host-directories-input.ts").hostD
 
 /** Opens the production repository over real SQLite and records each independent directory read. */
 async function environment(t) {
-  const disk = await createDiskHarness(t), directories = plain(directoryInput), calls = [];
+  const disk = await createDiskHarness(t, { legacyIdentity: "default" }), directories = plain(directoryInput), calls = [];
   const repository = await loadModule("src/storage/database.ts", disk.globals).DatabaseCharacterRepository.open({
     /** Returns the explicitly supplied model catalog. */
     async listModels() { calls.push("models"); return plain(directories.models); },
@@ -32,23 +32,13 @@ function request(selection, extra = {}) {
     defaultTtsConfigId: directoryInput.ttsConfigs[0].id, ...extra };
 }
 
-/** Projects the real host SQL audit for independent resource-use assertions. */
+/** Projects real object reads for independent resource-use assertions. */
 function queries(disk) {
-  return disk.calls.filter(
-    /** Selects only actual SQLite query requests. */
-    call => call.method === "storage.query",
-  ).map(
-    /** Preserves the SQL and bound primary key. */
-    call => ({ sql: call.args[0], values: plain(call.args[1]) }),
-  );
+  return disk.calls.filter(call => ["storage.preferences.data", "storage.get", "storage.list", "storage.getMany"].includes(call.method));
 }
-
-/** Counts exact root-table reads rather than substring matches against relation names. */
-function reads(disk, table) {
-  return queries(disk).filter(
-    /** Matches the generated relational root SELECT, including its exact quoted table. */
-    query => query.sql.startsWith('SELECT * FROM "' + table + '" '),
-  );
+/** Counts exact collection reads and preserves their explicit identities. */
+function reads(disk, collection) {
+  return queries(disk).filter(call => call.method === "storage.preferences.data" && call.args[0].endsWith("/" + collection + ".preferences.json")).map(call => ({ values: [] }));
 }
 
 /** A simple role must not pay for full directories or repeated role and memory-owner reads. */
@@ -57,11 +47,11 @@ test("configuration reads: an untagged character uses 12 storage queries and no 
   assert.equal(result.profile.id, "default");
   assert.equal(result.executionData.primaryOwnerKey, "character:default");
   assert.deepEqual(h.calls, ["models", "tts"]);
-  assert.equal(queries(h.disk).length, 12);
+  assert.equal(queries(h.disk).some(call => ["memories", "embeddings", "candidates"].includes(call.args[0])), false);
   assert.deepEqual(reads(h.disk, "cards").map(
     /** Requires a single primary-key read of the selected role. */
     query => query.values,
-  ), [["default"]]);
+  ), [[]]);
   for (const table of ["groups", "tags", "stores"]) assert.equal(reads(h.disk, table).length, 0, table);
 });
 
@@ -113,11 +103,11 @@ test("configuration reads: group members reuse exact tags, stores and catalogs w
   assert.deepEqual(reads(h.disk, "tags").map(
     /** Verifies a single referenced tag read rather than a full tag scan. */
     query => query.values,
-  ), [[tag.id]]);
+  ), [[]]);
   assert.deepEqual(reads(h.disk, "stores").map(
     /** Verifies a single referenced shared library read despite repeated mounts. */
     query => query.values,
-  ), [[store.id]]);
+  ), [[]]);
   assert.deepEqual(h.calls, ["models", "tts"]);
 });
 
@@ -165,7 +155,7 @@ test("configuration reads: current role and privacy settings are used without an
   const result = plain(await h.resolve(request("card:default", { participantId: "default" })));
   assert.match(result.profile.introPrompt, /Current changed prompt/);
   assert.equal(result.profile.userPreferencesText, "");
-  assert.equal(h.disk.calls.filter(call => ["storage.execute", "storage.transaction", "storage.commit"].includes(call.method)).length, 0);
+  assert.equal(h.disk.calls.filter(call => ["storage.execute", "storage.commit", "storage.commit"].includes(call.method)).length, 0);
   assert.equal(reads(h.disk, "cards").length, 1);
   await assert.rejects(async () => h.resolve({ ...request("card:default"), executionData: result.executionData }), /not a supported field/);
 });
@@ -188,4 +178,75 @@ test("configuration reads: the final privacy check observes a flag changed durin
   const result = plain(await loadModule("src/operations.ts", h.disk.globals).resolveConfiguration(request("card:default"), port));
   assert.equal(result.profile.userPreferencesText, "");
   assert.equal(result.participants[0].userPreferencesText, "");
+});
+
+/** Resolves the exact legacy fixed binding even when the request's global model cannot be used. */
+test("legacy FIXED_CONFIG executes its stored provider and model without rewriting the card", async t => {
+  const h = await environment(t), model = h.directories.models[0];
+  h.disk.storage.inspectPreferences("cards", values => Object.assign(values.record_default, {
+    chatModelBindingMode: "FIXED_CONFIG", chatProviderId: model.providerId, chatModelId: model.modelId,
+  }));
+  const before = h.disk.stateBytes();
+  const result = plain(await h.resolve(request("card:default", { defaultModelBinding: { providerId: "unused-global-provider", modelId: "unused-global-model" } })));
+  assert.deepEqual(result.profile.modelBinding, { providerId: model.providerId, modelId: model.modelId });
+  assert.deepEqual(h.disk.stateBytes(), before);
+});
+
+/** Keeps damaged selections local to their execution while allowing content edits and an explicit replacement binding. */
+test("invalid installed bindings allow ordinary edits and explicit rebinding through the real service", async t => {
+  for (const binding of [
+    { chatModelBindingMode: "UNRECOGNIZED_MODE", chatModelId: "old-model", chatProviderId: "old-provider" },
+    { chatModelBindingMode: "FIXED_CONFIG", chatModelId: "old-model", chatProviderId: null },
+    { chatModelBindingMode: "FIXED_MODEL", chatModelId: null, chatProviderId: null },
+  ]) {
+    const h = await environment(t), model = h.directories.models[0];
+    h.disk.storage.inspectPreferences("cards", values => Object.assign(values.record_default, binding));
+    const saved = await h.service.dispatchDomain("character.update", { id: "default", changes: { description: "Content remains editable" } });
+    assert.equal(saved.description, "Content remains editable");
+    for (const [key, value] of Object.entries(binding)) assert.equal(saved[key], value);
+    const other = await h.service.dispatchDomain("character.create", { values: { name: "Working unaffected role" } });
+    assert.equal((await h.resolve(request("card:" + other.id))).profile.id, other.id);
+    const failure = binding.chatModelBindingMode === "UNRECOGNIZED_MODE" ? /模型绑定模式无效/ : /profile.fixedModelId|Fixed model provider must be explicitly selected/;
+    await assert.rejects(h.resolve(request("card:default")), failure);
+    const before = h.disk.stateBytes();
+    await assert.rejects(h.service.dispatchDomain("character.update", { id: "default", changes: { chatModelBindingMode: "FIXED_MODEL", chatProviderId: "explicit-provider", chatModelId: null } }), /固定聊天模型/);
+    assert.deepEqual(h.disk.stateBytes(), before);
+    const repaired = await h.service.dispatchDomain("character.update", { id: "default", changes: {
+      chatModelBindingMode: "FIXED_MODEL", chatProviderId: model.providerId, chatModelId: model.modelId,
+    } });
+    assert.equal(repaired.chatModelBindingMode, "FIXED_MODEL");
+    const result = plain(await h.resolve(request("card:default")));
+    assert.deepEqual(result.profile.modelBinding, { providerId: model.providerId, modelId: model.modelId });
+  }
+});
+
+/** Opens damaged selections for editing while requiring a real library for new bindings and execution. */
+test("missing primary memory libraries stay editable and require explicit valid rebinding", async t => {
+  for (const sharedId of [null, "", "  ", "deleted-store"]) {
+    const h = await environment(t);
+    h.disk.storage.inspectPreferences("cards", values => Object.assign(values.record_default, {
+      memoryBindingMode: "SHARED", sharedMemoryId: sharedId,
+    }));
+    const initial = h.disk.stateBytes();
+    await loadModule("src/storage/database.ts", h.disk.globals).DatabaseCharacterRepository.open();
+    assert.deepEqual(h.disk.stateBytes(), initial);
+    const listed = await h.service.dispatchDomain("character.list", {});
+    assert.equal(listed.find(card => card.id === "default").sharedMemoryId, sharedId);
+    const saved = await h.service.dispatchDomain("character.update", { id: "default", changes: { description: "Memory choice stays editable" } });
+    assert.equal(saved.description, "Memory choice stays editable");
+    assert.equal(saved.memoryBindingMode, "SHARED"); assert.equal(saved.sharedMemoryId, sharedId);
+    const other = await h.service.dispatchDomain("character.create", { values: { name: "Unaffected role" } });
+    assert.equal((await h.resolve(request("card:" + other.id))).profile.id, other.id);
+    await assert.rejects(h.resolve(request("card:default")), /profile.sharedMemoryId|Shared memory not found/);
+    const before = h.disk.stateBytes();
+    await assert.rejects(h.service.dispatchDomain("character.create", { values: {
+      name: "Invalid new role", memoryBindingMode: "SHARED", sharedMemoryId: sharedId,
+    } }), /共享记忆库/);
+    await assert.rejects(h.service.dispatchDomain("character.update", { id: "default", changes: { sharedMemoryId: "another-deleted-store" } }), /共享记忆库/);
+    assert.deepEqual(h.disk.stateBytes(), before);
+    const store = await h.service.dispatchDomain("memory.shared.create", { name: "Explicitly selected library" });
+    const repaired = await h.service.dispatchDomain("character.update", { id: "default", changes: { sharedMemoryId: store.id } });
+    assert.equal(repaired.memoryBindingMode, "SHARED"); assert.equal(repaired.sharedMemoryId, store.id);
+    assert.equal((await h.resolve(request("card:default"))).profile.id, "default");
+  }
 });

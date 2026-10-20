@@ -86,7 +86,7 @@ test("static: three real tool policy entries retain isolated awaited snapshots a
 test("static negative: removing batch failure propagation is a red item", () => {
   const input = sources();
   const before = input.manager;
-  input.manager = input.manager.replace(".await?;\n            AppLogger::d(", ".await.unwrap_or_default();\n            AppLogger::d(");
+  input.manager = input.manager.replace(".await?;\n            AppLogger::v_with_level(", ".await.unwrap_or_default();\n            AppLogger::v_with_level(");
   assert.notEqual(input.manager, before, "The negative case must change the real awaited tool invocation");
   assert.ok(violations(input).indexOf("batch aborts original policy error") !== -1);
 });

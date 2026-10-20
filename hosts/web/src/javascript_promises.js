@@ -142,10 +142,13 @@
         else request.resolve(value);
     }
 
-    /** Releases every pending completion belonging to the cancelled scope. */
+    /** Rejects cancelled requests so suspended JavaScript can release shared resources. */
     function cancel(scope) {
         apply(mapForEach, pending, [function(request, id) {
-            if (request.scope === scope) apply(mapDelete, pending, [id]);
+            if (request.scope === scope) {
+                apply(mapDelete, pending, [id]);
+                request.reject('JavaScript execution was cancelled');
+            }
         }]);
     }
 

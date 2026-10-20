@@ -186,6 +186,26 @@ The iOS workflow runs on `macos-15` and records the installed Xcode SDK,
 Clang, Meson, and Ninja versions in its cache key. Keep those runner and source
 pins synchronized with `.github/workflows/ios-flutter-build.yml` and
 `.github/workflows/ios-app-package-build.yml`.
+
+## Generated Plugin Assets
+
+`core/crates/runtime/application/assets/plugins/{buildin,external}` is generated
+at build time and gitignored. `operit-runtime`'s `build.rs` embeds those files
+into every binary, so they must be regenerated from `plugins/packages/` before
+compiling:
+
+```bash
+python3 plugins/tools/sync_plugin_packages.py --source runtime --no-hot-reload
+```
+
+Flutter platform builds run this automatically through their native build hooks,
+and the CLI build scripts (`build_cli_*.py`, `tools/release/build_release.py`)
+run it before `cargo build`. Running `cargo build --release` by hand without that
+step fails in `build.rs` when assets are missing or stale; debug `cargo check`
+only warns. CLI packaging also rejects a binary that omits any generated asset
+name. Never copy this directory between machines: a stale snapshot builds a
+binary whose plugin set silently differs from the source tree.
+
 ## Built-In Workflow Plugin
 
 The workflow plugin is a pnpm project. Its `package.json` pins the package
@@ -335,10 +355,10 @@ CLI architecture selection:
 On Windows, `--cli-arches all` builds:
 
 ```text
-operit2-cli-windows-x86_64.zip
-operit2-cli-windows-aarch64.zip
-operit2-cli-linux-x86_64.tar.gz
-operit2-cli-linux-aarch64.tar.gz
+operit2-cli-windows-x86_64-<release-version>.zip
+operit2-cli-windows-aarch64-<release-version>.zip
+operit2-cli-linux-x86_64-<release-version>.tar.gz
+operit2-cli-linux-aarch64-<release-version>.tar.gz
 ```
 
 Cloud workflows are independent manual `workflow_dispatch` entrypoints. The
@@ -402,10 +422,10 @@ Local Apple builds require Xcode, Rust, FVM, Node/npm, and Python 3 on the macOS
 host. Apple outputs include:
 
 ```text
-operit2-app-macos-universal.zip
-operit2-app-ios-arm64.zip
-operit2-cli-macos-x86_64.tar.gz
-operit2-cli-macos-aarch64.tar.gz
+operit2-app-macos-universal-<release-version>.zip
+operit2-app-ios-arm64-<release-version>.zip
+operit2-cli-macos-x86_64-<release-version>.tar.gz
+operit2-cli-macos-aarch64-<release-version>.tar.gz
 ```
 
 The output directory is:
@@ -556,8 +576,10 @@ python tools\build_scripts\build_flutter_android.py --build-name 2.0.0 --build-n
 
 The command runs the full chain (plugin packaging, Rust bridge cross-build,
 Gradle `assembleRelease`) and writes
-`tools/release/dist/operit2-app-android-arm64-v8a.apk`. The NDK is provisioned
-automatically by the Android Gradle Plugin; `rustup target add aarch64-linux-android`
+`tools/release/dist/operit2-app-android-arm64-v8a-<release-version>.apk`.
+The filename uses the full release version
+(for example, `2.0.0-preview.16`), including any prerelease identifiers.
+The NDK is provisioned automatically by the Android Gradle Plugin; `rustup target add aarch64-linux-android`
 is still required for the Rust bridge.
 
 Android Gradle selects the Rust bridge profile from the Android build variant:
@@ -762,7 +784,7 @@ That directory is ignored by git and should be treated as local build output.
 The signed build output is copied to:
 
 ```text
-tools/release/dist/operit2-app-ohos-arm64.hap
+tools/release/dist/operit2-app-ohos-arm64-<release-version>.hap
 ```
 
 If the Flutter command reports `Can't load Kernel binary`, clear stale FVM or

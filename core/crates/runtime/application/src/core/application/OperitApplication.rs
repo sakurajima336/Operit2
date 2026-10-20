@@ -39,7 +39,7 @@ use operit_store::RuntimeStorageHost::{
 };
 use operit_store::RuntimeStorePaths::RuntimeStorePaths;
 use operit_store::SyncOperationStore::{
-    compactSyncOperations, SyncClock, SyncOperation, SyncOperationStore,
+    boundSyncOperationPage, compactSyncOperations, SyncClock, SyncOperation, SyncOperationStore,
 };
 use operit_tools::files::PathMapper::PathMapper;
 use operit_tools::files::VisualFileSystem::VisualFileSystem;
@@ -836,11 +836,19 @@ impl OperitApplication {
             &mut clock,
             sqlStore.localClock().map_err(|error| error.to_string())?,
         );
-        mergeSyncClock(
-            &mut clock,
-            PluginStorage::localClock(self.pluginSqliteHost()?).map_err(|e| e.to_string())?,
-        );
-        serde_json::to_value(clock).map_err(|error| error.to_string())
+        let pluginClock = self.pluginSqliteHost().and_then(|host| {
+            PluginStorage::localClock(host).map_err(|error| error.to_string())
+        });
+        let mut domainErrors = std::collections::BTreeMap::new();
+        match pluginClock {
+            Ok(pluginClock) => mergeSyncClock(&mut clock, pluginClock),
+            Err(error) => {
+                domainErrors.insert(PLUGIN_STORAGE_SYNC_DOMAIN, error);
+            }
+        }
+        let mut result = serde_json::to_value(clock).map_err(|error| error.to_string())?;
+        result["domainErrors"] = serde_json::to_value(domainErrors).map_err(|error| error.to_string())?;
+        Ok(result)
     }
 
     /// Lists compacted sync operations newer than the provided device clock.
@@ -854,7 +862,12 @@ impl OperitApplication {
         let clock: SyncClock = serde_json::from_value(clock).map_err(|error| error.to_string())?;
         let store = self.runtimeSyncOperationStore()?;
         let mut operations = store
-            .operationsSince(&clock, &domains, limit)
+            .operationsSinceWithBudget(
+                &clock,
+                &domains,
+                limit,
+                operit_store::SyncOperationStore::DEFAULT_SYNC_PAGE_BYTES,
+            )
             .map_err(|error| error.to_string())?;
         let sqlStore = SqlChatSyncStore::default().map_err(|error| error.to_string())?;
         operations.extend(
@@ -862,10 +875,18 @@ impl OperitApplication {
                 .operationsSince(&clock, &domains, limit)
                 .map_err(|error| error.to_string())?,
         );
-        operations.extend(
-            PluginStorage::operationsSince(self.pluginSqliteHost()?, &clock, &domains, limit)
-                .map_err(|e| e.to_string())?,
-        );
+        if domains.is_empty() || domains.iter().any(|domain| domain == PLUGIN_STORAGE_SYNC_DOMAIN) {
+            operations.extend(
+                PluginStorage::operationsSinceWithBudget(
+                    self.pluginSqliteHost()?,
+                    &clock,
+                    &domains,
+                    limit,
+                    operit_store::SyncOperationStore::DEFAULT_SYNC_PAGE_BYTES,
+                )
+                .map_err(|error| format!("plugin_storage export: {error}"))?,
+            );
+        }
         operations.retain(|operation| {
             !crate::data::backup::CharacterPluginMigration::isRetiredCharacterOperation(operation)
         });
@@ -877,7 +898,15 @@ impl OperitApplication {
         });
         operations = compactSyncOperations(operations);
         operations.truncate(limit);
-        serde_json::to_value(operations).map_err(|error| error.to_string())
+        // Bound the page by bytes as well as by count: one transaction can be
+        // hundreds of KiB, so a count-only page has no memory ceiling. The first
+        // operation always travels even when it alone exceeds the budget; the
+        // send path reports an operation that cannot fit any message.
+        let page = boundSyncOperationPage(
+            operations,
+            operit_store::SyncOperationStore::DEFAULT_SYNC_PAGE_BYTES,
+        );
+        serde_json::to_value(page).map_err(|error| error.to_string())
     }
 
     /// Applies incoming sync operations to their owning persistent stores.
@@ -992,7 +1021,7 @@ impl OperitApplication {
             }
         }
         let mergeReferenceMap = operit_store::PreferenceMerge::applyOperations(
-            storageHost,
+            storageHost.clone(),
             &mergeSchema,
             &history,
             &preferenceOperations,
@@ -1003,22 +1032,14 @@ impl OperitApplication {
             },
             complete,
         )?;
-        // These domain stores record their own clocks. A newer chat/binding
-        // operation must not make an earlier failed preference delta disappear
-        // from the next synchronization retry.
-        let mut appliedPluginOperations = Vec::new();
+        // Commit core stores independently of plugin-owned transactions and clocks.
+        let mut pluginOperations = Vec::new();
         for operation in observedDomainOperations {
+            if operation.domain == PLUGIN_STORAGE_SYNC_DOMAIN {
+                pluginOperations.push(operation);
+                continue;
+            }
             match operation.domain.as_str() {
-                PLUGIN_STORAGE_SYNC_DOMAIN => PluginStorage::applyOperation(
-                    self.pluginSqliteHost()?,
-                    self.hostManager
-                        .runtimeStorageHost
-                        .clone()
-                        .ok_or("RuntimeStorageHost is not registered")?,
-                    &operation,
-                    &mergeReferenceMap,
-                )
-                .map_err(|e| e.to_string()),
                 CHAT_SYNC_DOMAIN => sqlStore
                     .applyOperation(&operation)
                     .map_err(|error| error.to_string()),
@@ -1026,12 +1047,7 @@ impl OperitApplication {
                 NETWORK_CONTROL_SYNC_DOMAIN => networkControlStore.applySyncedOperation(&operation),
                 _ => unreachable!("observed sync domains are classified before materialization"),
             }?;
-            if operation.domain == PLUGIN_STORAGE_SYNC_DOMAIN {
-                appliedPluginOperations.push(operation);
-            }
         }
-        PluginStorage::reconcilePreferenceReferences(self.pluginSqliteHost()?, &mergeReferenceMap)
-            .map_err(|error| error.to_string())?;
         store
             .recordAppliedOperations(&appliedPersistentOperations)
             .map_err(|error| error.to_string())?;
@@ -1040,9 +1056,44 @@ impl OperitApplication {
             .map_err(|error| error.to_string())?;
         if let Some(storage) = self.hostManager.runtimeStorageHost.as_ref() {
             operit_store::SyncAppliedChanges::publish(storage, &appliedPersistentOperations);
-            operit_store::SyncAppliedChanges::publish(storage, &appliedPluginOperations);
         }
         self.refreshSynchronizedChatFlows(&synchronizedChatIds)?;
+        let mut pluginErrors = Vec::new();
+        let mut failedOrigins = std::collections::BTreeSet::new();
+        let mut appliedPluginOperations = Vec::new();
+        for operation in pluginOperations {
+            if failedOrigins.contains(&operation.originDeviceId) {
+                continue;
+            }
+            let result = self.pluginSqliteHost().and_then(|host| {
+                PluginStorage::applyOperation(
+                    host,
+                    storageHost.clone(),
+                    &operation,
+                    &mergeReferenceMap,
+                ).map_err(|error| error.to_string())
+            });
+            match result {
+                Ok(()) => appliedPluginOperations.push(operation),
+                Err(error) => {
+                    pluginErrors.push(format!("plugin_storage apply op={}: {error}", operation.opId));
+                    failedOrigins.insert(operation.originDeviceId);
+                }
+            }
+        }
+        if let Some(storage) = self.hostManager.runtimeStorageHost.as_ref() {
+            operit_store::SyncAppliedChanges::publish(storage, &appliedPluginOperations);
+        }
+        let reconciliation = self.pluginSqliteHost().and_then(|host| {
+            PluginStorage::reconcilePreferenceReferences(host, &mergeReferenceMap)
+                .map_err(|error| error.to_string())
+        });
+        if let Err(error) = reconciliation {
+            pluginErrors.push(format!("plugin_storage reconcile: {error}"));
+        }
+        if !pluginErrors.is_empty() {
+            return Err(pluginErrors.join("; "));
+        }
         AppLogger::trace(
             "CoreSyncTrace",
             &format!(

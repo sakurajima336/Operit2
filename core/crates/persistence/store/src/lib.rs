@@ -1,3 +1,5 @@
+#[path = "MergeRules.rs"]
+mod MergeRules;
 #[path = "SyncAppliedChanges.rs"]
 pub mod SyncAppliedChanges;
 #[cfg(feature = "full")]
@@ -19,6 +21,8 @@ pub mod PluginStorage;
 pub mod PreferenceMerge;
 #[path = "PreferencesDataStore.rs"]
 pub mod PreferencesDataStore;
+#[path = "PreferencesExport.rs"]
+pub mod PreferencesExport;
 #[path = "PreferencesEncryption.rs"]
 pub mod PreferencesEncryption;
 #[cfg(feature = "full")]

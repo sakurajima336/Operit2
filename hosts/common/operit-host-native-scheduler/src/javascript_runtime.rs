@@ -314,11 +314,21 @@ impl HostJavaScriptRuntime for NativeHostJavaScriptRuntime {
         result
     }
 
-    /// Removes only the native Promise handles belonging to the cancelled scope.
+    /// Rejects cancelled requests so suspended JavaScript can release shared resources.
     fn cancelHostJavaScriptPromises(&mut self, scope: &str) -> HostResult<()> {
-        self.promises
-            .borrow_mut()
-            .retain(|_, pending| pending.scope != scope);
+        let ids = self
+            .promises
+            .borrow()
+            .iter()
+            .filter_map(|(id, pending)| (pending.scope == scope).then_some(*id))
+            .collect::<Vec<_>>();
+        for id in ids {
+            self.settleHostJavaScriptPromise(
+                id,
+                JsonValue::String("JavaScript execution was cancelled".to_string()),
+                true,
+            )?;
+        }
         Ok(())
     }
 
@@ -970,6 +980,7 @@ mod bridge_tests {
         assert!(runtime.promises.borrow().is_empty());
     }
 
+    /// Cancellation rejects only its scope, runs cleanup once, and ignores late host results.
     #[test]
     fn structured_promises_settle_once_and_cancellation_is_scoped() {
         let mut runtime = runtime();
@@ -984,7 +995,16 @@ mod bridge_tests {
                 }),
             )
             .unwrap();
-        runtime.evaluateHostJavaScriptVoid("test", "globalThis.results=[]; request('first',{i:7}).then(v=>results.push(v)); request('second',{i:8}).then(v=>results.push(v));").unwrap();
+        runtime.evaluateHostJavaScriptVoid("test", r#"
+            globalThis.results=[];
+            globalThis.cancelledReason='';
+            globalThis.cleaned=0;
+            request('first',{i:7}).then(
+                value=>results.push(value),
+                reason=>{cancelledReason=reason;},
+            ).finally(()=>{cleaned++;});
+            request('second',{i:8}).then(value=>results.push(value));
+        "#).unwrap();
         let requests = requests.lock().unwrap();
         assert_eq!(requests[0].1, vec![serde_json::json!({"i":7})]);
         assert_eq!(runtime.promises.borrow().len(), 2);
@@ -1017,6 +1037,18 @@ mod bridge_tests {
                 .evaluateHostJavaScriptString("test", "JSON.stringify(results)")
                 .unwrap(),
             "[{\"message\":\"business\",\"success\":false}]"
+        );
+        assert_eq!(
+            runtime
+                .evaluateHostJavaScriptString("test", "cancelledReason")
+                .unwrap(),
+            "JavaScript execution was cancelled"
+        );
+        assert_eq!(
+            runtime
+                .evaluateHostJavaScriptString("test", "String(cleaned)")
+                .unwrap(),
+            "1"
         );
         assert!(runtime.promises.borrow().is_empty());
     }

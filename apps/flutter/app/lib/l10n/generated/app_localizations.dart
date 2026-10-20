@@ -5204,6 +5204,12 @@ abstract class AppLocalizations {
   /// **'Bubble preview with 9-slice guides'**
   String get settingsAppearanceBubbleImagePreviewText;
 
+  /// No description provided for @settingsAppearanceBubbleImageImportFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Bubble image was not applied: {error}'**
+  String settingsAppearanceBubbleImageImportFailed(String error);
+
   /// No description provided for @settingsAppearanceBubbleImageCrop.
   ///
   /// In en, this message translates to:
@@ -6598,6 +6604,12 @@ abstract class AppLocalizations {
   /// **'Package'**
   String get pluginLoadingKindPackage;
 
+  /// No description provided for @pluginLoadingKindPlugin.
+  ///
+  /// In en, this message translates to:
+  /// **'Plugin'**
+  String get pluginLoadingKindPlugin;
+
   /// No description provided for @pluginLoadingKindMcp.
   ///
   /// In en, this message translates to:
@@ -6651,6 +6663,24 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Execution device status unknown'**
   String get chatRouteUnknown;
+
+  /// No description provided for @chatRouteClaimHostPrompt.
+  ///
+  /// In en, this message translates to:
+  /// **'The device host for this chat was not found. Switch it to this device?'**
+  String get chatRouteClaimHostPrompt;
+
+  /// No description provided for @chatRouteClaimHostYes.
+  ///
+  /// In en, this message translates to:
+  /// **'Yes'**
+  String get chatRouteClaimHostYes;
+
+  /// No description provided for @chatRouteClaimHostNo.
+  ///
+  /// In en, this message translates to:
+  /// **'No'**
+  String get chatRouteClaimHostNo;
 
   /// No description provided for @edgePairingCodeTitle.
   ///
@@ -7411,6 +7441,108 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Reset appearance'**
   String get settingsAppearanceResetAfterError;
+
+  /// No description provided for @backgroundWorkIdle.
+  ///
+  /// In en, this message translates to:
+  /// **'No work is running'**
+  String get backgroundWorkIdle;
+
+  /// No description provided for @backgroundWorkRunningCount.
+  ///
+  /// In en, this message translates to:
+  /// **'work items running'**
+  String get backgroundWorkRunningCount;
+
+  /// No description provided for @backgroundWorkWaiting.
+  ///
+  /// In en, this message translates to:
+  /// **'Waiting for your confirmation'**
+  String get backgroundWorkWaiting;
+
+  /// No description provided for @backgroundWorkWaitingCount.
+  ///
+  /// In en, this message translates to:
+  /// **'awaiting confirmation'**
+  String get backgroundWorkWaitingCount;
+
+  /// No description provided for @backgroundWorkCompleted.
+  ///
+  /// In en, this message translates to:
+  /// **'Completed'**
+  String get backgroundWorkCompleted;
+
+  /// No description provided for @backgroundWorkFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Failed — open to view details'**
+  String get backgroundWorkFailed;
+
+  /// No description provided for @backgroundWorkCancelled.
+  ///
+  /// In en, this message translates to:
+  /// **'Stopped'**
+  String get backgroundWorkCancelled;
+
+  /// No description provided for @backgroundWorkProcessing.
+  ///
+  /// In en, this message translates to:
+  /// **'Preparing'**
+  String get backgroundWorkProcessing;
+
+  /// No description provided for @backgroundWorkConnecting.
+  ///
+  /// In en, this message translates to:
+  /// **'Connecting'**
+  String get backgroundWorkConnecting;
+
+  /// No description provided for @backgroundWorkReceiving.
+  ///
+  /// In en, this message translates to:
+  /// **'Writing a response'**
+  String get backgroundWorkReceiving;
+
+  /// No description provided for @backgroundWorkTool.
+  ///
+  /// In en, this message translates to:
+  /// **'Running a tool'**
+  String get backgroundWorkTool;
+
+  /// No description provided for @backgroundWorkToolResult.
+  ///
+  /// In en, this message translates to:
+  /// **'Processing tool results'**
+  String get backgroundWorkToolResult;
+
+  /// No description provided for @backgroundWorkSummarizing.
+  ///
+  /// In en, this message translates to:
+  /// **'Organizing context'**
+  String get backgroundWorkSummarizing;
+
+  /// No description provided for @backgroundWorkPlan.
+  ///
+  /// In en, this message translates to:
+  /// **'Executing a plan'**
+  String get backgroundWorkPlan;
+
+  /// No description provided for @backgroundWorkOpen.
+  ///
+  /// In en, this message translates to:
+  /// **'View conversation'**
+  String get backgroundWorkOpen;
+
+  /// No description provided for @backgroundWorkReview.
+  ///
+  /// In en, this message translates to:
+  /// **'Review'**
+  String get backgroundWorkReview;
+
+  /// No description provided for @backgroundWorkStop.
+  ///
+  /// In en, this message translates to:
+  /// **'Stop'**
+  String get backgroundWorkStop;
 }
 
 class _AppLocalizationsDelegate

@@ -52,7 +52,7 @@ export const CHARACTER_MEMORY_USAGE = [
   "operit2 memory character <character-id> settings <show|write>",
   "operit2 memory character <character-id> search-config <show|write>",
   "operit2 memory character <character-id> export",
-  "operit2 memory character <character-id> import <SKIP|UPDATE|CREATE_NEW> <json-content>",
+  "operit2 memory character <character-id> import <SKIP|UPDATE|CREATE_NEW> <json-content|file-path>",
 ];
 /** Documents shared library management and its owner-scoped subtrees. */
 export const SHARED_MEMORY_USAGE = [
@@ -64,7 +64,7 @@ export const SHARED_MEMORY_USAGE = [
   "operit2 memory shared <shared-id> settings <show|write>",
   "operit2 memory shared <shared-id> search-config <show|write>",
   "operit2 memory shared <shared-id> export",
-  "operit2 memory shared <shared-id> import <SKIP|UPDATE|CREATE_NEW> <json-content>",
+  "operit2 memory shared <shared-id> import <SKIP|UPDATE|CREATE_NEW> <json-content|file-path>",
 ];
 /** Documents USER.md operations with the original content argument semantics. */
 export const USER_USAGE = [

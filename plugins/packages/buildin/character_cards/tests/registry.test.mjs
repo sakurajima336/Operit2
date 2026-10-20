@@ -91,6 +91,17 @@ test("memory command provider retains exact shared owner scope", () => {
   assert.throws(() => api.parseMemoryCommand(["character", "wrong:id", "graph"]), /character:<id> or shared:<id>/);
 });
 
+/** Verifies the import command keeps pasted JSON inline and defers a file path without reading it during parsing. */
+test("memory import accepts pasted JSON or a file path", () => {
+  const api = loadModule("src/commands.ts");
+  const inline = api.parseMemoryCommand(["character", "operit", "import", "SKIP", '{"version":"2.0"}']);
+  assert.equal(inline.kind, "domain"); assert.equal(inline.operation, "memory.import");
+  assert.deepEqual(plain(inline.payload), { ownerKey: "character:operit", strategy: "SKIP", content: '{"version":"2.0"}' });
+  const file = api.parseMemoryCommand(["character", "operit", "import", "UPDATE", "/home/test/backup.json"]);
+  assert.equal(file.kind, "deferred"); assert.equal(typeof file.execute, "function");
+  assert.throws(() => api.parseMemoryCommand(["character", "operit", "import", "REPLACE", "/home/test/backup.json"]), /SKIP \| UPDATE \| CREATE_NEW/);
+});
+
 /** Verifies invalid host command events remain explicit failures in text and structured outputs. */
 test("invalid command events report errors instead of empty successful results", async () => {
   const api = loadModule("src/commands.ts");

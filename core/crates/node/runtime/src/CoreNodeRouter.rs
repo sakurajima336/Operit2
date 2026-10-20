@@ -250,6 +250,15 @@ impl CoreNodeRouter {
         self.peerServices.get().ok_or_else(|| "Node services are not installed".into())
     }
 
+    /// Largest encoded Link message one direct peer connection can carry.
+    /// Callers that build their own payloads size them against this ceiling;
+    /// an uninstalled peer service falls back to the documented default.
+    pub fn maxPeerMessageBytes(&self) -> usize {
+        self.nodeServices()
+            .map(|services| services.peers().maxMessageBytes())
+            .unwrap_or(operit_peer_link::DEFAULT_MAX_PEER_MESSAGE_BYTES)
+    }
+
     /// Creates a router over the local Core and its runtime-owned Link Access records.
     pub fn new(localCore: CoreNodeLocalRuntime) -> Self {
         let bindingStore = Arc::new(
@@ -778,7 +787,7 @@ impl CoreNodeRouter {
     ) -> CoreCallResponse {
         if request.target == NODE_SPACE_TARGET {
             let requestId = request.requestId.clone();
-            if let Err(error) = self.requireDirectPeer(&targetNodeId, PairingDirection::Outbound) {
+            if let Err(error) = self.requireDirectPeer(&targetNodeId, PairingDirection::Either) {
                 return CoreCallResponse::err(requestId, error);
             }
             let space = match self.spaceStore.initialize() {
@@ -1883,12 +1892,13 @@ impl CoreLinkClient for CoreNodeRouter {
 
 // 接收入口只接受 runtime 已鉴权的相邻节点；传输层不能直接把自报身份传进来。
 impl CoreNodeRouter {
-    /// Space 加入前只允许直接配对的业务 Call；出入授权不互相推导。
+    /// Space 加入前只要求与对端存在当前配对，不要求配对方向；加入资格
+    /// 不取决于配对由谁发起，成员资格仍由对端审批决定。
     fn requireDirectPeer(&self, peerNodeId: &str, direction: PairingDirection) -> Result<(), CoreLinkError> {
         if peerNodeId == self.localNodeId || !self.nodeServices()
             .map_err(CoreLinkError::internal)?.peers().hasPairing(peerNodeId, direction)?
         {
-            return Err(CoreLinkError::new("PEER_NOT_AUTHORIZED", "Direct directional pairing is required"));
+            return Err(CoreLinkError::new("PEER_NOT_AUTHORIZED", "A current direct pairing is required"));
         }
         if self.networkControlStore.nodeIsDisconnected(peerNodeId).map_err(CoreLinkError::internal)? {
             return Err(CoreLinkError::new("CORE_NODE_REVOKED", "Peer is revoked from this Space"));
@@ -1917,7 +1927,7 @@ impl CoreNodeRouter {
                 {
                     return Err(CoreLinkError::new("PEER_DIRECT_CALL_REQUIRED", "Node Space calls cannot be relayed"));
                 }
-                self.requireDirectPeer(&previousNodeId, PairingDirection::Inbound)?;
+                self.requireDirectPeer(&previousNodeId, PairingDirection::Either)?;
                 RuntimeRemoteLinkService::newWithRouter((*self.localCore).clone(), self.clone())
                     .acceptPeerSpaceCall(&previousNodeId, request.payload)
                     .map_err(CoreLinkError::internal)
@@ -3483,6 +3493,34 @@ mod tests {
         router.networkControlStore.disconnectNode("sync-peer".into()).unwrap();
         assert!(router.routedCall("sync-peer".into(), request).await.result.is_err());
     }
+
+    /// Space peer calls need only a current pairing, never a specific pairing
+    /// direction: joining a Space must not depend on which side dialed, so an
+    /// inbound-only or outbound-only credential passes the peer gate while a
+    /// missing pairing and a policy disconnect stay rejected.
+    #[tokio::test]
+    async fn space_peer_gate_admits_any_current_pairing_direction() {
+        let _guard = routeTestGlobalLock().lock().await;
+        installTestRuntimeScheduler();
+        let router = testCoreNodeRouter("space-local", "space-peer", "space-binding");
+        let peers = TestPeerService::new("space-local".into(), "space-peer".into(), Arc::new(TestClientEndpoint));
+        router.installNodeServices(NodeServices::new(peers.clone())).unwrap();
+
+        for (inbound, outbound) in [(true, false), (false, true), (true, true)] {
+            peers.setPairingDirections(inbound, outbound);
+            assert!(
+                router.requireDirectPeer("space-peer", PairingDirection::Either).is_ok(),
+                "a current pairing must pass regardless of direction (inbound={inbound} outbound={outbound})"
+            );
+        }
+        peers.setPairingDirections(false, false);
+        let error = router.requireDirectPeer("space-peer", PairingDirection::Either).unwrap_err();
+        assert_eq!(error.code, "PEER_NOT_AUTHORIZED");
+        peers.setPairingDirections(true, true);
+        router.networkControlStore.disconnectNode("space-peer".into()).unwrap();
+        let error = router.requireDirectPeer("space-peer", PairingDirection::Either).unwrap_err();
+        assert_eq!(error.code, "CORE_NODE_REVOKED");
+    }
     /// A handoff must use the admitted peer sync surface, never the local-only application target.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn route_handoff_installs_binding_through_peer_sync() {
@@ -3558,7 +3596,7 @@ mod tests {
                     runtimeChatHistory: Vec::new(), workspacePath: None,
                     promptFunctionType: operit_model::PromptFunctionType::PromptFunctionType::CHAT,
                     enableThinking: false, participantId: String::new(), extensionOwner: String::new(),
-                    executionData: serde_json::Map::new(), proxySenderName: None,
+                    proxySenderName: None,
                     notifyReplyOverride: None, chatProviderIdOverride: None, chatModelIdOverride: None,
                     turnOptions: Default::default(),
                 };

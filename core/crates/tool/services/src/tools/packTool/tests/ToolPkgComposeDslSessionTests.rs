@@ -16,6 +16,7 @@ fn native_session() -> (ToolPkgComposeDslSession, JsEngine) {
 fn options() -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("executionContextKey".into(), Value::String("native-session-order".into())),
+        ("toolPkgId".into(), Value::String("com.operit.character_cards".into())),
         ("__operit_package_lang".into(), Value::String("en".into())),
         ("theme".into(), serde_json::json!({"brightness":"dark", "colors":{"primary":"#ff102030"}})),
     ])
@@ -701,4 +702,134 @@ async fn native_character_sidebar_window_performance_probe() {
     }
     eprintln!("dsl_sidebar_window_probe {}", serde_json::json!({"profile":if cfg!(debug_assertions) {"debug"} else {"release"},
         "scope":"shipped character sidebar, 100 fixture chats, 24-row window moves two rows; native scheduler + QuickJS + retained stream; excludes catalog IPC, Flutter, image IO and GPU", "samples":results}));
+}
+
+/// Keeps background avatar state and overlapping picker actions on one contiguous page stream.
+#[tokio::test(flavor = "current_thread")]
+async fn native_detached_avatar_load_and_concurrent_picker_actions_keep_all_revisions() {
+    let (session, engine) = native_session();
+    let mut stream = session.updates().unwrap();
+    let source = r#"exports.default = function(ctx) {
+        const [avatar, setAvatar] = ctx.useState('avatar', 'initial');
+        const [busy, setBusy] = ctx.useState('busy', false);
+        return ctx.UI.Column({
+            load: function() {
+                void (async function() {
+                    for (let i = 0; i < 8; i++) {
+                        await new Promise(resolve => setTimeout(resolve, 1));
+                        setAvatar('background-' + i);
+                    }
+                })();
+            },
+            pick: async function(index) {
+                setBusy(true);
+                await new Promise(resolve => setTimeout(resolve, 1));
+                setAvatar('selected-' + index);
+                setBusy(false);
+                return index;
+            }
+        }, [ctx.UI.Text({text: avatar + ':' + busy})]);
+    };"#;
+    session.execute(command("render", Some(source.into()), None, None)).await;
+    let mut events = drain(&mut stream);
+    let actions = events.iter().filter_map(|event| event.update.as_ref()).flat_map(|update| &update.upserts)
+        .find(|node| node.nodeType == "Column").unwrap().props.clone();
+    session.execute(command("avatar-load", None, Some(actions["load"]["__actionId"].as_str().unwrap().into()), None)).await;
+    let mut tasks = Vec::new();
+    for index in 0..12 {
+        let session = session.clone();
+        let request = command(&format!("pick-{index}"), None, Some(actions["pick"]["__actionId"].as_str().unwrap().into()), Some(Value::from(index)));
+        tasks.push(async move { session.execute(request).await; });
+    }
+    futures_util::future::join_all(tasks).await;
+    events.extend(drain(&mut stream));
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while !events.iter().filter_map(|event| event.update.as_ref()).flat_map(|update| &update.upserts)
+            .any(|node| node.props.get("text").and_then(Value::as_str).is_some_and(|text| text.starts_with("background-7:"))) {
+            events.push(stream.recv().await.expect("avatar owner must retain its stream"));
+        }
+    }).await.expect("background avatar load must finish");
+    assert_revisions(&events);
+    let mut store = super::super::ToolPkgComposeDslNodeStore::ToolPkgComposeDslNodeStore::default();
+    for event in events { if let Some(update) = event.update { store.apply(update).unwrap(); } }
+    session.close(); engine.destroy();
+}
+
+/// Exercises the shipped native entity editor while its background resources overlap avatar selection.
+#[tokio::test(flavor = "current_thread")]
+async fn native_character_avatar_picker_keeps_all_retained_revisions() {
+    let (session, engine) = native_session();
+    let mut stream = session.updates().unwrap();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).ancestors().nth(4).unwrap();
+    let source = std::fs::read_to_string(root.join("plugins/packages/buildin/character_cards/dist/ui/main/index.ui.js")).unwrap();
+    let setup = r#"exports.install = function() {
+        __operitNativeComposeWebViewControllerCommand = function(command) {
+            if (command.command === 'addJavascriptInterface') globalThis.avatarControllerMethods = command.payload.object;
+            return {success:true, data:null};
+        };
+        const card = {
+            id:'avatar-card', name:'Original', description:'', characterSetting:'Setting', openingStatement:'',
+            otherContentChat:'', otherContentVoice:'', avatarUri:null, attachedTagIds:[], advancedCustomPrompt:'', marks:'',
+            chatModelBindingMode:'FOLLOW_GLOBAL', chatModelId:null, chatProviderId:null, ttsConfigId:null, themeConfigId:null,
+            memoryBindingMode:'CHARACTER', sharedMemoryId:null, sharedMemoryMounts:[],
+            toolAccessConfig:{enabled:false,allowedBuiltinTools:[],allowedPackages:[],allowedSkills:[],allowedMcpServers:[]},
+            createdAt:0, updatedAt:0
+        };
+        ToolPkg.ipc.on('character-memory.request', async function(request) {
+            await new Promise(resolve => setTimeout(resolve, 1));
+            if (request.action === 'listThemeChoices') return [];
+            if (request.action !== 'snapshot') throw new Error('Unexpected request: ' + request.action);
+            return {cards:[card],groups:[],stores:[],tags:[],models:[],ttsConfigs:[],toolCatalog:{builtinTools:[],packages:[],skills:[],mcpServers:[]},active:{CharacterCard:{id:card.id}},memoryPreferences:{userDescriptionEnabled:true,autoUpdateEnabled:true}};
+        });
+        __operitNativeReadToolPkgResource = async function() { await new Promise(resolve => setTimeout(resolve, 2)); return '/app/default-avatar.png'; };
+        __operitNativeGetScopedPluginConfigDir = function() { return '/app/character-config'; };
+        __operitNativeCallToolStructured = async function(owner, type, name, params) {
+            await new Promise(resolve => setTimeout(resolve, 1));
+            if (name === 'get_terminal_info') return {success:true,data:{platform:'linux'}};
+            if (name === 'read_file_binary') return {success:true,data:{size:21,contentBase64:'iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB'}};
+            if (name === 'make_directory' || name === 'write_file_binary') return {success:true,data:{successful:true}};
+            throw new Error('Unexpected avatar tool: ' + name);
+        };
+        __operitNativeComposeFilePickerCommand = async function() {
+            await new Promise(resolve => setTimeout(resolve, 2));
+            return {cancelled:false,files:[{path:'/mnt/avatar.png',name:'avatar.png'}]};
+        };
+        return true;
+    };"#;
+    engine.execute_script_function(setup, "install", &options(), &BTreeMap::new(), None, false, 60, None).await.unwrap();
+    session.execute(command("render", Some(source), None, None)).await;
+    let mut events = drain(&mut stream);
+    assert!(events.iter().all(|event| event.error.is_none()), "{events:?}");
+    let load = events.iter().filter_map(|event| event.update.as_ref()).flat_map(|update| &update.upserts)
+        .find_map(|node| node.props.get("onLoad").and_then(|value| value["__actionId"].as_str())).unwrap().to_string();
+    session.execute(command("load", None, Some(load), None)).await;
+    events.extend(drain(&mut stream));
+    let methods = engine.execute_script_function(
+        "exports.inspect = function() { return globalThis.avatarControllerMethods; };",
+        "inspect", &options(), &BTreeMap::new(), None, false, 60, None,
+    ).await.unwrap().unwrap();
+    let methods: Value = serde_json::from_str(&methods).unwrap();
+    let open = methods["openEntity"]["__actionId"].as_str().expect("management must register its native editor action");
+    session.execute(command("open-editor", None, Some(open.into()), Some(serde_json::json!(["edit","card","avatar-card"])))).await;
+    events.extend(drain(&mut stream));
+    assert_revisions(&events);
+    let load_entity = events.iter().filter_map(|event| event.update.as_ref()).flat_map(|update| &update.upserts).rev()
+        .find(|node| node.nodeType == "Dialog")
+        .and_then(|node| node.props.get("onLoad")).and_then(|value| value["__actionId"].as_str()).unwrap().to_string();
+    session.execute(command("load-entity", None, Some(load_entity), None)).await;
+    events.extend(drain(&mut stream));
+    for index in 0..3 {
+        assert_revisions(&events);
+        let pick = events.iter().filter_map(|event| event.update.as_ref()).flat_map(|update| &update.upserts).rev()
+            .find(|node| node.props.get("key").and_then(Value::as_str) == Some("entity-choose-avatar"))
+            .and_then(|node| node.props.get("onClick")).and_then(|value| value["__actionId"].as_str()).unwrap().to_string();
+        session.execute(command(&format!("pick-{index}"), None, Some(pick), None)).await;
+        events.extend(drain(&mut stream));
+    }
+    assert_revisions(&events);
+    let mut store = super::super::ToolPkgComposeDslNodeStore::ToolPkgComposeDslNodeStore::default();
+    for event in events { if let Some(update) = event.update { store.apply(update).unwrap(); } }
+    let snapshot = store.snapshot().unwrap();
+    assert!(snapshot.upserts.iter().any(|node| node.props.get("key").and_then(Value::as_str) == Some("entity-edit-avatar") && node.props.get("uri").and_then(Value::as_str).is_some_and(|uri| uri.starts_with("/app/character-config/avatars/"))), "avatar selection must finish");
+    session.close(); engine.destroy();
 }

@@ -235,7 +235,7 @@ pub struct ChatHistoryDelegate {
     pub chatConfigurationsFlow: MutableStateFlow<HashMap<String, ChatConfigurationDisplayResult>>,
     pub isInitialized: bool,
     pub allowAddMessage: bool,
-    pub beforeDestructiveHistoryMutation: Option<fn(String)>,
+    pub beforeDestructiveHistoryMutation: Option<Arc<dyn Fn(String) + Send + Sync>>,
     pub afterDestructiveHistoryMutation: Option<fn(String)>,
     pub pendingPersistChatOrderJob: Option<String>,
 }
@@ -303,7 +303,7 @@ impl ChatHistoryDelegate {
             chatConfigurationsFlow: self.chatConfigurationsFlow.clone(),
             isInitialized: self.isInitialized,
             allowAddMessage: self.allowAddMessage,
-            beforeDestructiveHistoryMutation: self.beforeDestructiveHistoryMutation,
+            beforeDestructiveHistoryMutation: self.beforeDestructiveHistoryMutation.clone(),
             afterDestructiveHistoryMutation: self.afterDestructiveHistoryMutation,
             pendingPersistChatOrderJob: self.pendingPersistChatOrderJob.clone(),
         }
@@ -658,8 +658,8 @@ impl ChatHistoryDelegate {
 
     #[allow(non_snake_case)]
     /// Registers a hook invoked before destructive history mutations.
-    pub fn setBeforeDestructiveHistoryMutation(&mut self, handler: fn(String)) {
-        self.beforeDestructiveHistoryMutation = Some(handler);
+    pub fn setBeforeDestructiveHistoryMutation(&mut self, handler: impl Fn(String) + Send + Sync + 'static) {
+        self.beforeDestructiveHistoryMutation = Some(Arc::new(handler));
     }
 
     #[allow(non_snake_case)]
@@ -671,7 +671,7 @@ impl ChatHistoryDelegate {
     #[allow(non_snake_case)]
     /// Invokes the pre-mutation hook for a chat id.
     pub fn prepareChatForDestructiveMutation(&self, chatId: String) {
-        if let Some(handler) = self.beforeDestructiveHistoryMutation {
+        if let Some(handler) = self.beforeDestructiveHistoryMutation.as_ref() {
             handler(chatId);
         }
     }
@@ -1664,18 +1664,6 @@ impl ChatHistoryDelegate {
             self.finishDestructiveHistoryMutation(chatId);
         }
         deleted
-    }
-
-    #[allow(non_snake_case)]
-    /// Removes the provisional assistant message for a failed response.
-    pub fn discardFailedAssistantMessage(&mut self, chatId: String, timestamp: i64) {
-        self.chatHistoryManager
-            .deleteMessage(chatId.clone(), timestamp)
-            .expect("ChatHistoryManager.deleteMessage must remove failed assistant message");
-        self.removeChatMessage(&chatId, timestamp);
-        if self.currentChatIdFlow.value().as_ref() == Some(&chatId) {
-            self.emitChatHistoryState();
-        }
     }
 
     #[allow(non_snake_case)]

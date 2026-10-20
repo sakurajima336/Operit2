@@ -768,3 +768,251 @@ fn fixed_package_installation_scope_rejects_registration_and_moves_atomically() 
         assert!(!storage.exists(&format!("{}/fixed.toolpkg", ExtensionStore::root("package", other).unwrap())).unwrap());
     }
 }
+
+/// Failed packages can be removed even when device and space both claim the same ID.
+#[test]
+fn deleting_failed_package_removes_conflicting_owners_and_preserves_other_packages() {
+    let storage = host();
+    let store = ExtensionStore::new(storage.clone());
+    register_package_owner(&store, "broken", &["broken"]);
+    register_package_owner(&store, "healthy", &["healthy"]);
+    let mut shared = store.record("package", "broken").unwrap();
+    shared.scope = "space".into();
+    store.write(&shared).unwrap();
+    for scope in ["device", "space"] {
+        storage
+            .writeBytes(
+                &format!("runtime/extensions/{scope}/packages/broken.toolpkg"),
+                b"broken",
+            )
+            .unwrap();
+    }
+    assert!(store
+        .record("package", "broken")
+        .unwrap_err()
+        .contains("ownership conflict"));
+    let before = clock(&storage);
+    assert!(store.deleteFailedPackageInstallations("broken").unwrap());
+    assert!(!store.deleteFailedPackageInstallations("broken").unwrap());
+    assert_eq!(store.records("package").unwrap().len(), 1);
+    assert_eq!(store.record("package", "healthy").unwrap().id, "healthy");
+    for scope in ["device", "space"] {
+        assert!(!storage
+            .exists(&format!(
+                "runtime/extensions/{scope}/packages/broken.toolpkg"
+            ))
+            .unwrap());
+    }
+    assert!(operations(&storage, &before)
+        .iter()
+        .any(|operation| operation.operation == "delete"
+            && operation.entityId.ends_with("broken.toolpkg")));
+}
+
+
+/// Retains configuration, data, identity and user settings across custom installs and explicit removal.
+#[test]
+fn builtin_customization_preserves_data_and_supports_custom_updates() {
+    for scope in ["device", "space"] {
+        let storage = host();
+        let store = ExtensionStore::new(storage.clone());
+        store
+            .registerInScope(
+                "package",
+                "demo",
+                "",
+                json!({
+                    "members": ["demo", "demo:tools"], "enabledNames": ["demo"],
+                    "disabledNames": ["demo:tools"], "subpackageStates": {"demo:tools": false},
+                    "order": 7, "builtin": true,
+                    "installationId": "00000000000000000000000000000000"
+                }),
+                scope,
+            )
+            .unwrap();
+        let config = format!(
+            "{}/settings.json",
+            ExtensionStore::configPathForScope("demo", scope).unwrap()
+        );
+        storage.writeBytes(&config, b"user configuration").unwrap();
+        let local = format!(
+            "{}/notes.txt",
+            ExtensionStore::localDataPath("demo").unwrap()
+        );
+        let shared = format!(
+            "{}/memory.sqlite",
+            ExtensionStore::spaceDataPath("demo").unwrap()
+        );
+        storage.writeBytes(&local, b"local data").unwrap();
+        storage.writeBytes(&shared, b"shared data").unwrap();
+        let root = ExtensionStore::root("package", scope).unwrap();
+        storage
+            .writeBytes(&format!("{root}/custom.toolpkg"), b"first custom version")
+            .unwrap();
+        store
+            .customizePackage(
+                "demo",
+                "custom.toolpkg",
+                vec!["demo".into(), "demo:custom".into()],
+            )
+            .unwrap();
+        let custom = store.record("package", "demo").unwrap();
+        assert_eq!(custom.sourceName, "custom.toolpkg");
+        assert_eq!(custom.settings["builtin"], false);
+        assert_eq!(custom.settings["customized"], true);
+        assert_eq!(custom.settings["enabledNames"], json!(["demo"]));
+        assert_eq!(store.packageOwner("demo:custom").unwrap().id, "demo");
+        storage
+            .writeBytes(
+                &format!("{root}/updated.toolpkg"),
+                b"updated custom version",
+            )
+            .unwrap();
+        store
+            .customizePackage(
+                "demo",
+                "updated.toolpkg",
+                vec!["demo".into(), "demo:custom".into()],
+            )
+            .unwrap();
+        assert!(!storage.exists(&format!("{root}/custom.toolpkg")).unwrap());
+        assert_eq!(storage.readBytes(&config).unwrap(), b"user configuration");
+        store.removePackageCustomization("demo").unwrap();
+        let builtin = store.record("package", "demo").unwrap();
+        assert_eq!(builtin.id, "demo");
+        assert_eq!(builtin.scope, scope);
+        assert_eq!(builtin.sourceName, "");
+        assert_eq!(builtin.settings["builtin"], true);
+        assert_eq!(builtin.settings["customized"], false);
+        assert_eq!(builtin.settings["members"], json!(["demo", "demo:tools"]));
+        assert_eq!(builtin.settings["enabledNames"], json!(["demo"]));
+        assert_eq!(builtin.settings["disabledNames"], json!(["demo:tools"]));
+        assert_eq!(
+            builtin.settings["subpackageStates"],
+            json!({"demo:tools": false})
+        );
+        assert_eq!(builtin.settings["order"], 7);
+        assert_eq!(store.packageOwner("demo:tools").unwrap().id, "demo");
+        assert!(!storage.exists(&format!("{root}/updated.toolpkg")).unwrap());
+        assert_eq!(storage.readBytes(&config).unwrap(), b"user configuration");
+        assert_eq!(storage.readBytes(&local).unwrap(), b"local data");
+        assert_eq!(storage.readBytes(&shared).unwrap(), b"shared data");
+    }
+}
+
+/// Synchronizes custom source installation and explicit removal through existing Space file operations.
+#[test]
+fn shared_builtin_customization_syncs_source_changes_without_deleting_configuration() {
+    let source = host();
+    let target = host();
+    let store = ExtensionStore::new(source.clone());
+    store
+        .registerInScope(
+            "package",
+            "demo",
+            "",
+            json!({
+                "members": ["demo"], "enabledNames": ["demo"], "disabledNames": [],
+                "subpackageStates": {}, "order": 0, "builtin": true,
+                "installationId": "00000000000000000000000000000000"
+            }),
+            "space",
+        )
+        .unwrap();
+    let config = format!(
+        "{}/settings.json",
+        ExtensionStore::configPathForScope("demo", "space").unwrap()
+    );
+    RuntimeFileSyncStore::new(source.clone(), RUNTIME_SYNC_DIR_PATH)
+        .writeBytes(&config, b"shared configuration")
+        .unwrap();
+    transfer(&source, &target, &operations(&source, &SyncClock::empty())).unwrap();
+    let before_install = clock(&source);
+    let archive = "runtime/extensions/space/packages/custom.toolpkg";
+    source.writeBytes(archive, b"custom archive").unwrap();
+    store
+        .customizePackage("demo", "custom.toolpkg", vec!["demo".into()])
+        .unwrap();
+    transfer(&source, &target, &operations(&source, &before_install)).unwrap();
+    let peer = ExtensionStore::new(target.clone());
+    assert_eq!(
+        peer.record("package", "demo").unwrap().settings["customized"],
+        true
+    );
+    assert_eq!(target.readBytes(archive).unwrap(), b"custom archive");
+    let before_remove = clock(&source);
+    store.removePackageCustomization("demo").unwrap();
+    transfer(&source, &target, &operations(&source, &before_remove)).unwrap();
+    let restored = peer.record("package", "demo").unwrap();
+    assert_eq!(restored.settings["builtin"], true);
+    assert_eq!(restored.sourceName, "");
+    assert!(!target.exists(archive).unwrap());
+    assert_eq!(target.readBytes(&config).unwrap(), b"shared configuration");
+}
+
+/// Legacy device-scope builtin records merge into the required space installation.
+#[test]
+fn builtin_scope_duplicate_records_merge_into_required_space_installation() {
+    let storage = host();
+    let store = ExtensionStore::new(storage.clone());
+    let settings = |enabled: Value, order: u64| {
+        let subpackageEnabled = enabled
+            .as_array()
+            .is_some_and(|values| !values.is_empty());
+        json!({
+            "members": ["bundle", "bundle_tools"], "enabledNames": enabled,
+            "disabledNames": [], "subpackageStates": {"bundle_tools": subpackageEnabled},
+            "order": order, "builtin": true,
+            "installationId": "00000000000000000000000000000000"
+        })
+    };
+    store
+        .registerDevice("package", "bundle", "", settings(json!(["legacy"]), 7))
+        .unwrap();
+    let mut canonical = store.record("package", "bundle").unwrap();
+    canonical.scope = "space".into();
+    canonical.settings = settings(json!(["canonical"]), 2);
+    canonical.settings["installationScope"] = json!("space");
+    store.write(&canonical).unwrap();
+    assert!(store
+        .record("package", "bundle")
+        .unwrap_err()
+        .contains("ownership conflict"));
+
+    assert!(store
+        .reconcileBuiltinScopeDuplicates("package", "bundle", "space")
+        .unwrap());
+    let merged = store.record("package", "bundle").unwrap();
+    assert_eq!(merged.scope, "space");
+    assert_eq!(merged.settings["enabledNames"], json!(["canonical", "legacy"]));
+    assert_eq!(merged.settings["order"], json!(7));
+    assert_eq!(merged.settings["installationScope"], json!("space"));
+    assert!(store
+        .records("package")
+        .unwrap()
+        .iter()
+        .all(|record| record.scope == "space"));
+    assert!(!store
+        .reconcileBuiltinScopeDuplicates("package", "bundle", "space")
+        .unwrap());
+}
+
+/// Genuine ownership conflicts must keep failing instead of being auto-merged.
+#[test]
+fn builtin_scope_reconciliation_refuses_non_builtin_duplicates() {
+    let storage = host();
+    let store = ExtensionStore::new(storage);
+    register_package_owner(&store, "bundle", &["bundle"]);
+    let mut duplicate = store.record("package", "bundle").unwrap();
+    duplicate.scope = "space".into();
+    duplicate.settings["installationScope"] = json!("space");
+    store.write(&duplicate).unwrap();
+
+    assert!(!store
+        .reconcileBuiltinScopeDuplicates("package", "bundle", "space")
+        .unwrap());
+    assert!(store
+        .record("package", "bundle")
+        .unwrap_err()
+        .contains("ownership conflict"));
+}

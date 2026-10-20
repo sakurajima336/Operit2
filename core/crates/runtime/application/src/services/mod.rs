@@ -72,3 +72,6 @@ pub use AttachmentTransferManager::*;
 
 #[path = "ComposeDslSessionService.rs"]
 pub mod ComposeDslSessionService;
+
+#[path = "WorkActivityService.rs"]
+pub mod WorkActivityService;

@@ -23,12 +23,12 @@ function mutations(disk) {
 
 /** Exercises main registration, lifecycle, real candidates across restart, and extraction through the registered interval. */
 test("controlled Chat/AI: registered main lifecycle and message hooks persist candidates across restart and interval commits graph plus real USER.md", async t => {
-  const harness = await createMemoryJobsHarness(t), first = harness.openRuntime();
+  const harness = await createMemoryJobsHarness(t), beforeRegistration = await harness.readStateText(), first = harness.openRuntime();
   assert.equal(first.chatMessageHooks.length, 1); assert.equal(first.hostEventHooks.length, 1); assert.equal(first.lifecycle.length, 1);
   assert.equal(first.chatMessageHooks[0].id, "memory-candidate-enqueue"); assert.equal(first.chatMessageHooks[0].function, first.main.onMemoryMessagePersisted);
   assert.equal(first.hostEventHooks[0].id, "memory-jobs-interval"); assert.equal(first.hostEventHooks[0].function, first.main.onMemoryInterval);
   assert.deepEqual(plain(first.hostEventHooks[0].trigger), { kind: "interval", intervalMs: 60000 });
-  assert.equal(harness.disk.calls.length, 0); assert.deepEqual(await harness.disk.entries(), []);
+  assert.equal(harness.disk.calls.length, 0); assert.equal(await harness.readStateText(), beforeRegistration);
   assert.throws(
     /** Probes an intentionally unprovided SDK directory capability. */
     () => harness.tools.SoftwareSettings,
@@ -146,16 +146,18 @@ test("controlled Chat/AI: rebuild and candidate execution plus state-publication
       error => error === statusFailure,
     );
     assert.equal(harness.modelCalls.length, calls);
-    const writes = harness.disk.calls.filter(call => call.method === "storage.transaction");
+    const writes = harness.disk.calls.filter(call => call.method === "storage.commit");
     assert.ok(writes.length > 0, "The failure must occur during an actual storage transaction");
     const unpublished = writes[writes.length - 1].args[0];
     if (kind === "rebuild") {
-      const owner = unpublished.find(statement => /^UPDATE "owners" /.test(statement.sql));
-      assert.ok(owner.params.includes("failed"));
-      assert.ok(owner.params.includes(failure.message));
+      const owner = unpublished.find(mutation => mutation.collection === "owners" && mutation.op === "put");
+      assert.equal(owner.value.rebuildProgress.status, "failed");
+      assert.equal(owner.value.rebuildProgress.lastError, failure.message);
     } else {
-      for (const row of unpublished.filter(statement => /^UPDATE "candidates" /.test(statement.sql))) {
-        assert.ok(row.params.includes("failed")); assert.ok(row.params.includes(failure.message));
+      const candidates = unpublished.filter(mutation => mutation.collection === "candidates" && mutation.op === "put");
+      assert.ok(candidates.length > 0);
+      for (const row of candidates) {
+        assert.equal(row.value.record.status, "failed"); assert.equal(row.value.record.lastError, failure.message);
       }
     }
   }

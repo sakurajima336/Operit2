@@ -11,6 +11,7 @@ add_executable(${BINARY_NAME} WIN32
   "engine_channel_lifetime.cpp"
   "flutter_window.cpp"
   "main.cpp"
+  "native_crash_report.cpp"
   "operit_runtime_channel.cpp"
   "system_audio_input_channel.cpp"
   "utils.cpp"
@@ -42,7 +43,7 @@ target_link_libraries(${BINARY_NAME} PRIVATE "propsys.lib" "shell32.lib")
 target_link_libraries(${BINARY_NAME} PRIVATE "advapi32.lib")
 target_link_libraries(${BINARY_NAME} PRIVATE "dwmapi.lib")
 target_link_libraries(${BINARY_NAME} PRIVATE "wtsapi32.lib" "iphlpapi.lib")
-target_link_libraries(${BINARY_NAME} PRIVATE "gdiplus.lib")
+target_link_libraries(${BINARY_NAME} PRIVATE "gdiplus.lib" "dbghelp.lib")
 target_include_directories(${BINARY_NAME} PRIVATE "${CMAKE_SOURCE_DIR}")
 
 set(OPERIT_REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../")

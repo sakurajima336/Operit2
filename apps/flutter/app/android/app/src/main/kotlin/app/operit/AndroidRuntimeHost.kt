@@ -61,6 +61,31 @@ class AndroidRuntimeHost(context: Context) {
         }
     }
 
+    /** Publishes Core-owned work revisions even when no Flutter engine is attached. */
+    fun publishBackgroundWork(encoded: String) {
+        mainHandler.post {
+            try {
+                app.operit.keep_alive.KeepAliveServiceHost.publishWorkSnapshot(encoded)
+            } catch (error: RuntimeException) {
+                Log.e(TAG, "Core work presentation failed", error)
+                app.operit.keep_alive.KeepAliveServiceHost.reportWorkError(error.toString())
+            }
+        }
+    }
+
+    /** Stops the execution selected by an Android notification action. */
+    fun stopBackgroundWork(workId: String) {
+        runBackground {
+            try {
+                val response = JSONObject(OperitRuntimeNative.stopBackgroundWork(ensureRuntimeHandle(), workId))
+                check(response.getBoolean("ok")) { response.getString("error") }
+            } catch (error: Exception) {
+                Log.e(TAG, "Background work stop failed: $workId", error)
+                mainHandler.post { app.operit.keep_alive.KeepAliveServiceHost.reportWorkError(error.toString()) }
+            }
+        }
+    }
+
     /** Returns whether Flutter has installed the roots required by the native Runtime. */
     fun isStorageConfigured(): Boolean {
         synchronized(runtimeLock) {

@@ -205,6 +205,152 @@ fn room_v20_complete_snapshot_projects_chats_without_legacy_associations() { ver
 #[test]
 fn room_v21_complete_snapshot_projects_chats_without_legacy_associations() { verifySourceProjection(21, true); }
 
+/// Builds a legacy speech projection with saved credentials and an unrelated generic HTTP preset.
+fn legacyTtsConfig(serviceType: &str, endpoint: &str, voice: &str) -> Result<TtsConfig, String> {
+    let mut parsed = ParsedOperit1Snapshot::fromSource(completeSnapshotFixture(20)).unwrap();
+    let httpConfig = serde_json::json!({
+        "urlTemplate": endpoint,
+        "apiKey": "saved-api-key",
+        "modelName": "saved-model",
+        "voiceId": voice,
+        "headers": {"X-Saved": "saved-header", "authorization": "stale-http-auth"},
+        "httpMethod": "GET",
+        "requestBody": "{\"saved\":\"{text}\"}",
+        "contentType": "application/saved+json",
+        "responsePipeline": [{"type": "parse_json_string", "path": ""}]
+    });
+    let preferences = parsed
+        .archive
+        .datastorePreferences
+        .get_mut(ENTRY_SPEECH_SERVICES)
+        .unwrap();
+    preferences.insert(
+        "tts_service_type".to_string(),
+        Operit1PreferenceValue::String(serviceType.to_string()),
+    );
+    preferences.insert(
+        "tts_http_config".to_string(),
+        Operit1PreferenceValue::String(httpConfig.to_string()),
+    );
+    preferences.insert(
+        "tts_speech_rate".to_string(),
+        Operit1PreferenceValue::Float(1.25),
+    );
+    buildOperit2TtsConfig(&parsed).map(|config| config.unwrap())
+}
+
+/// Accepts empty legacy URLs for built-in services and restores the complete provider HTTP contract.
+#[test]
+fn builtin_tts_import_accepts_empty_legacy_http_endpoint() {
+    for (serviceType, expectedVoice) in [
+        ("SILICONFLOW_TTS", "saved-model:saved-voice"),
+        ("MINIMAX_TTS", "saved-voice"),
+        ("MIMO_TTS", "saved-voice"),
+        ("DOUBAO_TTS", "saved-voice"),
+    ] {
+        let config = legacyTtsConfig(serviceType, "", "saved-voice").unwrap();
+        let catalog = TtsCatalog::provider(serviceType).unwrap();
+        assert_eq!(config.providerType, serviceType);
+        assert_eq!(config.endpoint, catalog.defaultEndpoint);
+        assert_eq!(config.httpMethod, "POST");
+        assert_eq!(config.requestBody, catalog.defaultRequestBody);
+        assert_eq!(config.contentType, "application/json");
+        assert_eq!(config.responseFormat, catalog.defaultResponseFormat);
+        assert_eq!(config.responsePipeline, catalog.defaultResponsePipeline);
+        assert_eq!(config.apiKey, "saved-api-key");
+        assert_eq!(config.model, "saved-model");
+        assert_eq!(config.voice, expectedVoice);
+        assert_eq!(config.speed, 1.25);
+        assert!(config
+            .headers
+            .iter()
+            .any(|header| header.name == "X-Saved" && header.value == "saved-header"));
+        for expected in catalog.defaultHeaders {
+            let matching: Vec<_> = config
+                .headers
+                .iter()
+                .filter(|header| header.name.eq_ignore_ascii_case(&expected.name))
+                .collect();
+            assert_eq!(matching, vec![&expected]);
+        }
+        assert_eq!(normalizeTtsConfig(config.clone()).unwrap(), config);
+    }
+}
+
+/// Preserves user-configurable service endpoints and maps the Kotlin OpenAI service identity.
+#[test]
+fn builtin_tts_import_preserves_configurable_endpoint() {
+    for (serviceType, providerType) in [
+        ("MINIMAX_TTS", "MINIMAX_TTS"),
+        ("MIMO_TTS", "MIMO_TTS"),
+        ("DOUBAO_TTS", "DOUBAO_TTS"),
+        ("OPENAI_TTS", "OPENAI_COMPATIBLE"),
+    ] {
+        let config =
+            legacyTtsConfig(serviceType, "https://saved.invalid/tts", "saved-voice").unwrap();
+        assert_eq!(config.providerType, providerType);
+        assert_eq!(config.endpoint, "https://saved.invalid/tts");
+        assert_eq!(config.httpMethod, "POST");
+    }
+    let siliconflow = legacyTtsConfig(
+        "SILICONFLOW_TTS",
+        "https://unrelated.invalid/tts",
+        "saved-voice",
+    )
+    .unwrap();
+    assert_eq!(
+        siliconflow.endpoint,
+        "https://api.siliconflow.cn/v1/audio/speech"
+    );
+}
+
+/// Converts preset voice names while preserving already qualified and custom speech identifiers.
+#[test]
+fn tts_import_maps_model_qualified_voice_identifiers() {
+    for (source, expected) in [
+        ("charles", "saved-model:charles"),
+        ("saved-model:charles", "saved-model:charles"),
+        ("speech:custom-voice", "speech:custom-voice"),
+    ] {
+        let config = legacyTtsConfig("SILICONFLOW_TTS", "", source).unwrap();
+        assert_eq!(config.voice, expected);
+    }
+}
+
+/// Preserves actual generic HTTP settings and keeps missing custom endpoints as validation errors.
+#[test]
+fn custom_http_tts_import_preserves_request_and_validation() {
+    let config = legacyTtsConfig(
+        "HTTP_TTS",
+        "https://saved.invalid/tts?text={text}",
+        "saved-voice",
+    )
+    .unwrap();
+    assert_eq!(config.providerType, TtsProviderType::HTTP_TTS);
+    assert_eq!(config.endpoint, "https://saved.invalid/tts?text={text}");
+    assert_eq!(config.httpMethod, "GET");
+    assert_eq!(config.requestBody, "{\"saved\":\"{text}\"}");
+    assert_eq!(config.contentType, "application/saved+json");
+    assert_eq!(config.responsePipeline[0].stepType, "parse_json_string");
+    assert!(config
+        .headers
+        .iter()
+        .any(|header| header.name == "authorization" && header.value == "stale-http-auth"));
+    assert_eq!(
+        legacyTtsConfig("HTTP_TTS", "", "saved-voice").unwrap_err(),
+        "导入 Operit1 TTS 配置失败：tts config endpoint is empty"
+    );
+}
+
+/// Rejects unsupported source service identities without treating them as generic HTTP providers.
+#[test]
+fn unsupported_tts_import_reports_source_service_type() {
+    assert_eq!(
+        legacyTtsConfig("UNKNOWN_TTS", "https://saved.invalid/tts", "saved-voice").unwrap_err(),
+        "不支持迁移的 Operit1 TTS 服务类型：UNKNOWN_TTS"
+    );
+}
+
 /// Keeps legacy data and unknown source JSON/preferences available to parsing and truthful preview without importing it.
 #[test]
 fn complete_snapshot_keeps_legacy_source_entries_and_preview_domains() {
@@ -327,4 +473,80 @@ fn objectbox_table_preserves_long_ids_and_explicit_scalar_defaults() {
     bytes[8..10].copy_from_slice(&40u16.to_le_bytes());
     let broken = FlatObjectBoxTable::new(&bytes).unwrap();
     assert!(broken.scalarI32(0, "chunkIndex").is_err());
+}
+
+/// Imports historical chats without a deleted role and emits draft references only for resolved bindings.
+#[test]
+fn archive_binding_migration_cleans_unresolved_references_without_replacing_them() {
+    use crate::data::backup::CharacterPluginMigration::{
+        CharacterPluginWriter, LEGACY_BINDING_NAMESPACE, PLUGIN_ID,
+    };
+    use operit_host_native_storage::NativeRuntimeStorageHost;
+    for (legacy, expected_binding) in [
+        (
+            serde_json::json!({"characterCardName":"Operit","characterGroupId":null}),
+            None,
+        ),
+        (
+            serde_json::json!({"characterCardName":"Operit","characterGroupId":"deleted-group"}),
+            None,
+        ),
+        (
+            serde_json::json!({"characterCardName":null,"characterGroupId":null}),
+            Some(serde_json::json!({"version":1,"selection":"model:chat"})),
+        ),
+    ] {
+        let root =
+            std::env::temp_dir().join(format!("operit1-unresolved-binding-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        {
+            let host = Arc::new(NativeRuntimeStorageHost::new(
+                root.join("runtime"),
+                root.join("workspaces"),
+            ));
+            let fixture = completeSnapshotFixture(10);
+            let mut connection = TestSqliteConnection::open(&fixture.databasePath);
+            let bridge = prepareOperit1RoomImport(&mut connection).unwrap();
+            let mut archive = buildChatArchiveFromOperit1ToOperit2DatabaseBridge(
+                bridge,
+                &mut connection,
+                &SnapshotFileImportPlan::new(),
+                &mut |_| {},
+            )
+            .unwrap();
+            archive.chats[0]
+                .pluginExtensions
+                .insert(LEGACY_BINDING_NAMESPACE.to_string(), legacy);
+            archive.chats[0]
+                .pluginExtensions
+                .insert("other.plugin".to_string(), serde_json::json!({"keep":true}));
+            let mut expected = archive.clone();
+            expected.chats[0]
+                .pluginExtensions
+                .remove(LEGACY_BINDING_NAMESPACE);
+            if expected_binding.is_some() {
+                let id = expected.chats[0].id.clone();
+                expected.chats[0].pluginExtensions.insert(
+                    PLUGIN_ID.to_string(),
+                    serde_json::json!({"recordId":id,"schemaVersion":1}),
+                );
+            }
+            resolveOperit1ArchiveBindings(&mut archive, host.clone(), host.clone()).unwrap();
+            assert_eq!(archive, expected);
+            let writer = CharacterPluginWriter::open(host.clone(), host.clone()).unwrap();
+            let drafts = writer.list("chat_drafts").unwrap();
+            match expected_binding {
+                Some(binding) => {
+                    assert_eq!(drafts.len(), 1);
+                    assert_eq!(drafts[0]["value"], binding);
+                }
+                None => assert!(drafts.is_empty()),
+            }
+            assert!(writer.list("chat_bindings").unwrap().is_empty());
+            assert!(writer.list("cards").unwrap().is_empty());
+            assert!(writer.list("groups").unwrap().is_empty());
+        }
+        assert_eq!(root.parent().unwrap(), std::env::temp_dir());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 }

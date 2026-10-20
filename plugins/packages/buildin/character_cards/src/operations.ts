@@ -1,3 +1,4 @@
+import { uuid } from "./identity";
 import type { DomainInput, DomainOperation, DomainOutput } from "./api";
 import type { CharacterRepository } from "./canonical";
 import type { Card, Memory, MemoryLink } from "./model";
@@ -128,7 +129,7 @@ const handlers: DomainHandlers = {
   "character.create": (input, host) => saveCharacter({ ...createCharacterDraft(), ...input.values }, true, { created: [], updated: [], deleted: [] }, host),
   /** Merges an explicit edit into the complete canonical record before one manager write. */
   "character.update": async (input, host) => { const original = await host.getCharacter(input.id); return saveCharacter({ ...original, ...input.changes, id: original.id }, false, { created: [], updated: [], deleted: [] }, host); },
-  /** Deletes an existing non-default character using the canonical lifecycle. */
+  /** Deletes any existing character using the canonical lifecycle. */
   "character.delete": (input, host) => deleteCharacter(input.id, host),
   /** Activates the selected canonical character. */
   "character.setActive": async (input, host) => { await activate("card", input.id, host); return { type: "character_card", id: input.id, active: true }; },
@@ -255,7 +256,7 @@ const handlers: DomainHandlers = {
       documentPath: null, isDocumentNode: false, chunkIndexFilePath: null, folderPath: null, createdAt: 0, updatedAt: 0,
       lastAccessedAt: 0, tags: [] as string[], properties: [], ...input.values };
     assertStrings(values.tags, "记忆标签");
-    const tags = []; for (const name of normalizeNames(values.tags)) tags.push({ id: String(tags.length + 1), name });
+    const tags = []; for (const name of normalizeNames(values.tags)) tags.push({ id: uuid(), name });
     const memory = { ...values, id: "", uuid: "", title: requireName(values.title, "记忆标题"), tags };
     const item = await host.saveMemory(input.ownerKey, memory); assertMemory(item);
     return { ownerKey: input.ownerKey, item, created: true };
@@ -266,7 +267,7 @@ const handlers: DomainHandlers = {
     if (input.expectedId !== undefined && input.expectedId !== original.id) throw new Error("Memory identity changed since editing began");
     const changes = { ...input.changes };
     const tags = [];
-    if (Object.prototype.hasOwnProperty.call(changes, "tags")) { assertStrings(changes.tags, "记忆标签"); for (const name of normalizeNames(changes.tags)) tags.push({ id: String(tags.length + 1), name }); }
+    if (Object.prototype.hasOwnProperty.call(changes, "tags")) { assertStrings(changes.tags, "记忆标签"); for (const name of normalizeNames(changes.tags)) tags.push({ id: uuid(), name }); }
     else for (const tag of original.tags) tags.push(tag);
     const memory = { ...original, ...changes, id: original.id, tags };
     assertMemory(memory);

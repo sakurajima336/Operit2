@@ -27,7 +27,7 @@ function transport(chat, globals = {}) {
 
 /** The real plugin transport submits once, continues the precise user row and never asks for native handles or finish methods. */
 test("native send transport: complete input, exact continuations and host-authored identities", async t => {
-  const disk = await createDiskHarness(t);
+  const disk = await createDiskHarness(t, { legacyIdentity: "default" });
   const calls = [], snapshots = new Map(); let count = 0;
   const native = transport({
     /** Acknowledges the explicitly planned send and stores its controlled author identity. */

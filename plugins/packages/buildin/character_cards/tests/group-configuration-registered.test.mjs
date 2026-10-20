@@ -25,7 +25,7 @@ async function resolveDraft(plugin, input) {
 
 /** Calls only a real main-registered API and real disk service; the explicit directory values remain a controlled SDK boundary. */
 test("registered configuration: actual main handler resolves a multi-group display without profiles or directory reads", async t => {
-  const disk = await createDiskHarness(t), settings = createHostDirectoriesFixture(disk, directories), plugin = openPlugin(settings.harness);
+  const disk = await createDiskHarness(t, { legacyIdentity: "default" }), settings = createHostDirectoriesFixture(disk, directories), plugin = openPlugin(settings.harness);
   assert.equal(settings.calls.length, 0); assert.equal(disk.calls.length, 0);
   assert.equal(plugin.apis.get("chat.configuration.resolve").function, plugin.main.chatConfigurationResolveApi);
   const a = await plugin.api("character.create", { values: { name: "Registered participant A", openingStatement: "Not group initialization" } });
@@ -40,7 +40,7 @@ test("registered configuration: actual main handler resolves a multi-group displ
 
 /** A real initial message is authored by an explicit single participant and stores only the author identity. */
 test("registered configuration: an actual card opening has an explicit author identity, never a group member default", async t => {
-  const disk = await createDiskHarness(t), settings = createHostDirectoriesFixture(disk, directories), plugin = openPlugin(settings.harness);
+  const disk = await createDiskHarness(t, { legacyIdentity: "default" }), settings = createHostDirectoriesFixture(disk, directories), plugin = openPlugin(settings.harness);
   const card = await plugin.api("character.create", { values: { name: "Explicit opening author", avatarUri: "actual-author.png", openingStatement: "Actual opening content" } });
   const result = plain(await resolveDraft(plugin, request("display", "card:" + card.id)));
   assert.equal(Object.hasOwn(result, "profile"), false); assert.equal(result.initialMessages.length, 1);
@@ -53,7 +53,7 @@ test("registered configuration: an actual card opening has an explicit author id
 
 /** The existing registered resolver keeps its actual authenticated host boundary rather than creating an unguarded parallel provider. */
 test("registered configuration: rejects non-host callers before file/domain reads", async t => {
-  const disk = await createDiskHarness(t), plugin = openPlugin(disk), registered = plugin.apis.get("chat.configuration.resolve");
+  const disk = await createDiskHarness(t, { legacyIdentity: "default" }), plugin = openPlugin(disk), registered = plugin.apis.get("chat.configuration.resolve");
   await assert.rejects(() => registered.function({ callerPackage: "untrusted-plugin", payload: request("display", "group:unread") }), /authenticated host caller/);
   assert.equal(disk.calls.length, 0);
 });
@@ -67,7 +67,7 @@ async function committedConfiguration(plugin, selection, participantId = null, c
 
 /** The actual registered resolver authors group constraints before native storage freezes the execution snapshot. */
 test("registered configuration: group prompts preserve each speaker and saved member order across historical execution", async t => {
-  const disk = await createDiskHarness(t), settings = createHostDirectoriesFixture(disk, directories), plugin = openPlugin(settings.harness);
+  const disk = await createDiskHarness(t, { legacyIdentity: "default" }), settings = createHostDirectoriesFixture(disk, directories), plugin = openPlugin(settings.harness);
   const a = await plugin.api("character.create", { values: { name: "Prompt speaker A", characterSetting: "Exact A setting" } });
   const b = await plugin.api("character.create", { values: { name: "Prompt speaker B", characterSetting: "Exact B setting" } });
   const group = await plugin.api("group.create", { values: { name: "Prompt group", members: [{ characterCardId: a.id, orderIndex: 9 }, { characterCardId: b.id, orderIndex: 2 }] } });
@@ -88,7 +88,7 @@ test("registered configuration: group prompts preserve each speaker and saved me
 
 /** Card execution carries only its authored prompt, while a one-member group retains explicit group semantics. */
 test("registered configuration: single cards and single-member groups retain their own prompt scope", async t => {
-  const disk = await createDiskHarness(t), settings = createHostDirectoriesFixture(disk, directories), plugin = openPlugin(settings.harness);
+  const disk = await createDiskHarness(t, { legacyIdentity: "default" }), settings = createHostDirectoriesFixture(disk, directories), plugin = openPlugin(settings.harness);
   const card = await plugin.api("character.create", { values: { name: "Solo prompt speaker", characterSetting: "Exact solo setting" } });
   const single = await committedConfiguration(plugin, "card:" + card.id);
   assert.doesNotMatch(single.profile.introPrompt, /Role response plan hint|Group participants/);
@@ -100,7 +100,7 @@ test("registered configuration: single cards and single-member groups retain the
 
 /** Authenticated generic deletion removes the real binding and removes the current binding. */
 test("registered configuration: generic deletion checks its owner, acknowledges real cleanup and preserves history", async t => {
-  const disk = await createDiskHarness(t), settings = createHostDirectoriesFixture(disk, directories), plugin = openPlugin(settings.harness);
+  const disk = await createDiskHarness(t, { legacyIdentity: "default" }), settings = createHostDirectoriesFixture(disk, directories), plugin = openPlugin(settings.harness);
   const card = await plugin.api("character.create", { values: { name: "Deletion speaker" } });
   const selection = "card:" + card.id; await committedConfiguration(plugin, selection);
   const registered = plugin.apis.get("chat.configuration.delete");
@@ -115,7 +115,7 @@ test("registered configuration: generic deletion checks its owner, acknowledges 
 
 /** Existing chats without role associations use a real model profile and read their current model configuration. */
 test("registered configuration: no role association executes the configured model and provider identity", async t => {
-  const disk = await createDiskHarness(t), settings = createHostDirectoriesFixture(disk, directories), plugin = openPlugin(settings.harness);
+  const disk = await createDiskHarness(t, { legacyIdentity: "default" }), settings = createHostDirectoriesFixture(disk, directories), plugin = openPlugin(settings.harness);
   const input = request("execution", "model:chat");
   const result = plain(await plugin.api("chat.configuration.resolve", input));
   assert.equal(result.profile.name, input.defaultModelBinding.modelId);
@@ -139,7 +139,7 @@ test("registered configuration: no role association executes the configured mode
 
 /** The genuine global model selection persists without referencing any stored character or group. */
 test("registered configuration: explicit model selection persists and produces role-free drafts", async t => {
-  const disk = await createDiskHarness(t), settings = createHostDirectoriesFixture(disk, directories), plugin = openPlugin(settings.harness);
+  const disk = await createDiskHarness(t, { legacyIdentity: "default" }), settings = createHostDirectoriesFixture(disk, directories), plugin = openPlugin(settings.harness);
   assert.deepEqual(plain(await plugin.api("activePrompt.setModel", {})), { type: "model", id: "chat", active: true });
   assert.deepEqual(plain(await plugin.api("activePrompt.get", {})), { Model: { id: "chat" } });
   const result = await committedConfiguration(plugin, "model:chat");

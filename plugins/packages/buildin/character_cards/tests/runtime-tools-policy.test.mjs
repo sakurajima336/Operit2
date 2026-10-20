@@ -13,7 +13,7 @@ const directoryInput = plain(loadModule("tests/host-directories-input.ts").hostD
 
 /** Registers real main callbacks and providers over actual temporary disk IO plus explicit host-boundary inputs. */
 async function environment(t) {
-  const disk = await createDiskHarness(t), settings = createHostDirectoriesFixture(disk, directoryInput);
+  const disk = await createDiskHarness(t, { legacyIdentity: "default" }), settings = createHostDirectoriesFixture(disk, directoryInput);
   const chats = new Map(["policy-chat", "group-chat"].map(
     /** Defines actual controlled host records with an unrelated namespace that must never select this plugin's participant. */
     id => [id, { summary: { id, title: id, messageCount: 0, inputTokens: 0, outputTokens: 0, createdAt: "1760000000000", updatedAt: "1760000000000", isCurrent: false },
@@ -120,7 +120,7 @@ async function bind(environment, chatId = "policy-chat") {
   assert.equal((await environment.dispatchDomain("chat.configuration.binding.read", { chatId })).selection, "card:default");
   assert.deepEqual(chat.extensions.get(siblingOwner), { version: 1, selection: "card:sibling-only", private: { retained: chatId } });
   const state = JSON.parse(await environment.disk.stateBytes().toString("utf8"));
-  assert.equal(state.version, 4); assert.equal(Object.hasOwn(state, "chatBindings"), false);
+  assert.equal(state.version, 1); assert.equal(Object.hasOwn(state, "chatBindings"), false);
   return resolveContext(environment, chatId, "default");
 }
 
@@ -279,7 +279,7 @@ test("concurrent snapshot policy evaluation does not leak the next turn's permis
 /** Keeps existing real IO failures explicit in their actual service while proving policy does not reread that service. */
 test("queued repository and host errors remain unconsumed by frozen policy and propagate on the real dependency read", async t => {
   const runtime = await environment(t), context = await bind(runtime), before = ioCounts(runtime);
-  const diskFailure = new Error("snapshot-must-not-reread-disk"); runtime.disk.failNext("storage.query", diskFailure);
+  const diskFailure = new Error("snapshot-must-not-reread-disk"); runtime.disk.failNext("storage.preferences.data", diskFailure);
   const hostFailure = new Error("snapshot-must-not-reread-binding"); runtime.failNextHost("findChat", hostFailure);
   assert.equal((await runtime.toolCallPolicy(event("read_file", context))).action, "allow");
   assert.deepEqual(ioCounts(runtime), before);

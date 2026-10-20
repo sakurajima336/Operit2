@@ -275,7 +275,27 @@ export class FileSelectorApiImpl {
       try {
         const destination = await fs.open(destinationUri, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
         try {
-          await fs.copyFile(source.fd, destination.fd);
+          if (call.method == 'copyFileFromPathWithProgress') {
+            const total = (await fs.stat(source.fd)).size;
+            let completed = 0;
+            let lastReport = 0;
+            this.reportSaveProgress(completed, total);
+            const buffer = new ArrayBuffer(65536);
+            while (completed < total) {
+              const count = Math.min(buffer.byteLength, total - completed);
+              const read = await fs.read(source.fd, buffer, { offset: completed, length: count });
+              if (read != count) throw new Error('Truncated document copy source');
+              const written = await fs.write(destination.fd, buffer, { offset: completed, length: count });
+              if (written != count) throw new Error('Incomplete document destination write');
+              completed += written;
+              const now = Date.now();
+              if (now - lastReport >= 50) { this.reportSaveProgress(completed, total); lastReport = now; }
+            }
+            await fs.fsync(destination.fd);
+            this.reportSaveProgress(completed, total);
+          } else {
+            await fs.copyFile(source.fd, destination.fd);
+          }
         } finally {
           await fs.close(destination);
         }
@@ -286,6 +306,15 @@ export class FileSelectorApiImpl {
     } catch (error) {
       result.error('SAVE_WRITE_FAILED', String(error), null);
     }
+  }
+
+  /// Publishes measured URI copy counters through the registered platform channel.
+  private reportSaveProgress(completed: number, total: number): void {
+    if (this.saveChannel == null) throw new Error('Document save channel is detached');
+    const progress = new Map<string, ESObject>();
+    progress.set('completed', completed);
+    progress.set('total', total);
+    this.saveChannel.invokeMethod('saveProgress', progress);
   }
 
   /// Every allocation is bounded before bytes cross the Flutter channel.
@@ -354,7 +383,7 @@ export class FileSelectorApiImpl {
     this.saveChannel.setMethodCallHandler({
       /// Handles explicit source-file copies into selected document URIs.
       onMethodCall: (call: MethodCall, result: MethodResult): void => {
-        if (call.method != 'copyFileFromPath') {
+        if (call.method != 'copyFileFromPath' && call.method != 'copyFileFromPathWithProgress') {
           result.notImplemented();
           return;
         }

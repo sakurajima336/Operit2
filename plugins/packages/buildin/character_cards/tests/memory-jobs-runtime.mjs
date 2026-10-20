@@ -22,7 +22,7 @@ function strictCapability(name, members) {
 
 /** Creates explicit Chat/AI fixtures around real temporary disk IO, never a substitute domain backend. */
 export async function createMemoryJobsHarness(testContext) {
-  const disk = await createDiskHarness(testContext), modelCalls = [], rangeCalls = [], findCalls = [], outcomes = [];
+  const disk = await createDiskHarness(testContext, { legacyIdentity: "default" }), modelCalls = [], rangeCalls = [], findCalls = [], outcomes = [];
   const history = [];
   for (let index = 0; index < 32; index += 1) {
     history.push({ sender: index % 2 === 0 ? "user" : "ai", content: "Controlled conversation fact " + index,
@@ -120,7 +120,7 @@ export async function createMemoryJobsHarness(testContext) {
       const outcome = outcomes.shift();
       switch (outcome.kind) {
         case "error": throw outcome.error;
-        case "error-and-status-write": disk.failNext("storage.transaction", outcome.statusError); throw outcome.error;
+        case "error-and-status-write": disk.failNext("storage.commit", outcome.statusError); throw outcome.error;
         case "output": return { text: outcome.text, turns: [{ kind: "ASSISTANT", content: outcome.text, metadata: { fixture: "controlled" } }],
           finishReason: "stop", metadata: { fixture: "controlled-chat-ai" }, receivedAt: SOURCE_TIME + 5000,
           /** Formats only the explicitly queued controlled response. */

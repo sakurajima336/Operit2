@@ -89,6 +89,30 @@ function createAvatarResources(origin) {
   return { source, intercept };
 }
 
+// src/model-binding.ts
+function characterModelBindingMode(mode) {
+  return mode === "FIXED_CONFIG" ? "FIXED_MODEL" : mode;
+}
+function sameCharacterModelBinding(left, right) {
+  return left.chatModelBindingMode === right.chatModelBindingMode && left.chatProviderId === right.chatProviderId && left.chatModelId === right.chatModelId;
+}
+function characterModelBindingStatus(card, models) {
+  switch (characterModelBindingMode(card.chatModelBindingMode)) {
+    case "FOLLOW_GLOBAL":
+      return { needsRebind: false, label: "\u8DDF\u968F\u5168\u5C40\u6A21\u578B" };
+    case "FIXED_MODEL": {
+      const matches = models.filter(
+        /** Matches the exact provider and model identities selected by the user. */
+        (model) => model.providerId === card.chatProviderId && model.modelId === card.chatModelId
+      );
+      if (matches.length !== 1) return { needsRebind: true, label: "\u56FA\u5B9A\u6A21\u578B\u7ED1\u5B9A\u65E0\u6548\uFF0C\u8BF7\u91CD\u65B0\u7ED1\u5B9A" };
+      return { needsRebind: false, label: matches[0].providerName + " \xB7 " + matches[0].modelId };
+    }
+    default:
+      return { needsRebind: true, label: "\u6A21\u578B\u7ED1\u5B9A\u6A21\u5F0F\u65E0\u6548\uFF0C\u8BF7\u91CD\u65B0\u7ED1\u5B9A" };
+  }
+}
+
 // src/validation.ts
 function assertObject(value, label) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} \u5FC5\u987B\u662F\u5BF9\u8C61`);
@@ -247,7 +271,6 @@ var characterFields = {
   sharedMemoryId: optional(nullable(text)),
   sharedMemoryMounts: optional(array(mount)),
   toolAccessConfig: optional(toolAccess),
-  isDefault: optional(boolean),
   createdAt: optional(integer),
   updatedAt: optional(integer)
 };
@@ -555,881 +578,12 @@ function createCharacterDraft() {
     sharedMemoryId: null,
     sharedMemoryMounts: [],
     toolAccessConfig: { enabled: false, allowedBuiltinTools: [], allowedPackages: [], allowedSkills: [], allowedMcpServers: [] },
-    isDefault: false,
     createdAt: 0,
     updatedAt: 0
   };
 }
 function createGroupDraft() {
   return { id: "", name: "", description: "", members: [], themeConfigId: null, createdAt: 0, updatedAt: 0 };
-}
-
-// src/storage/schema.json
-var collections = {
-  cards: {
-    kind: "object",
-    fields: {
-      id: {
-        kind: "text"
-      },
-      name: {
-        kind: "text"
-      },
-      description: {
-        kind: "text"
-      },
-      characterSetting: {
-        kind: "text"
-      },
-      openingStatement: {
-        kind: "text"
-      },
-      otherContentChat: {
-        kind: "text"
-      },
-      otherContentVoice: {
-        kind: "text"
-      },
-      avatarUri: {
-        kind: "text",
-        nullable: true
-      },
-      attachedTagIds: {
-        kind: "array",
-        item: {
-          kind: "text"
-        }
-      },
-      advancedCustomPrompt: {
-        kind: "text"
-      },
-      marks: {
-        kind: "text"
-      },
-      chatModelBindingMode: {
-        kind: "text"
-      },
-      chatModelId: {
-        kind: "text",
-        nullable: true
-      },
-      chatProviderId: {
-        kind: "text",
-        nullable: true,
-        nullEncoding: "column"
-      },
-      ttsConfigId: {
-        kind: "text",
-        nullable: true
-      },
-      themeConfigId: {
-        kind: "text",
-        nullable: true
-      },
-      memoryBindingMode: {
-        kind: "text"
-      },
-      sharedMemoryId: {
-        kind: "text",
-        nullable: true
-      },
-      sharedMemoryMounts: {
-        kind: "array",
-        item: {
-          kind: "object",
-          fields: {
-            sharedMemoryId: {
-              kind: "text"
-            },
-            readable: {
-              kind: "boolean"
-            },
-            writable: {
-              kind: "boolean"
-            }
-          }
-        }
-      },
-      toolAccessConfig: {
-        kind: "object",
-        fields: {
-          enabled: {
-            kind: "boolean"
-          },
-          allowedBuiltinTools: {
-            kind: "array",
-            item: {
-              kind: "text"
-            }
-          },
-          allowedPackages: {
-            kind: "array",
-            item: {
-              kind: "text"
-            }
-          },
-          allowedSkills: {
-            kind: "array",
-            item: {
-              kind: "text"
-            }
-          },
-          allowedMcpServers: {
-            kind: "array",
-            item: {
-              kind: "text"
-            }
-          }
-        }
-      },
-      isDefault: {
-        kind: "boolean"
-      },
-      createdAt: {
-        kind: "integer"
-      },
-      updatedAt: {
-        kind: "integer"
-      }
-    }
-  },
-  groups: {
-    kind: "object",
-    fields: {
-      id: {
-        kind: "text"
-      },
-      name: {
-        kind: "text"
-      },
-      description: {
-        kind: "text"
-      },
-      members: {
-        kind: "array",
-        item: {
-          kind: "object",
-          fields: {
-            characterCardId: {
-              kind: "text"
-            },
-            orderIndex: {
-              kind: "integer"
-            }
-          }
-        }
-      },
-      themeConfigId: {
-        kind: "text",
-        nullable: true
-      },
-      createdAt: {
-        kind: "integer"
-      },
-      updatedAt: {
-        kind: "integer"
-      }
-    }
-  },
-  tags: {
-    kind: "object",
-    fields: {
-      id: {
-        kind: "text"
-      },
-      name: {
-        kind: "text"
-      },
-      description: {
-        kind: "text"
-      },
-      promptContent: {
-        kind: "text"
-      },
-      tagType: {
-        kind: "text"
-      },
-      createdAt: {
-        kind: "integer"
-      },
-      updatedAt: {
-        kind: "integer"
-      }
-    }
-  },
-  stores: {
-    kind: "object",
-    fields: {
-      id: {
-        kind: "text"
-      },
-      name: {
-        kind: "text"
-      },
-      createdAt: {
-        kind: "integer"
-      },
-      updatedAt: {
-        kind: "integer"
-      }
-    }
-  },
-  conversationGroups: {
-    kind: "object",
-    fields: {
-      id: {
-        kind: "text"
-      },
-      ownerSelection: {
-        kind: "text",
-        nullable: true
-      },
-      name: {
-        kind: "text"
-      },
-      chatIds: {
-        kind: "array",
-        item: {
-          kind: "text"
-        }
-      },
-      displayOrder: {
-        kind: "integer"
-      },
-      pinned: {
-        kind: "boolean"
-      },
-      createdAt: {
-        kind: "integer"
-      },
-      updatedAt: {
-        kind: "integer"
-      }
-    }
-  },
-  owners: {
-    kind: "object",
-    fields: {
-      ownerKey: {
-        kind: "text"
-      },
-      settings: {
-        kind: "object",
-        fields: {
-          autoSaveIntervalMinutes: {
-            kind: "integer"
-          },
-          nextAutoSaveRunAtMs: {
-            kind: "integer"
-          },
-          memoryExtractionCustomRules: {
-            kind: "text"
-          },
-          profileAutoUpdateEnabled: {
-            kind: "boolean"
-          },
-          profileAutoUpdateLocked: {
-            kind: "boolean"
-          },
-          cloudEmbeddingEnabled: {
-            kind: "boolean"
-          },
-          cloudEmbeddingEndpoint: {
-            kind: "text"
-          },
-          cloudEmbeddingApiKey: {
-            kind: "text"
-          },
-          cloudEmbeddingModel: {
-            kind: "text"
-          }
-        }
-      },
-      searchConfig: {
-        kind: "object",
-        fields: {
-          scoreMode: {
-            kind: "text"
-          },
-          keywordWeight: {
-            kind: "number"
-          },
-          tagWeight: {
-            kind: "number"
-          },
-          vectorWeight: {
-            kind: "number"
-          },
-          edgeWeight: {
-            kind: "number"
-          }
-        }
-      },
-      userDocumentPath: {
-        kind: "text"
-      },
-      rebuildProgress: {
-        kind: "object",
-        fields: {
-          status: {
-            kind: "text"
-          },
-          totalChats: {
-            kind: "integer"
-          },
-          completedChats: {
-            kind: "integer"
-          },
-          totalWindows: {
-            kind: "integer"
-          },
-          completedWindows: {
-            kind: "integer"
-          },
-          totalSourceMessages: {
-            kind: "integer"
-          },
-          processedSourceMessages: {
-            kind: "integer"
-          },
-          failedWindows: {
-            kind: "integer"
-          },
-          currentChatTitle: {
-            kind: "text"
-          },
-          lastError: {
-            kind: "text"
-          }
-        }
-      },
-      rebuildTask: {
-        kind: "object",
-        fields: {
-          id: {
-            kind: "text"
-          },
-          windows: {
-            kind: "array",
-            item: {
-              kind: "object",
-              fields: {
-                chatId: {
-                  kind: "text"
-                },
-                chatTitle: {
-                  kind: "text"
-                },
-                messages: {
-                  kind: "array",
-                  item: {
-                    kind: "object",
-                    fields: {
-                      sender: {
-                        kind: "text"
-                      },
-                      content: {
-                        kind: "text"
-                      },
-                      timestamp: {
-                        kind: "integer"
-                      },
-                      variantIndex: {
-                        kind: "integer"
-                      },
-                      variantCount: {
-                        kind: "integer"
-                      },
-                      provider: {
-                        kind: "text"
-                      },
-                      modelName: {
-                        kind: "text"
-                      }
-                    }
-                  }
-                },
-                sourceMessageCount: {
-                  kind: "integer"
-                }
-              }
-            }
-          },
-          nextWindow: {
-            kind: "integer"
-          }
-        },
-        nullable: true
-      }
-    }
-  },
-  memories: {
-    kind: "object",
-    fields: {
-      ownerKey: {
-        kind: "text"
-      },
-      record: {
-        kind: "object",
-        fields: {
-          id: {
-            kind: "text"
-          },
-          uuid: {
-            kind: "text"
-          },
-          title: {
-            kind: "text"
-          },
-          content: {
-            kind: "text"
-          },
-          contentType: {
-            kind: "text"
-          },
-          source: {
-            kind: "text"
-          },
-          credibility: {
-            kind: "number"
-          },
-          importance: {
-            kind: "number"
-          },
-          documentPath: {
-            kind: "text",
-            nullable: true
-          },
-          isDocumentNode: {
-            kind: "boolean"
-          },
-          chunkIndexFilePath: {
-            kind: "text",
-            nullable: true
-          },
-          folderPath: {
-            kind: "text",
-            nullable: true
-          },
-          createdAt: {
-            kind: "integer"
-          },
-          updatedAt: {
-            kind: "integer"
-          },
-          lastAccessedAt: {
-            kind: "integer"
-          },
-          tags: {
-            kind: "array",
-            item: {
-              kind: "object",
-              fields: {
-                id: {
-                  kind: "text"
-                },
-                name: {
-                  kind: "text"
-                }
-              }
-            }
-          },
-          properties: {
-            kind: "array",
-            item: {
-              kind: "object",
-              fields: {
-                id: {
-                  kind: "text"
-                },
-                key: {
-                  kind: "text"
-                },
-                value: {
-                  kind: "text"
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-  },
-  links: {
-    kind: "object",
-    fields: {
-      ownerKey: {
-        kind: "text"
-      },
-      record: {
-        kind: "object",
-        fields: {
-          id: {
-            kind: "text"
-          },
-          sourceMemoryId: {
-            kind: "text"
-          },
-          targetMemoryId: {
-            kind: "text"
-          },
-          type_: {
-            kind: "text"
-          },
-          weight: {
-            kind: "number"
-          },
-          description: {
-            kind: "text"
-          }
-        }
-      }
-    }
-  },
-  chunks: {
-    kind: "object",
-    fields: {
-      ownerKey: {
-        kind: "text"
-      },
-      record: {
-        kind: "object",
-        fields: {
-          id: {
-            kind: "text"
-          },
-          memoryUuid: {
-            kind: "text"
-          },
-          chunkIndex: {
-            kind: "integer"
-          },
-          content: {
-            kind: "text"
-          }
-        }
-      }
-    }
-  },
-  candidates: {
-    kind: "object",
-    fields: {
-      ownerKey: {
-        kind: "text"
-      },
-      record: {
-        kind: "object",
-        fields: {
-          id: {
-            kind: "text"
-          },
-          chatId: {
-            kind: "text"
-          },
-          triggerMessageTimestamp: {
-            kind: "integer"
-          },
-          triggerVariantIndex: {
-            kind: "integer"
-          },
-          createdAt: {
-            kind: "integer"
-          },
-          updatedAt: {
-            kind: "integer"
-          },
-          status: {
-            kind: "text"
-          },
-          attemptCount: {
-            kind: "integer"
-          },
-          lastError: {
-            kind: "text"
-          },
-          sourceType: {
-            kind: "text"
-          }
-        }
-      }
-    }
-  },
-  embeddings: {
-    kind: "object",
-    fields: {
-      ownerKey: {
-        kind: "text"
-      },
-      record: {
-        kind: "object",
-        fields: {
-          endpoint: {
-            kind: "text"
-          },
-          model: {
-            kind: "text"
-          },
-          text: {
-            kind: "text"
-          },
-          vector: {
-            kind: "vector"
-          },
-          updatedAt: {
-            kind: "integer"
-          }
-        }
-      }
-    }
-  },
-  meta: {
-    kind: "object",
-    fields: {
-      version: {
-        kind: "integer"
-      },
-      active: {
-        kind: "object",
-        nullable: true,
-        fields: {
-          CharacterCard: {
-            kind: "object",
-            optional: true,
-            fields: {
-              id: {
-                kind: "text"
-              }
-            }
-          },
-          CharacterGroup: {
-            kind: "object",
-            optional: true,
-            fields: {
-              id: {
-                kind: "text"
-              }
-            }
-          }
-        }
-      },
-      memoryPreferences: {
-        kind: "object",
-        fields: {
-          userDescriptionEnabled: {
-            kind: "boolean"
-          },
-          autoUpdateEnabled: {
-            kind: "boolean"
-          }
-        },
-        optional: true
-      },
-      migrationStatus: {
-        kind: "text",
-        optional: true
-      },
-      migrationSource: {
-        kind: "text",
-        optional: true
-      }
-    }
-  },
-  schema_migrations: {
-    kind: "object",
-    fields: {
-      version: {
-        kind: "integer"
-      }
-    }
-  },
-  chat_bindings: {
-    kind: "object",
-    fields: {
-      version: {
-        kind: "integer"
-      },
-      selection: {
-        kind: "text"
-      }
-    }
-  },
-  chat_drafts: {
-    kind: "object",
-    fields: {
-      version: {
-        kind: "integer"
-      },
-      selection: {
-        kind: "text"
-      }
-    }
-  }
-};
-
-// src/storage/relational.ts
-var schemas = collections;
-function field(path) {
-  return path === "" ? "_value" : path;
-}
-function usesPresenceColumn(node) {
-  if (node.nullEncoding === "column") {
-    if (!node.nullable || node.optional || node.kind === "object" || node.kind === "array" || node.kind === "map")
-      throw new Error("Column null encoding requires a required nullable scalar");
-    return false;
-  }
-  return node.optional === true || node.nullable === true;
-}
-function layout(name, node, child = false) {
-  const columns = [
-    { name: "_key", affinity: "text", nullable: false },
-    { name: "_revision", affinity: "text", nullable: false }
-  ];
-  if (child)
-    columns.push(
-      { name: "_root", affinity: "text", nullable: false },
-      { name: "_parent", affinity: "text", nullable: false },
-      { name: "_position", affinity: "integer", nullable: false },
-      { name: "_map_key", affinity: "text", nullable: true }
-    );
-  const children = [];
-  function visit(schema, path, absent) {
-    if (usesPresenceColumn(schema))
-      columns.push({
-        name: field(path) + "__state",
-        affinity: "integer",
-        nullable: absent
-      });
-    const nullable2 = absent || schema.optional === true || schema.nullable === true;
-    if (schema.kind === "object") {
-      for (const [key, value] of Object.entries(schema.fields).sort(
-        ([left], [right]) => left < right ? -1 : left > right ? 1 : 0
-      ))
-        visit(value, path === "" ? key : path + "__" + key, nullable2);
-    } else if (schema.kind === "array" || schema.kind === "map") {
-      columns.push({
-        name: field(path) + "__count",
-        affinity: "integer",
-        nullable: nullable2
-      });
-      children.push(layout(name + "_" + field(path), schema.item, true));
-    } else
-      columns.push({
-        name: field(path),
-        affinity: schema.kind === "text" ? "text" : schema.kind === "vector" ? "blob" : schema.kind === "boolean" || schema.kind === "integer" ? "integer" : "real",
-        nullable: nullable2
-      });
-  }
-  visit(node, "", false);
-  return { name, node, table: { name, primaryKey: "_key", columns }, children };
-}
-var layouts = Object.fromEntries(
-  Object.entries(schemas).map(([name, node]) => [name, layout(name, node)])
-);
-var spaceMergeDescriptor = {
-  version: 3,
-  maxEntities: 6,
-  maxReferences: 48,
-  entities: [
-    {
-      collection: "cards",
-      identityColumn: "id",
-      nameColumn: "name",
-      ignoredColumns: ["_revision", "id", "createdAt", "updatedAt", "isDefault"],
-      keyEncoding: "length_prefixed_root",
-      matchMode: "content",
-      keyReferences: [],
-      childCollections: tables(layouts["cards"]).slice(1).map((child) => child.name),
-      references: [
-        { collection: "cards", column: "chatProviderId", target: { kind: "preference", path: "runtime/config/preferences/model_configs.preferences.json" }, keyPrefix: "", keySuffix: "", valueEncoding: "direct" },
-        { collection: "cards", column: "ttsConfigId", target: { kind: "preference", path: "runtime/config/preferences/tts_configs.preferences.json" }, keyPrefix: "", keySuffix: "", valueEncoding: "direct" },
-        { collection: "cards", column: "themeConfigId", target: { kind: "preference", path: "runtime/config/preferences/user_preferences.preferences.json" }, keyPrefix: "", keySuffix: "", valueEncoding: "direct" },
-        { collection: "cards", column: "sharedMemoryId", target: { kind: "collection", collection: "stores" }, keyPrefix: "", keySuffix: "", valueEncoding: "direct" },
-        { collection: "cards_attachedTagIds", column: "_value", target: { kind: "collection", collection: "tags" }, keyPrefix: "", keySuffix: "", valueEncoding: "direct" },
-        { collection: "cards_sharedMemoryMounts", column: "sharedMemoryId", target: { kind: "collection", collection: "stores" }, keyPrefix: "", keySuffix: "", valueEncoding: "direct" }
-      ]
-    },
-    {
-      collection: "groups",
-      identityColumn: "id",
-      nameColumn: "name",
-      ignoredColumns: ["_revision", "id", "createdAt", "updatedAt"],
-      keyEncoding: "length_prefixed_root",
-      matchMode: "content",
-      keyReferences: [],
-      childCollections: tables(layouts["groups"]).slice(1).map((child) => child.name),
-      references: [
-        { collection: "groups", column: "themeConfigId", target: { kind: "preference", path: "runtime/config/preferences/user_preferences.preferences.json" }, keyPrefix: "", keySuffix: "", valueEncoding: "direct" },
-        { collection: "groups_members", column: "characterCardId", target: { kind: "collection", collection: "cards" }, keyPrefix: "", keySuffix: "", valueEncoding: "direct" }
-      ]
-    },
-    {
-      collection: "tags",
-      identityColumn: "id",
-      nameColumn: "name",
-      ignoredColumns: ["_revision", "id", "createdAt", "updatedAt"],
-      keyEncoding: "length_prefixed_root",
-      matchMode: "content",
-      keyReferences: [],
-      childCollections: [],
-      references: []
-    },
-    {
-      collection: "stores",
-      identityColumn: "id",
-      nameColumn: "name",
-      ignoredColumns: ["_revision", "id", "createdAt", "updatedAt"],
-      keyEncoding: "length_prefixed_root",
-      matchMode: "content",
-      keyReferences: [],
-      childCollections: [],
-      references: []
-    },
-    {
-      collection: "owners",
-      identityColumn: "ownerKey",
-      nameColumn: null,
-      ignoredColumns: ["_revision"],
-      keyEncoding: "slash_root",
-      matchMode: "identity",
-      keyReferences: [
-        { collection: "cards", prefix: "character:" },
-        { collection: "stores", prefix: "shared:" }
-      ],
-      childCollections: ["memories", "links", "chunks", "candidates", "embeddings"],
-      references: [
-        { collection: "owners", column: "ownerKey", target: { kind: "collection", collection: "cards" }, keyPrefix: "character:", keySuffix: "", valueEncoding: "direct" },
-        { collection: "owners", column: "ownerKey", target: { kind: "collection", collection: "stores" }, keyPrefix: "shared:", keySuffix: "", valueEncoding: "direct" },
-        { collection: "owners", column: "userDocumentPath", target: { kind: "collection", collection: "owners" }, keyPrefix: "owners/", keySuffix: "/USER.md", valueEncoding: "uri_component" },
-        { collection: "memories", column: "ownerKey", target: { kind: "collection", collection: "cards" }, keyPrefix: "character:", keySuffix: "", valueEncoding: "direct" },
-        { collection: "memories", column: "ownerKey", target: { kind: "collection", collection: "stores" }, keyPrefix: "shared:", keySuffix: "", valueEncoding: "direct" },
-        { collection: "links", column: "ownerKey", target: { kind: "collection", collection: "cards" }, keyPrefix: "character:", keySuffix: "", valueEncoding: "direct" },
-        { collection: "links", column: "ownerKey", target: { kind: "collection", collection: "stores" }, keyPrefix: "shared:", keySuffix: "", valueEncoding: "direct" },
-        { collection: "chunks", column: "ownerKey", target: { kind: "collection", collection: "cards" }, keyPrefix: "character:", keySuffix: "", valueEncoding: "direct" },
-        { collection: "chunks", column: "ownerKey", target: { kind: "collection", collection: "stores" }, keyPrefix: "shared:", keySuffix: "", valueEncoding: "direct" },
-        { collection: "candidates", column: "ownerKey", target: { kind: "collection", collection: "cards" }, keyPrefix: "character:", keySuffix: "", valueEncoding: "direct" },
-        { collection: "candidates", column: "ownerKey", target: { kind: "collection", collection: "stores" }, keyPrefix: "shared:", keySuffix: "", valueEncoding: "direct" },
-        { collection: "embeddings", column: "ownerKey", target: { kind: "collection", collection: "cards" }, keyPrefix: "character:", keySuffix: "", valueEncoding: "direct" },
-        { collection: "embeddings", column: "ownerKey", target: { kind: "collection", collection: "stores" }, keyPrefix: "shared:", keySuffix: "", valueEncoding: "direct" }
-      ]
-    },
-    {
-      collection: "meta",
-      identityColumn: "_key",
-      nameColumn: null,
-      ignoredColumns: ["_revision"],
-      keyEncoding: "length_prefixed_root",
-      matchMode: "identity",
-      keyReferences: [],
-      childCollections: [],
-      references: [
-        { collection: "meta", column: "active__CharacterCard__id", target: { kind: "collection", collection: "cards" }, keyPrefix: "", keySuffix: "", valueEncoding: "direct" },
-        { collection: "meta", column: "active__CharacterGroup__id", target: { kind: "collection", collection: "groups" }, keyPrefix: "", keySuffix: "", valueEncoding: "direct" }
-      ]
-    }
-  ]
-};
-function tables(root) {
-  return [root, ...root.children.flatMap(tables)];
 }
 
 // src/definition.ts
@@ -1522,6 +676,17 @@ function createUiScreenSession(presentation) {
   };
 }
 
+// src/host-path.ts
+function hostFilePath(path, platform) {
+  const normalized = path.replace(/\\/g, "/");
+  if (normalized.startsWith("/app/") || normalized.startsWith("/mnt/")) return normalized;
+  if (platform === "windows" && /^[a-z]:\//i.test(normalized)) return `/mnt/windows/${normalized[0].toLowerCase()}/${normalized.slice(3)}`;
+  if (!normalized.startsWith("/")) return null;
+  if (platform === "macos" || platform === "linux") return `/mnt/${platform}${normalized}`;
+  if (platform === "android") return `/mnt/android/root${normalized}`;
+  return null;
+}
+
 // src/image-source.ts
 function readAvatarImport(path) {
   return __async(this, null, function* () {
@@ -1535,12 +700,9 @@ function readAvatarImport(path) {
   });
 }
 function pickedImagePath(path, platform) {
-  const normalized = path.replace(/\\/g, "/");
-  if (normalized.startsWith("/app/") || normalized.startsWith("/mnt/")) return normalized;
-  if (platform === "windows" && /^[a-z]:\//i.test(normalized)) return `/mnt/windows/${normalized[0].toLowerCase()}/${normalized.slice(3)}`;
-  if (!normalized.startsWith("/")) throw new Error("\u9009\u62E9\u5668\u6CA1\u6709\u8FD4\u56DE\u53EF\u8BFB\u53D6\u7684\u6587\u4EF6\u8DEF\u5F84");
-  if (platform === "macos" || platform === "linux") return `/mnt/${platform}${normalized}`;
-  if (platform === "android") return `/mnt/android/root${normalized}`;
+  const mapped = hostFilePath(path, platform);
+  if (mapped !== null) return mapped;
+  if (!path.replace(/\\/g, "/").startsWith("/")) throw new Error("\u9009\u62E9\u5668\u6CA1\u6709\u8FD4\u56DE\u53EF\u8BFB\u53D6\u7684\u6587\u4EF6\u8DEF\u5F84");
   throw new Error("\u5F53\u524D\u5E73\u53F0\u4E0D\u652F\u6301\u5BFC\u5165\u6B64\u56FE\u7247\u8DEF\u5F84");
 }
 
@@ -1550,11 +712,11 @@ function renderEntityPreview(ctx, input) {
   const entity = input.card ?? input.group;
   if (entity === null) return [];
   const card = input.card;
-  const selectable = (key, value, subdued = false) => OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:56236",[key,OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:56271",[value,subdued ? colors.onSurfaceVariant : colors.onSurface],__operitUiTemplate_56271)],__operitUiTemplate_56236);
-  const pill = (key, label) => OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:56435",[key,colors.primaryContainer.copy({ alpha: 0.38 }),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:56622",[label,colors.onPrimaryContainer],__operitUiTemplate_56622)],__operitUiTemplate_56435);
+  const selectable = (key, value, subdued = false) => OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:35366",[key,OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:35401",[value,subdued ? colors.onSurfaceVariant : colors.onSurface],__operitUiTemplate_35401)],__operitUiTemplate_35366);
+  const pill = (key, label) => OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:35565",[key,colors.primaryContainer.copy({ alpha: 0.38 }),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:35752",[label,colors.onPrimaryContainer],__operitUiTemplate_35752)],__operitUiTemplate_35565);
   const attachedTags = card === null ? [] : input.tags.filter((tag) => card.attachedTagIds.includes(tag.id));
-  const identity2 = OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:56839",[[
-    OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:56947",[card === null ? OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:57048",[colors.primaryContainer.copy({ alpha: 0.48 }),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:57217",[colors.primary],__operitUiTemplate_57217)],__operitUiTemplate_57048) : OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:57292",[{
+  const identity2 = OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:35969",[[
+    OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:36077",[card === null ? OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:36178",[colors.primaryContainer.copy({ alpha: 0.48 }),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:36347",[colors.primary],__operitUiTemplate_36347)],__operitUiTemplate_36178) : OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:36422",[{
         key: "entity-avatar",
         ...card.avatarUri === null ? { path: input.avatar ?? void 0 } : { uri: card.avatarUri },
         width: 72,
@@ -1562,22 +724,22 @@ function renderEntityPreview(ctx, input) {
         contentScale: "crop",
         contentDescription: card.name,
         modifier: ctx.Modifier.clip({ cornerRadius: 20 })
-      }],__operitUiTemplate_57292),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:57616",[[
-        OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:57667",[entity.name],__operitUiTemplate_57667),
-        ...card === null ? [OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:57836",[input.group.members.length + " \u4F4D\u89D2\u8272",colors.onSurfaceVariant],__operitUiTemplate_57836)] : []
-      ]],__operitUiTemplate_57616)],__operitUiTemplate_56947),
+      }],__operitUiTemplate_36422),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:36746",[[
+        OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:36797",[entity.name],__operitUiTemplate_36797),
+        ...card === null ? [OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:36966",[input.group.members.length + " \u4F4D\u89D2\u8272",colors.onSurfaceVariant],__operitUiTemplate_36966)] : []
+      ]],__operitUiTemplate_36746)],__operitUiTemplate_36077),
     ...entity.description.trim() === "" ? [] : [selectable("entity-preview-description", entity.description, true)],
-    ...attachedTags.length === 0 ? [] : [OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:58145",[attachedTags.map((tag) => pill("entity-preview-tag-" + tag.id, tag.name))],__operitUiTemplate_58145)]
-  ]],__operitUiTemplate_56839);
+    ...attachedTags.length === 0 ? [] : [OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:37275",[attachedTags.map((tag) => pill("entity-preview-tag-" + tag.id, tag.name))],__operitUiTemplate_37275)]
+  ]],__operitUiTemplate_35969);
   const contentSection = (key, title, value, quote = false) => value.trim() === "" ? [] : [
-    OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:58397",["entity-preview-" + key,OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:58494",[{
+    OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:37527",["entity-preview-" + key,OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:37624",[{
         fillMaxWidth: true,
         spacing: 10,
         ...quote ? { padding: 18, backgroundColor: colors.primaryContainer.copy({ alpha: 0.22 }), backgroundShape: { cornerRadius: 16 } } : {}
-      },OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:58721",[[
-          ...quote ? [OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:58821",[colors.primary],__operitUiTemplate_58821)] : [],
-          OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:58907",[title,quote ? colors.primary : colors.onSurfaceVariant],__operitUiTemplate_58907)
-        ]],__operitUiTemplate_58721),selectable("entity-preview-" + key + "-text", value)],__operitUiTemplate_58494)],__operitUiTemplate_58397)
+      },OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:37851",[[
+          ...quote ? [OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:37951",[colors.primary],__operitUiTemplate_37951)] : [],
+          OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:38037",[title,quote ? colors.primary : colors.onSurfaceVariant],__operitUiTemplate_38037)
+        ]],__operitUiTemplate_37851),selectable("entity-preview-" + key + "-text", value)],__operitUiTemplate_37624)],__operitUiTemplate_37527)
   ];
   const themeLabel = entity.themeConfigId === null ? "\u8DDF\u968F\u5F53\u524D\u4E3B\u9898" : input.themeError !== "" ? "\u4E3B\u9898\u540D\u79F0\u6682\u65F6\u65E0\u6CD5\u8BFB\u53D6" : input.themes === null ? "\u6B63\u5728\u8BFB\u53D6\u4E3B\u9898\u540D\u79F0\u2026" : input.themes.find((theme) => theme.id === entity.themeConfigId)?.label ?? "\u4E3B\u9898\u914D\u7F6E\u5DF2\u4E0D\u53EF\u7528";
   const rows = [];
@@ -1591,9 +753,8 @@ function renderEntityPreview(ctx, input) {
       ...contentSection("prompt", "\u9AD8\u7EA7\u81EA\u5B9A\u4E49 Prompt", card.advancedCustomPrompt),
       ...contentSection("notes", "\u5907\u6CE8", card.marks)
     );
-    const model = input.snapshot.models.find((model2) => model2.providerId === card.chatProviderId && model2.modelId === card.chatModelId);
     rows.push(
-      { key: "model", label: "\u804A\u5929\u6A21\u578B", value: card.chatModelBindingMode === "FIXED_MODEL" ? model === void 0 ? "\u56FA\u5B9A\u6A21\u578B\u5DF2\u4E0D\u53EF\u7528" : model.providerName + " \xB7 " + model.modelId : "\u8DDF\u968F\u5168\u5C40\u6A21\u578B" },
+      { key: "model", label: "\u804A\u5929\u6A21\u578B", value: characterModelBindingStatus(card, input.snapshot.models).label },
       { key: "theme", label: "\u4E3B\u9898", value: themeLabel },
       { key: "tts", label: "\u8BED\u97F3", value: card.ttsConfigId === null ? "\u8DDF\u968F\u5168\u5C40\u8BED\u97F3\u914D\u7F6E" : input.snapshot.ttsConfigs.find((config) => config.id === card.ttsConfigId)?.name ?? "\u8BED\u97F3\u914D\u7F6E\u5DF2\u4E0D\u53EF\u7528" },
       { key: "memory", label: "\u8BB0\u5FC6\u5E93", value: card.memoryBindingMode === "SHARED" ? input.snapshot.stores.find((store) => store.id === card.sharedMemoryId)?.name ?? "\u5171\u4EAB\u8BB0\u5FC6\u5E93\u5DF2\u4E0D\u53EF\u7528" : "\u89D2\u8272\u72EC\u7ACB\u8BB0\u5FC6\u5E93" }
@@ -1613,22 +774,22 @@ function renderEntityPreview(ctx, input) {
     rows.push({ key: "tools", label: "\u5DE5\u5177\u8BBF\u95EE", value: !policy.enabled ? "\u8DDF\u968F\u5168\u5C40\u5DE5\u5177\u914D\u7F6E" : toolNames.length === 0 ? "\u672A\u5141\u8BB8\u4EFB\u4F55\u5DE5\u5177\u6765\u6E90" : toolNames.join("\u3001") });
   } else {
     const members = [...input.group.members].sort((a, b) => a.orderIndex - b.orderIndex);
-    contents.push(OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:62728",[[
-      OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:62837",[colors.onSurfaceVariant],__operitUiTemplate_62837),
-      ...members.length === 0 ? [OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:62993",[colors.onSurfaceVariant],__operitUiTemplate_62993)] : members.map((member2, index) => {
+    contents.push(OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:41576",[[
+      OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:41685",[colors.onSurfaceVariant],__operitUiTemplate_41685),
+      ...members.length === 0 ? [OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:41841",[colors.onSurfaceVariant],__operitUiTemplate_41841)] : members.map((member2, index) => {
         const record2 = input.snapshot.cards.find((card2) => card2.id === member2.characterCardId);
-        return OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:63260",["entity-preview-member-" + member2.characterCardId,OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:63427",[String(index + 1).padStart(2, "0"),colors.onSurfaceVariant],__operitUiTemplate_63427),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:63550",[{ width: 40, height: 40, ...record2?.avatarUri == null ? { path: input.avatar ?? void 0 } : { uri: record2.avatarUri }, contentScale: "crop", contentDescription: record2?.name ?? "\u89D2\u8272\u5DF2\u79FB\u9664", modifier: ctx.Modifier.clip({ cornerRadius: 12 }) }],__operitUiTemplate_63550),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:63840",[[
-            OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:63895",[record2?.name ?? "\u89D2\u8272\u5DF2\u79FB\u9664"],__operitUiTemplate_63895),
-            ...record2?.description.trim() ? [OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:64075",[record2.description,colors.onSurfaceVariant],__operitUiTemplate_64075)] : []
-          ]],__operitUiTemplate_63840)],__operitUiTemplate_63260);
+        return OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:42108",["entity-preview-member-" + member2.characterCardId,OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:42275",[String(index + 1).padStart(2, "0"),colors.onSurfaceVariant],__operitUiTemplate_42275),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:42398",[{ width: 40, height: 40, ...record2?.avatarUri == null ? { path: input.avatar ?? void 0 } : { uri: record2.avatarUri }, contentScale: "crop", contentDescription: record2?.name ?? "\u89D2\u8272\u5DF2\u79FB\u9664", modifier: ctx.Modifier.clip({ cornerRadius: 12 }) }],__operitUiTemplate_42398),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:42688",[[
+            OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:42743",[record2?.name ?? "\u89D2\u8272\u5DF2\u79FB\u9664"],__operitUiTemplate_42743),
+            ...record2?.description.trim() ? [OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:42923",[record2.description,colors.onSurfaceVariant],__operitUiTemplate_42923)] : []
+          ]],__operitUiTemplate_42688)],__operitUiTemplate_42108);
       })
-    ]],__operitUiTemplate_62728));
+    ]],__operitUiTemplate_41576));
     rows.push({ key: "theme", label: "\u4E3B\u9898", value: themeLabel });
   }
-  contents.push(OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:64334",[colors.surfaceContainerLow,[
-    OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:64492",[input.onToggleConfiguration,OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:64670",[OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:64770",[colors.onSurfaceVariant],__operitUiTemplate_64770),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:64850",[OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:64903",null,__operitUiTemplate_64903),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:65004",[card === null ? "\u4E3B\u9898\u914D\u7F6E" : "\u6A21\u578B\u3001\u8BED\u97F3\u4E0E\u8BB0\u5FC6",colors.onSurfaceVariant],__operitUiTemplate_65004)],__operitUiTemplate_64850),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:65195",[input.configurationExpanded ? "ExpandLess" : "ExpandMore",colors.onSurfaceVariant],__operitUiTemplate_65195)],__operitUiTemplate_64670)],__operitUiTemplate_64492),
-    ...input.configurationExpanded ? [OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:65371",[rows.map((row) => OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:65544",["entity-preview-config-" + row.key,OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:65645",[row.label,colors.onSurfaceVariant],__operitUiTemplate_65645),selectable("entity-preview-config-" + row.key + "-value", row.value)],__operitUiTemplate_65544))],__operitUiTemplate_65371)] : []
-  ]],__operitUiTemplate_64334));
+  contents.push(OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:43182",[colors.surfaceContainerLow,[
+    OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:43340",[input.onToggleConfiguration,OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:43518",[OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:43618",[colors.onSurfaceVariant],__operitUiTemplate_43618),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:43698",[OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:43751",null,__operitUiTemplate_43751),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:43852",[card === null ? "\u4E3B\u9898\u914D\u7F6E" : "\u6A21\u578B\u3001\u8BED\u97F3\u4E0E\u8BB0\u5FC6",colors.onSurfaceVariant],__operitUiTemplate_43852)],__operitUiTemplate_43698),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:44043",[input.configurationExpanded ? "ExpandLess" : "ExpandMore",colors.onSurfaceVariant],__operitUiTemplate_44043)],__operitUiTemplate_43518)],__operitUiTemplate_43340),
+    ...input.configurationExpanded ? [OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:44219",[rows.map((row) => OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:44392",["entity-preview-config-" + row.key,OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:44493",[row.label,colors.onSurfaceVariant],__operitUiTemplate_44493),selectable("entity-preview-config-" + row.key + "-value", row.value)],__operitUiTemplate_44392))],__operitUiTemplate_44219)] : []
+  ]],__operitUiTemplate_43182));
   return contents;
 }
 
@@ -1849,8 +1010,17 @@ function renderNativeEntity(ctx, input, lifecycle, statePrefix = "") {
         if (input.entity === "card") {
           const draft = card();
           if (draft.name.trim() === "") throw new Error("\u89D2\u8272\u540D\u79F0\u4E0D\u80FD\u4E3A\u7A7A");
-          if (draft.chatModelBindingMode === "FIXED_MODEL" && !live.current.snapshot?.models.some((model) => model.providerId === draft.chatProviderId && model.modelId === draft.chatModelId)) throw new Error("\u8BF7\u9009\u62E9\u6709\u6548\u7684\u56FA\u5B9A\u804A\u5929\u6A21\u578B");
-          if (draft.memoryBindingMode === "SHARED" && !live.current.snapshot?.stores.some((store) => store.id === draft.sharedMemoryId)) throw new Error("\u8BF7\u9009\u62E9\u6709\u6548\u7684\u5171\u4EAB\u8BB0\u5FC6\u5E93");
+          let bindingChanged = input.mode === "create";
+          let memoryBindingChanged = input.mode === "create";
+          if (input.mode !== "create") {
+            const original = live.current.snapshot.cards.find((value) => value.id === input.id);
+            if (original === void 0) throw new Error("\u89D2\u8272\u5361\u5DF2\u4E0D\u5B58\u5728");
+            bindingChanged = !sameCharacterModelBinding(original, draft);
+            memoryBindingChanged = original.memoryBindingMode !== draft.memoryBindingMode || original.sharedMemoryId !== draft.sharedMemoryId;
+          }
+          const bindingStatus = characterModelBindingStatus(draft, live.current.snapshot.models);
+          if (bindingChanged && bindingStatus.needsRebind) throw new Error(bindingStatus.label);
+          if (memoryBindingChanged && draft.memoryBindingMode === "SHARED" && !live.current.snapshot?.stores.some((store) => store.id === draft.sharedMemoryId)) throw new Error("\u8BF7\u9009\u62E9\u6709\u6548\u7684\u5171\u4EAB\u8BB0\u5FC6\u5E93");
           snapshot2 = yield request({ action: "saveCharacter", card: copy(draft), create: input.mode === "create", tagChanges: copy(live.current.tagChanges) });
         } else {
           const draft = group();
@@ -1948,10 +1118,10 @@ function renderNativeEntity(ctx, input, lifecycle, statePrefix = "") {
     });
   }
   const colors = ctx.MaterialTheme.colorScheme, enabled = !state.busy && !state.finished;
-  const text3 = (value) => OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:79559",[value],__operitUiTemplate_79559);
-  const caption = (value) => OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:79659",[value,colors.onSurfaceVariant],__operitUiTemplate_79659);
-  const section = (title, value) => OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:79797",["preview-" + title,OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:79897",[title,colors.onSurfaceVariant],__operitUiTemplate_79897),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:79984",[text3(value)],__operitUiTemplate_79984)],__operitUiTemplate_79797);
-  const field2 = (key, label, value, apply, maxLines = 1) => OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:80095",[OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:80149",[{
+  const text3 = (value) => OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:58926",[value],__operitUiTemplate_58926);
+  const caption = (value) => OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:59026",[value,colors.onSurfaceVariant],__operitUiTemplate_59026);
+  const section = (title, value) => OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:59164",["preview-" + title,OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:59264",[title,colors.onSurfaceVariant],__operitUiTemplate_59264),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:59351",[text3(value)],__operitUiTemplate_59351)],__operitUiTemplate_59164);
+  const field = (key, label, value, apply, maxLines = 1) => OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:59461",[OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:59515",[{
     key: "entity-field-" + key,
     label,
     value,
@@ -1962,44 +1132,44 @@ function renderNativeEntity(ctx, input, lifecycle, statePrefix = "") {
     maxLines,
     style: {},
     onValueChange: apply,
-    ...maxLines === 1 ? {} : { suffixIconWidth: 36, suffixIconHeight: 36, trailingIcon: OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:80458",[OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:80524",["entity-expand-" + key,enabled,() => {
+    ...maxLines === 1 ? {} : { suffixIconWidth: 36, suffixIconHeight: 36, trailingIcon: OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:59824",[OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:59890",["entity-expand-" + key,enabled,() => {
         assertOwner();
         update({ expanded: { key, label, value, apply }, fullscreen: true });
-      },OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:80822",null,__operitUiTemplate_80822)],__operitUiTemplate_80524)],__operitUiTemplate_80458) }
-  }],__operitUiTemplate_80149)],__operitUiTemplate_80095);
-  const check = (key, label, checked, apply) => OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:80927",[key,OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:81009",[checked,enabled,apply],__operitUiTemplate_81009),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:81072",[label],__operitUiTemplate_81072)],__operitUiTemplate_80927);
-  const configure = (key, label, value, apply) => OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:81165",[OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:81228",[key,enabled ? apply : void 0,OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:81342",[label,enabled,OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:81384",[OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:81462",[value],__operitUiTemplate_81462),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:81559",null,__operitUiTemplate_81559)],__operitUiTemplate_81384)],__operitUiTemplate_81342)],__operitUiTemplate_81228)],__operitUiTemplate_81165);
+      },OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:60188",null,__operitUiTemplate_60188)],__operitUiTemplate_59890)],__operitUiTemplate_59824) }
+  }],__operitUiTemplate_59515)],__operitUiTemplate_59461);
+  const check = (key, label, checked, apply) => OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:60293",[key,OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:60375",[checked,enabled,apply],__operitUiTemplate_60375),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:60438",[label],__operitUiTemplate_60438)],__operitUiTemplate_60293);
+  const configure = (key, label, value, apply) => OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:60531",[OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:60594",[key,enabled ? apply : void 0,OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:60708",[label,enabled,OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:60750",[OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:60828",[value],__operitUiTemplate_60828),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:60925",null,__operitUiTemplate_60925)],__operitUiTemplate_60750)],__operitUiTemplate_60708)],__operitUiTemplate_60594)],__operitUiTemplate_60531);
   const select = (key, label, value, choices, apply, empty2 = "\u4E0D\u7ED1\u5B9A") => configure(key, label, choices.find((option) => option.id === value)?.label ?? (value === null ? empty2 : "\u5DF2\u7ED1\u5B9A\u914D\u7F6E\u4E0D\u5B58\u5728\uFF1A" + value), () => {
     assertOwner();
     update({ picker: { title: "\u9009\u62E9" + label, key, value, choices, apply, query: "" } });
   });
-  const binding = (key, title, subtitleOff, subtitleOn, checked, apply, children, switchEnabled = true) => OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:82110",[key,OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:82168",[ctx.Modifier.border(1, colors.outlineVariant.copy({ alpha: 0.24 }), { cornerRadius: 12 }),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:82356",[[
-      OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:82402",[ctx.Modifier.heightIn({ minHeight: 46 }),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:82540",[OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:82582",[title,enabled && switchEnabled ? colors.onSurface : colors.onSurface.copy({ alpha: 0.46 })],__operitUiTemplate_82582),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:82738",[checked ? subtitleOn : subtitleOff,enabled && switchEnabled ? colors.onSurfaceVariant : colors.onSurfaceVariant.copy({ alpha: 0.46 })],__operitUiTemplate_82738)],__operitUiTemplate_82540),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:82928",[key + "-switch",checked,enabled && switchEnabled,ctx.Modifier.scale(0.82),apply],__operitUiTemplate_82928)],__operitUiTemplate_82402),
-      ...checked || !switchEnabled ? [OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:83120",null,__operitUiTemplate_83120), ...children] : []
-    ]],__operitUiTemplate_82356)],__operitUiTemplate_82168)],__operitUiTemplate_82110);
-  const body = (key, children, padding = { paddingStart: 18, paddingTop: 10, paddingEnd: 18, paddingBottom: 10 }) => OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:83298",[key,children.map((child, index) => OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:83376",[key + "-item-" + String(child.props?.key ?? index),padding.paddingStart,padding.paddingEnd,index === 0 ? padding.paddingTop : 0,index === children.length - 1 ? padding.paddingBottom : 0,child],__operitUiTemplate_83376))],__operitUiTemplate_83298);
-  const tabs = (key, labels, selected, apply) => OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:83745",[key,selected,labels.map((label, tab) => OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:83870",[key + "-" + tab,selected === tab,enabled,() => {
+  const binding = (key, title, subtitleOff, subtitleOn, checked, apply, children, switchEnabled = true) => OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:61476",[key,OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:61534",[ctx.Modifier.border(1, colors.outlineVariant.copy({ alpha: 0.24 }), { cornerRadius: 12 }),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:61722",[[
+      OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:61768",[ctx.Modifier.heightIn({ minHeight: 46 }),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:61906",[OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:61948",[title,enabled && switchEnabled ? colors.onSurface : colors.onSurface.copy({ alpha: 0.46 })],__operitUiTemplate_61948),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:62104",[checked ? subtitleOn : subtitleOff,enabled && switchEnabled ? colors.onSurfaceVariant : colors.onSurfaceVariant.copy({ alpha: 0.46 })],__operitUiTemplate_62104)],__operitUiTemplate_61906),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:62294",[key + "-switch",checked,enabled && switchEnabled,ctx.Modifier.scale(0.82),apply],__operitUiTemplate_62294)],__operitUiTemplate_61768),
+      ...checked || !switchEnabled ? [OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:62486",null,__operitUiTemplate_62486), ...children] : []
+    ]],__operitUiTemplate_61722)],__operitUiTemplate_61534)],__operitUiTemplate_61476);
+  const body = (key, children, padding = { paddingStart: 18, paddingTop: 10, paddingEnd: 18, paddingBottom: 10 }) => OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:62664",[key,children.map((child, index) => OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:62742",[key + "-item-" + String(child.props?.key ?? index),padding.paddingStart,padding.paddingEnd,index === 0 ? padding.paddingTop : 0,index === children.length - 1 ? padding.paddingBottom : 0,child],__operitUiTemplate_62742))],__operitUiTemplate_62664);
+  const tabs = (key, labels, selected, apply) => OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:63111",[key,selected,labels.map((label, tab) => OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:63236",[key + "-" + tab,selected === tab,enabled,() => {
       assertOwner();
       apply(tab);
-    },OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:84007",[label],__operitUiTemplate_84007)],__operitUiTemplate_83870))],__operitUiTemplate_83745);
-  const standardButton = (key, label, action, filled = false) => filled ? OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:84139",[key,label,enabled,action],__operitUiTemplate_84139) : OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:84203",[key,label,enabled,action],__operitUiTemplate_84203);
+    },OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:63373",[label],__operitUiTemplate_63373)],__operitUiTemplate_63236))],__operitUiTemplate_63111);
+  const standardButton = (key, label, action, filled = false) => filled ? OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:63505",[key,label,enabled,action],__operitUiTemplate_63505) : OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:63569",[key,label,enabled,action],__operitUiTemplate_63569);
   function shell(title, child, actions, width = 760, height = 820, plainBody = false, reading = false) {
-    return OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:84386",[{ key: "native-entity-panel", ...state.fullscreen ? { fillMaxSize: true } : { width, height }, modifier: ctx.Modifier.clip({ cornerRadius: state.fullscreen ? 0 : 28 }) },[
-      OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:84579",[reading ? 18 : 22,reading ? 8 : 12,OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:84773",[{ text: title, style: reading ? "labelLarge" : "headlineSmall", fontWeight: reading ? "600" : "700", ...reading ? { color: colors.onSurfaceVariant, fontSize: 14 } : {}, maxLines: 2, overflow: "ellipsis", weight: 1 }],__operitUiTemplate_84773),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:85011",[enabled,close],__operitUiTemplate_85011)],__operitUiTemplate_84579),
-      ...state.busy ? [OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:85127",null,__operitUiTemplate_85127)] : [],
-      ...state.error === "" ? [] : [OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:85225",[state.error,colors.error],__operitUiTemplate_85225)],
-      OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:85372",[{ key: "entity-content", weight: 1, fillMaxWidth: true, ...plainBody ? {} : { paddingStart: 24, paddingTop: 16, paddingEnd: 24, paddingBottom: 20 } },child],__operitUiTemplate_85372),
-      OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:85548",[actions],__operitUiTemplate_85548)
-    ]],__operitUiTemplate_84386);
+    return OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:63752",[{ key: "native-entity-panel", ...state.fullscreen ? { fillMaxSize: true } : { width, height }, modifier: ctx.Modifier.clip({ cornerRadius: state.fullscreen ? 0 : 28 }) },[
+      OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:63945",[reading ? 18 : 22,reading ? 8 : 12,OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:64139",[{ text: title, style: reading ? "labelLarge" : "headlineSmall", fontWeight: reading ? "600" : "700", ...reading ? { color: colors.onSurfaceVariant, fontSize: 14 } : {}, maxLines: 2, overflow: "ellipsis", weight: 1 }],__operitUiTemplate_64139),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:64377",[enabled,close],__operitUiTemplate_64377)],__operitUiTemplate_63945),
+      ...state.busy ? [OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:64493",null,__operitUiTemplate_64493)] : [],
+      ...state.error === "" ? [] : [OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:64591",[state.error,colors.error],__operitUiTemplate_64591)],
+      OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:64738",[{ key: "entity-content", weight: 1, fillMaxWidth: true, ...plainBody ? {} : { paddingStart: 24, paddingTop: 16, paddingEnd: 24, paddingBottom: 20 } },child],__operitUiTemplate_64738),
+      OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:64914",[actions],__operitUiTemplate_64914)
+    ]],__operitUiTemplate_63752);
   }
   let panel;
   const cancel = standardButton("entity-cancel", "\u53D6\u6D88", close);
   if (state.expanded !== null) {
     const expanded = state.expanded;
-    panel = shell(expanded.label, OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:85945",[expanded.label,expanded.value,enabled,(value) => {
+    panel = shell(expanded.label, OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:65311",[expanded.label,expanded.value,enabled,(value) => {
       assertOwner();
       if (live.current.expanded !== null) update({ expanded: { ...live.current.expanded, value } });
-    }],__operitUiTemplate_85945), [
+    }],__operitUiTemplate_65311), [
       cancel,
       standardButton("entity-primary", "\u4FDD\u5B58", () => {
         assertOwner();
@@ -2019,17 +1189,17 @@ function renderNativeEntity(ctx, input, lifecycle, statePrefix = "") {
       update({ picker: null });
     };
     const choices = picker.choices.filter((option) => (option.label + " " + (option.subtitle ?? "")).toLowerCase().includes(picker.query.trim().toLowerCase()));
-    panel = shell(picker.title, OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:87064",[[
-      field2("picker-query", "\u641C\u7D22", picker.query, (query) => {
+    panel = shell(picker.title, OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:66430",[[
+      field("picker-query", "\u641C\u7D22", picker.query, (query) => {
         assertOwner();
         if (live.current.picker !== null) update({ picker: { ...live.current.picker, query } });
       }),
-      ...themePending ? [state.themeError === "" ? caption("\u6B63\u5728\u8BFB\u53D6\u4E3B\u9898\u914D\u7F6E\u2026") : OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:87424",[OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:87463",[state.themeError,colors.error],__operitUiTemplate_87463),standardButton("entity-picker-retry", "\u91CD\u65B0\u52A0\u8F7D\u4E3B\u9898", loadThemes)],__operitUiTemplate_87424)] : [],
-      OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:87630",[[
-        OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:87720",[() => choose(null),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:87897",[picker.value === null ? "CheckCircle" : "CircleOutlined",picker.value === null ? colors.primary : colors.onSurfaceVariant],__operitUiTemplate_87897),text3("\u8DDF\u968F\u5168\u5C40 / \u4E0D\u7ED1\u5B9A")],__operitUiTemplate_87720),
-        ...choices.map((option) => OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:88153",["entity-picker-" + option.id,() => choose(option.id),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:88342",[picker.value === option.id ? "CheckCircle" : "CircleOutlined",picker.value === option.id ? colors.primary : colors.onSurfaceVariant],__operitUiTemplate_88342),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:88515",[[text3(option.label), ...option.subtitle === void 0 ? [] : [caption(option.subtitle)]]],__operitUiTemplate_88515)],__operitUiTemplate_88153))
-      ]],__operitUiTemplate_87630)
-    ]],__operitUiTemplate_87064), [cancel], 580, 560);
+      ...themePending ? [state.themeError === "" ? caption("\u6B63\u5728\u8BFB\u53D6\u4E3B\u9898\u914D\u7F6E\u2026") : OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:66789",[OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:66828",[state.themeError,colors.error],__operitUiTemplate_66828),standardButton("entity-picker-retry", "\u91CD\u65B0\u52A0\u8F7D\u4E3B\u9898", loadThemes)],__operitUiTemplate_66789)] : [],
+      OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:66995",[[
+        OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:67085",[() => choose(null),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:67262",[picker.value === null ? "CheckCircle" : "CircleOutlined",picker.value === null ? colors.primary : colors.onSurfaceVariant],__operitUiTemplate_67262),text3("\u8DDF\u968F\u5168\u5C40 / \u4E0D\u7ED1\u5B9A")],__operitUiTemplate_67085),
+        ...choices.map((option) => OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:67518",["entity-picker-" + option.id,() => choose(option.id),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:67707",[picker.value === option.id ? "CheckCircle" : "CircleOutlined",picker.value === option.id ? colors.primary : colors.onSurfaceVariant],__operitUiTemplate_67707),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:67880",[[text3(option.label), ...option.subtitle === void 0 ? [] : [caption(option.subtitle)]]],__operitUiTemplate_67880)],__operitUiTemplate_67518))
+      ]],__operitUiTemplate_66995)
+    ]],__operitUiTemplate_66430), [cancel], 580, 560);
   } else if (state.toolDraft !== null && state.snapshot !== null) {
     const draft = state.toolDraft, catalog = state.snapshot.toolCatalog;
     const names = ["\u5185\u7F6E\u5DE5\u5177", "\u63D2\u4EF6", "\u6280\u80FD", "MCP"], keys = ["allowedBuiltinTools", "allowedPackages", "allowedSkills", "allowedMcpServers"];
@@ -2039,7 +1209,7 @@ function renderNativeEntity(ctx, input, lifecycle, statePrefix = "") {
       const policy = live.current.toolDraft;
       if (policy !== null) update({ toolDraft: { ...policy, [key]: checked ? [...policy[key], option.name] : policy[key].filter((name) => name !== option.name) } });
     }));
-    panel = shell("\u914D\u7F6E\u5141\u8BB8\u4F7F\u7528\u7684\u5DE5\u5177", OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:89731",[tabs("entity-tool-tabs", names, state.toolTab, (toolTab) => update({ toolTab })),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:89864",[field2("tool-query", "\u641C\u7D22", state.toolQuery, (toolQuery) => update({ toolQuery }))],__operitUiTemplate_89864),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:90038",[body("entity-tool-list", children)],__operitUiTemplate_90038)],__operitUiTemplate_89731), [cancel, standardButton("entity-primary", "\u786E\u5B9A", () => {
+    panel = shell("\u914D\u7F6E\u5141\u8BB8\u4F7F\u7528\u7684\u5DE5\u5177", OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:69096",[tabs("entity-tool-tabs", names, state.toolTab, (toolTab) => update({ toolTab })),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:69229",[field("tool-query", "\u641C\u7D22", state.toolQuery, (toolQuery) => update({ toolQuery }))],__operitUiTemplate_69229),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:69402",[body("entity-tool-list", children)],__operitUiTemplate_69402)],__operitUiTemplate_69096), [cancel, standardButton("entity-primary", "\u786E\u5B9A", () => {
       assertOwner();
       if (live.current.toolDraft !== null) changeCard({ toolAccessConfig: copy(live.current.toolDraft) });
       update({ toolDraft: null });
@@ -2061,10 +1231,10 @@ function renderNativeEntity(ctx, input, lifecycle, statePrefix = "") {
         update({ exporting: false, exportContent: "", exportName: "" });
       }));
     });
-    panel = shell("\u5BFC\u51FA", state.exportContent === "" ? OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:91495",[[standardButton("entity-export-json", "\u5BFC\u51FA JSON", () => exportFile("operit")), ...input.entity === "card" ? [standardButton("entity-export-tavern", "\u5BFC\u51FA\u9152\u9986 JSON", () => exportFile("tavern"))] : []]],__operitUiTemplate_91495) : body("entity-export-body", [caption("\u70B9\u51FB\u4FDD\u5B58\u6587\u4EF6\u9009\u62E9\u4FDD\u5B58\u4F4D\u7F6E\u3002"), section("JSON", state.exportContent)]), [cancel, ...state.exportContent === "" ? [] : [standardButton("entity-export-save", "\u4FDD\u5B58\u6587\u4EF6", writeExport, true)]], state.exportContent === "" ? 420 : 760, state.exportContent === "" ? 240 : 620);
+    panel = shell("\u5BFC\u51FA", state.exportContent === "" ? OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:70859",[[standardButton("entity-export-json", "\u5BFC\u51FA JSON", () => exportFile("operit")), ...input.entity === "card" ? [standardButton("entity-export-tavern", "\u5BFC\u51FA\u9152\u9986 JSON", () => exportFile("tavern"))] : []]],__operitUiTemplate_70859) : body("entity-export-body", [caption("\u70B9\u51FB\u4FDD\u5B58\u6587\u4EF6\u9009\u62E9\u4FDD\u5B58\u4F4D\u7F6E\u3002"), section("JSON", state.exportContent)]), [cancel, ...state.exportContent === "" ? [] : [standardButton("entity-export-save", "\u4FDD\u5B58\u6587\u4EF6", writeExport, true)]], state.exportContent === "" ? 420 : 760, state.exportContent === "" ? 240 : 620);
   } else if (state.tagDraft !== null) {
     const draft = state.tagDraft;
-    const children = state.tagDeleting ? [text3(`\u786E\u5B9A\u5220\u9664\u6807\u7B7E\u201C${draft.name}\u201D\uFF1F`)] : [["name", "\u6807\u7B7E\u540D\u79F0", 1], ["description", "\u63CF\u8FF0", 1], ["promptContent", "\u63D0\u793A\u8BCD\u5185\u5BB9", 6]].map(([key, label, lines]) => field2("tag-" + key, label, draft[key], (value) => {
+    const children = state.tagDeleting ? [text3(`\u786E\u5B9A\u5220\u9664\u6807\u7B7E\u201C${draft.name}\u201D\uFF1F`)] : [["name", "\u6807\u7B7E\u540D\u79F0", 1], ["description", "\u63CF\u8FF0", 1], ["promptContent", "\u63D0\u793A\u8BCD\u5185\u5BB9", 6]].map(([key, label, lines]) => field("tag-" + key, label, draft[key], (value) => {
       assertOwner();
       if (live.current.tagDraft !== null) update({ tagDraft: { ...live.current.tagDraft, [key]: value } });
     }, lines));
@@ -2077,13 +1247,13 @@ function renderNativeEntity(ctx, input, lifecycle, statePrefix = "") {
       standardButton("entity-primary", state.tagDeleting ? "\u5220\u9664" : "\u4FDD\u5B58", stageTag, true)
     ], 620, state.tagDeleting ? 240 : 520);
   } else if (state.tagManaging) {
-    panel = shell("\u7BA1\u7406\u6807\u7B7E", body("entity-tag-manager", state.tags.map((tag) => OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:93436",["entity-tag-row-" + tag.id,OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:93541",[check("entity-tag-" + tag.id, tag.name, state.card?.attachedTagIds.includes(tag.id) ?? false, (checked) => changeCard({ attachedTagIds: checked ? [...card().attachedTagIds, tag.id] : card().attachedTagIds.filter((id2) => id2 !== tag.id) }))],__operitUiTemplate_93541),standardButton("entity-tag-edit-" + tag.id, "\u7F16\u8F91", () => {
+    panel = shell("\u7BA1\u7406\u6807\u7B7E", body("entity-tag-manager", state.tags.map((tag) => OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:72799",["entity-tag-row-" + tag.id,OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:72904",[check("entity-tag-" + tag.id, tag.name, state.card?.attachedTagIds.includes(tag.id) ?? false, (checked) => changeCard({ attachedTagIds: checked ? [...card().attachedTagIds, tag.id] : card().attachedTagIds.filter((id2) => id2 !== tag.id) }))],__operitUiTemplate_72904),standardButton("entity-tag-edit-" + tag.id, "\u7F16\u8F91", () => {
         assertOwner();
         update({ tagDraft: copy(tag) });
       }),standardButton("entity-tag-remove-" + tag.id, "\u5220\u9664", () => {
         assertOwner();
         update({ tagDraft: copy(tag), tagDeleting: true });
-      })],__operitUiTemplate_93436)), { paddingStart: 0, paddingTop: 0, paddingEnd: 0, paddingBottom: 0 }), [standardButton("entity-tag-create", "\u521B\u5EFA\u6807\u7B7E", () => {
+      })],__operitUiTemplate_72799)), { paddingStart: 0, paddingTop: 0, paddingEnd: 0, paddingBottom: 0 }), [standardButton("entity-tag-create", "\u521B\u5EFA\u6807\u7B7E", () => {
       assertOwner();
       update({ tagDraft: { id: "", name: "", description: "", promptContent: "", tagType: "CUSTOM" } });
     }), standardButton("entity-cancel", "\u5B8C\u6210", close)], 620, 560);
@@ -2091,7 +1261,7 @@ function renderNativeEntity(ctx, input, lifecycle, statePrefix = "") {
     panel = shell("\u786E\u8BA4\u5220\u9664", text3(`\u786E\u5B9A\u5220\u9664\u201C${state.card?.name ?? state.group?.name}\u201D\uFF1F\u6B64\u64CD\u4F5C\u4E0D\u53EF\u64A4\u9500\u3002`), [cancel, standardButton("entity-primary", "\u5220\u9664", remove, true)], 560, 240);
   } else {
     const pages = [[], [], []];
-    if (state.loading) pages[0].push(OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:94863",[OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:94925",null,__operitUiTemplate_94925)],__operitUiTemplate_94863));
+    if (state.loading) pages[0].push(OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:74226",[OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:74288",null,__operitUiTemplate_74288)],__operitUiTemplate_74226));
     else if (state.snapshot === null) pages[0].push(standardButton("entity-retry", "\u91CD\u65B0\u52A0\u8F7D", load));
     else if (state.card !== null) {
       const draft = state.card, snapshot2 = state.snapshot;
@@ -2109,13 +1279,13 @@ function renderNativeEntity(ctx, input, lifecycle, statePrefix = "") {
         }));
       } else {
         pages[0].push(
-          field2("name", "\u89D2\u8272\u540D\u79F0", draft.name, (name) => changeCard({ name })),
-          field2("description", "\u63CF\u8FF0", draft.description, (description) => changeCard({ description })),
-          OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:95872",[OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:95926",[enabled,OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:95996",[[
-            OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:96074",[{ key: "entity-edit-avatar", ...draft.avatarUri === null ? { path: state.avatar ?? void 0 } : { uri: draft.avatarUri }, width: 44, height: 44, contentScale: "crop", contentDescription: "\u89D2\u8272\u5934\u50CF", modifier: ctx.Modifier.clip({ type: "circle" }) }],__operitUiTemplate_96074),
-            OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:96364",null,__operitUiTemplate_96364),
-            OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:96406",[draft.avatarUri ?? "\u672A\u8BBE\u7F6E"],__operitUiTemplate_96406),
-            OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:96549",null,__operitUiTemplate_96549),
+          field("name", "\u89D2\u8272\u540D\u79F0", draft.name, (name) => changeCard({ name })),
+          field("description", "\u63CF\u8FF0", draft.description, (description) => changeCard({ description })),
+          OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:75233",[OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:75287",[enabled,OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:75357",[[
+            OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:75435",[{ key: "entity-edit-avatar", ...draft.avatarUri === null ? { path: state.avatar ?? void 0 } : { uri: draft.avatarUri }, width: 44, height: 44, contentScale: "crop", contentDescription: "\u89D2\u8272\u5934\u50CF", modifier: ctx.Modifier.clip({ type: "circle" }) }],__operitUiTemplate_75435),
+            OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:75725",null,__operitUiTemplate_75725),
+            OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:75767",[draft.avatarUri ?? "\u672A\u8BBE\u7F6E"],__operitUiTemplate_75767),
+            OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:75910",null,__operitUiTemplate_75910),
             standardButton("entity-choose-avatar", "\u9009\u62E9", chooseAvatar),
             ...draft.avatarUri === null ? [] : [standardButton("entity-clear-avatar", "\u6E05\u9664", () => __async(null, null, function* () {
               yield act(() => __async(null, null, function* () {
@@ -2124,25 +1294,30 @@ function renderNativeEntity(ctx, input, lifecycle, statePrefix = "") {
                 if (live.current.avatar === null) void loadDefaultAvatar();
               }));
             }))]
-          ]],__operitUiTemplate_95996)],__operitUiTemplate_95926)],__operitUiTemplate_95872),
-          field2("characterSetting", "\u89D2\u8272\u8BBE\u5B9A", draft.characterSetting, (characterSetting) => changeCard({ characterSetting }), 6),
-          field2("openingStatement", "\u5F00\u573A\u767D", draft.openingStatement, (openingStatement) => changeCard({ openingStatement }), 3),
-          OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:97395",[OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:97466",[OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:97531",null,__operitUiTemplate_97531),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:97600",[enabled,() => {
+          ]],__operitUiTemplate_75357)],__operitUiTemplate_75287)],__operitUiTemplate_75233),
+          field("characterSetting", "\u89D2\u8272\u8BBE\u5B9A", draft.characterSetting, (characterSetting) => changeCard({ characterSetting }), 6),
+          field("openingStatement", "\u5F00\u573A\u767D", draft.openingStatement, (openingStatement) => changeCard({ openingStatement }), 3),
+          OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:76754",[OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:76825",[OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:76890",null,__operitUiTemplate_76890),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:76959",[enabled,() => {
               assertOwner();
               update({ tagManaging: true });
-            },OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:97764",[OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:97821",null,__operitUiTemplate_97821),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:97862",null,__operitUiTemplate_97862)],__operitUiTemplate_97764)],__operitUiTemplate_97600)],__operitUiTemplate_97466),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:97930",null,__operitUiTemplate_97930),state.tags.length === 0 ? caption("\u6682\u65E0\u63D0\u793A\u8BCD\u6807\u7B7E") : OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:98054",[state.tags.map((tag) => OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:98124",["entity-tag-" + tag.id,draft.attachedTagIds.includes(tag.id),enabled,OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:98238",[tag.name,ctx.Modifier.widthIn({ maxWidth: 160 })],__operitUiTemplate_98238),() => {
+            },OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:77123",[OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:77180",null,__operitUiTemplate_77180),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:77221",null,__operitUiTemplate_77221)],__operitUiTemplate_77123)],__operitUiTemplate_76959)],__operitUiTemplate_76825),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:77289",null,__operitUiTemplate_77289),state.tags.length === 0 ? caption("\u6682\u65E0\u63D0\u793A\u8BCD\u6807\u7B7E") : OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:77413",[state.tags.map((tag) => OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:77483",["entity-tag-" + tag.id,draft.attachedTagIds.includes(tag.id),enabled,OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:77597",[tag.name,ctx.Modifier.widthIn({ maxWidth: 160 })],__operitUiTemplate_77597),() => {
               assertOwner();
               changeCard({ attachedTagIds: card().attachedTagIds.includes(tag.id) ? card().attachedTagIds.filter((id2) => id2 !== tag.id) : [...card().attachedTagIds, tag.id] });
-            }],__operitUiTemplate_98124))],__operitUiTemplate_98054)],__operitUiTemplate_97395)
+            }],__operitUiTemplate_77483))],__operitUiTemplate_77413)],__operitUiTemplate_76754)
         );
-        for (const [key, label, lines] of [["otherContentChat", "\u804A\u5929\u9644\u52A0\u5185\u5BB9", 4], ["otherContentVoice", "\u8BED\u97F3\u9644\u52A0\u5185\u5BB9", 4], ["advancedCustomPrompt", "\u9AD8\u7EA7\u81EA\u5B9A\u4E49 Prompt", 4], ["marks", "\u5907\u6CE8", 3]]) pages[1].push(field2(key, label, draft[key], (value) => changeCard({ [key]: value }), lines));
+        for (const [key, label, lines] of [["otherContentChat", "\u804A\u5929\u9644\u52A0\u5185\u5BB9", 4], ["otherContentVoice", "\u8BED\u97F3\u9644\u52A0\u5185\u5BB9", 4], ["advancedCustomPrompt", "\u9AD8\u7EA7\u81EA\u5B9A\u4E49 Prompt", 4], ["marks", "\u5907\u6CE8", 3]]) pages[1].push(field(key, label, draft[key], (value) => changeCard({ [key]: value }), lines));
+        const modelStatus = characterModelBindingStatus(draft, snapshot2.models);
         const tts = snapshot2.ttsConfigs.find((config) => config.id === draft.ttsConfigId);
         const policy = draft.toolAccessConfig, count = policy.allowedBuiltinTools.length + policy.allowedPackages.length + policy.allowedSkills.length + policy.allowedMcpServers.length;
         pages[2].push(
-          binding("entity-model", "\u804A\u5929\u6A21\u578B", "\u8DDF\u968F\u5168\u5C40\u6A21\u578B\u914D\u7F6E", "\u4F7F\u7528\u56FA\u5B9A\u6A21\u578B\u914D\u7F6E", draft.chatModelBindingMode === "FIXED_MODEL", (checked) => changeCard({ chatModelBindingMode: checked ? "FIXED_MODEL" : "FOLLOW_GLOBAL", chatModelId: checked ? card().chatModelId : null, chatProviderId: checked ? card().chatProviderId : null }), [select("entity-model-picker", "\u804A\u5929\u6A21\u578B\u914D\u7F6E", draft.chatProviderId === null || draft.chatModelId === null ? null : JSON.stringify([draft.chatProviderId, draft.chatModelId]), snapshot2.models.map((value) => ({ id: JSON.stringify([value.providerId, value.modelId]), label: value.modelId, subtitle: value.providerName })), (selected) => {
+          ...modelStatus.needsRebind ? [
+            OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:78789",[modelStatus.label,colors.error],__operitUiTemplate_78789),
+            standardButton("entity-model-follow-global", "\u8DDF\u968F\u5168\u5C40\u6A21\u578B", () => changeCard({ chatModelBindingMode: "FOLLOW_GLOBAL", chatProviderId: null, chatModelId: null }))
+          ] : [],
+          binding("entity-model", "\u804A\u5929\u6A21\u578B", modelStatus.label, "\u4F7F\u7528\u56FA\u5B9A\u6A21\u578B\u914D\u7F6E", characterModelBindingMode(draft.chatModelBindingMode) === "FIXED_MODEL", (checked) => changeCard({ chatModelBindingMode: checked ? "FIXED_MODEL" : "FOLLOW_GLOBAL", chatModelId: checked ? card().chatModelId : null, chatProviderId: checked ? card().chatProviderId : null }), [select("entity-model-picker", "\u804A\u5929\u6A21\u578B\u914D\u7F6E", draft.chatProviderId === null || draft.chatModelId === null ? null : JSON.stringify([draft.chatProviderId, draft.chatModelId]), snapshot2.models.map((value) => ({ id: JSON.stringify([value.providerId, value.modelId]), label: value.modelId, subtitle: value.providerName })), (selected) => {
             const model = snapshot2.models.find((value) => JSON.stringify([value.providerId, value.modelId]) === selected);
             if (model === void 0) throw new Error("\u8BF7\u9009\u62E9\u6709\u6548\u7684\u63D0\u4F9B\u5546\u4E0E\u6A21\u578B");
-            changeCard({ chatProviderId: model.providerId, chatModelId: model.modelId });
+            changeCard({ chatModelBindingMode: "FIXED_MODEL", chatProviderId: model.providerId, chatModelId: model.modelId });
           }, "\u8BF7\u9009\u62E9\u804A\u5929\u6A21\u578B")]),
           binding("entity-theme", "\u4E3B\u9898\u914D\u7F6E", "\u4E0D\u6539\u53D8\u5F53\u524D\u72EC\u7ACB\u4E3B\u9898", "\u4F7F\u7528\u89D2\u8272\u5361\u4E3B\u9898\u914D\u7F6E", draft.themeConfigId !== null, (checked) => {
             if (!checked) changeCard({ themeConfigId: null });
@@ -2152,14 +1327,14 @@ function renderNativeEntity(ctx, input, lifecycle, statePrefix = "") {
             if (!checked) changeCard({ ttsConfigId: null });
             else update({ picker: { title: "\u9009\u62E9 TTS \u914D\u7F6E", key: "tts", value: draft.ttsConfigId, choices: snapshot2.ttsConfigs.map((config) => ({ id: config.id, label: config.name, subtitle: config.providerType + " \xB7 " + config.voice })), apply: (ttsConfigId) => changeCard({ ttsConfigId }), query: "" } });
           }, [select("entity-tts-picker", "TTS \u914D\u7F6E", draft.ttsConfigId, snapshot2.ttsConfigs.map((config) => ({ id: config.id, label: config.name, subtitle: config.providerType + " \xB7 " + config.voice })), (ttsConfigId) => changeCard({ ttsConfigId }), tts?.name ?? "\u8BF7\u9009\u62E9 TTS \u914D\u7F6E")]),
-          binding("entity-memory", "\u8BB0\u5FC6\u7ED1\u5B9A", "\u4F7F\u7528\u89D2\u8272\u8BB0\u5FC6", "\u4F7F\u7528\u5171\u4EAB\u8BB0\u5FC6", draft.memoryBindingMode === "SHARED", (checked) => changeCard({ memoryBindingMode: checked ? "SHARED" : "CHARACTER", sharedMemoryId: checked ? card().sharedMemoryId : null }), [snapshot2.stores.length === 0 ? caption("\u8FD8\u6CA1\u6709\u5171\u4EAB\u8BB0\u5FC6\u5E93") : select("entity-store-picker", "\u5171\u4EAB\u8BB0\u5FC6\u5E93", draft.sharedMemoryId, snapshot2.stores.map((store) => ({ id: store.id, label: store.name })), (sharedMemoryId) => changeCard({ sharedMemoryId }), "\u8BF7\u9009\u62E9\u5171\u4EAB\u8BB0\u5FC6\u5E93")], snapshot2.stores.length !== 0),
+          binding("entity-memory", "\u8BB0\u5FC6\u7ED1\u5B9A", "\u4F7F\u7528\u89D2\u8272\u8BB0\u5FC6", "\u4F7F\u7528\u5171\u4EAB\u8BB0\u5FC6", draft.memoryBindingMode === "SHARED", (checked) => changeCard({ memoryBindingMode: checked ? "SHARED" : "CHARACTER", sharedMemoryId: checked ? card().sharedMemoryId : null }), [snapshot2.stores.length === 0 ? caption("\u8FD8\u6CA1\u6709\u5171\u4EAB\u8BB0\u5FC6\u5E93") : select("entity-store-picker", "\u5171\u4EAB\u8BB0\u5FC6\u5E93", draft.sharedMemoryId, snapshot2.stores.map((store) => ({ id: store.id, label: store.name })), (sharedMemoryId) => changeCard({ sharedMemoryId }), "\u8BF7\u9009\u62E9\u5171\u4EAB\u8BB0\u5FC6\u5E93")], snapshot2.stores.length !== 0 || draft.memoryBindingMode === "SHARED"),
           binding("entity-tool", "\u5DE5\u5177\u8BBF\u95EE", "\u8DDF\u968F\u5168\u5C40\u5DE5\u5177\u914D\u7F6E", "\u81EA\u5B9A\u4E49\u5141\u8BB8\u4F7F\u7528\u7684\u5DE5\u5177", policy.enabled, (checked) => changeCard({ toolAccessConfig: { ...card().toolAccessConfig, enabled: checked } }), [configure("entity-tool-configure", "\u914D\u7F6E\u5141\u8BB8\u4F7F\u7528\u7684\u5DE5\u5177", "\u5DF2\u914D\u7F6E " + count + " \u4E2A\u5DE5\u5177\u6765\u6E90", () => {
             assertOwner();
             update({ toolDraft: copy(card().toolAccessConfig), toolTab: 0, toolQuery: "" });
           })])
         );
         if (draft.sharedMemoryMounts.length !== 0) pages[2].push(section("\u5171\u4EAB\u8BB0\u5FC6\u6302\u8F7D", JSON.stringify(draft.sharedMemoryMounts, null, 2)));
-        if (state.themeError !== "") pages[2].push(OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:103581",[state.themeError,colors.error],__operitUiTemplate_103581), standardButton("entity-theme-retry", "\u91CD\u65B0\u52A0\u8F7D\u4E3B\u9898", () => __async(null, null, function* () {
+        if (state.themeError !== "") pages[2].push(OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:83481",[state.themeError,colors.error],__operitUiTemplate_83481), standardButton("entity-theme-retry", "\u91CD\u65B0\u52A0\u8F7D\u4E3B\u9898", () => __async(null, null, function* () {
           yield act(loadThemes);
         })));
       }
@@ -2177,23 +1352,23 @@ function renderNativeEntity(ctx, input, lifecycle, statePrefix = "") {
         onToggleConfiguration: togglePreviewConfiguration
       }));
       else {
-        pages[0].push(field2("name", "\u7FA4\u7EC4\u540D\u79F0", draft.name, (name) => changeGroup({ name })), field2("description", "\u63CF\u8FF0", draft.description, (description) => changeGroup({ description })), select("entity-theme-picker", "\u4E3B\u9898\u914D\u7F6E", draft.themeConfigId, state.themes ?? [], (themeConfigId) => changeGroup({ themeConfigId })), OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:104724",null,__operitUiTemplate_104724));
+        pages[0].push(field("name", "\u7FA4\u7EC4\u540D\u79F0", draft.name, (name) => changeGroup({ name })), field("description", "\u63CF\u8FF0", draft.description, (description) => changeGroup({ description })), select("entity-theme-picker", "\u4E3B\u9898\u914D\u7F6E", draft.themeConfigId, state.themes ?? [], (themeConfigId) => changeGroup({ themeConfigId })), OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:84622",null,__operitUiTemplate_84622));
         for (const option of snapshot2.cards) {
           const selected = draft.members.some((member2) => member2.characterCardId === option.id);
-          pages[0].push(OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:105020",[OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:105073",["entity-member-" + option.id,selected ? colors.primaryContainer.copy({ alpha: 0.16 }) : colors.surfaceContainerHighest.copy({ alpha: 0.28 }),ctx.Modifier.border(1, selected ? colors.primary.copy({ alpha: 0.45 }) : colors.outlineVariant.copy({ alpha: 0.28 }), { cornerRadius: 10 }),() => {
+          pages[0].push(OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:84918",[OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:84971",["entity-member-" + option.id,selected ? colors.primaryContainer.copy({ alpha: 0.16 }) : colors.surfaceContainerHighest.copy({ alpha: 0.28 }),ctx.Modifier.border(1, selected ? colors.primary.copy({ alpha: 0.45 }) : colors.outlineVariant.copy({ alpha: 0.28 }), { cornerRadius: 10 }),() => {
               assertOwner();
               const members = selected ? group().members.filter((member2) => member2.characterCardId !== option.id) : [...group().members, { characterCardId: option.id, orderIndex: group().members.length }];
               changeGroup({ members: members.map((member2, orderIndex) => ({ ...member2, orderIndex })) });
-            },OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:105906",[OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:106027",[selected ? "CheckCircle" : "CircleOutlined",selected ? colors.primary : colors.onSurfaceVariant],__operitUiTemplate_106027),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:106164",[{ width: 28, height: 28, ...option.avatarUri === null ? { path: state.avatar ?? void 0 } : { uri: option.avatarUri }, modifier: ctx.Modifier.clip({ type: "circle" }), contentScale: "crop", contentDescription: option.name }],__operitUiTemplate_106164),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:106402",[[OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:106432",[option.name],__operitUiTemplate_106432), ...option.description.trim() === "" ? [] : [caption(option.description)]]],__operitUiTemplate_106402)],__operitUiTemplate_105906)],__operitUiTemplate_105073)],__operitUiTemplate_105020));
+            },OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:85804",[OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:85925",[selected ? "CheckCircle" : "CircleOutlined",selected ? colors.primary : colors.onSurfaceVariant],__operitUiTemplate_85925),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:86062",[{ width: 28, height: 28, ...option.avatarUri === null ? { path: state.avatar ?? void 0 } : { uri: option.avatarUri }, modifier: ctx.Modifier.clip({ type: "circle" }), contentScale: "crop", contentDescription: option.name }],__operitUiTemplate_86062),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:86300",[[OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:86330",[option.name],__operitUiTemplate_86330), ...option.description.trim() === "" ? [] : [caption(option.description)]]],__operitUiTemplate_86300)],__operitUiTemplate_85804)],__operitUiTemplate_84971)],__operitUiTemplate_84918));
         }
       }
     }
     const isCard = state.card !== null;
     const reading = !state.editing;
-    const page = reading ? body("entity-preview-body", pages[0], { paddingStart: 24, paddingTop: 8, paddingEnd: 24, paddingBottom: 24 }) : isCard ? OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:106872",[tabs("entity-tab", ["\u57FA\u7840", "\u5185\u5BB9", "\u7ED1\u5B9A"], state.tab, (tab) => update({ tab })),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:107017",[state.tab,(tab) => {
+    const page = reading ? body("entity-preview-body", pages[0], { paddingStart: 24, paddingTop: 8, paddingEnd: 24, paddingBottom: 24 }) : isCard ? OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:86770",[tabs("entity-tab", ["\u57FA\u7840", "\u5185\u5BB9", "\u7ED1\u5B9A"], state.tab, (tab) => update({ tab })),OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:86915",[state.tab,(tab) => {
       assertOwner();
       if (tab >= 0 && tab < 3) update({ tab });
-    },pages.map((children, index) => body("entity-body-" + index, children))],__operitUiTemplate_107017)],__operitUiTemplate_106872) : body("entity-body", pages[0], { paddingStart: 0, paddingTop: 0, paddingEnd: 0, paddingBottom: 0 });
+    },pages.map((children, index) => body("entity-body-" + index, children))],__operitUiTemplate_86915)],__operitUiTemplate_86770) : body("entity-body", pages[0], { paddingStart: 0, paddingTop: 0, paddingEnd: 0, paddingBottom: 0 });
     const title = state.editing ? input.mode === "create" ? input.entity === "card" ? "\u521B\u5EFA\u89D2\u8272\u5361" : "\u521B\u5EFA\u7FA4\u7EC4" : input.entity === "card" ? "\u7F16\u8F91\u89D2\u8272\u5361" : "\u7F16\u8F91\u7FA4\u7EC4" : input.entity === "card" ? "\u89D2\u8272\u5361" : "\u89D2\u8272\u7FA4\u7EC4";
     panel = shell(title, page, [
       ...state.editing && input.mode !== "create" ? [
@@ -2210,7 +1385,7 @@ function renderNativeEntity(ctx, input, lifecycle, statePrefix = "") {
       ...state.snapshot === null || state.finished ? [] : [standardButton("entity-primary", state.editing ? "\u4FDD\u5B58" : "\u7F16\u8F91", state.editing ? save : edit, true)]
     ], reading ? isCard ? 680 : 620 : isCard ? 760 : 620, reading ? 760 : 820, reading || isCard, reading);
   }
-  return OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:108487",[load,close,colors.surfaceContainerHigh,state.fullscreen ? 0 : 28,state.fullscreen,panel],__operitUiTemplate_108487);
+  return OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:88385",[load,close,colors.surfaceContainerHigh,state.fullscreen ? 0 : 28,state.fullscreen,panel],__operitUiTemplate_88385);
 }
 
 // src/ui-editor.ts
@@ -2315,9 +1490,9 @@ function renderScreen(ctx, definition2, requiredMode = null, managementView = "c
       unsubscribe.current = null;
     }
   }
-  return OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:115248",[initialize,[path === "" ? OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:115317",[error === "" ? `\u6B63\u5728\u52A0\u8F7D${managementView === "memory" ? "\u8BB0\u5FC6" : definition2.title}\u2026` : error],__operitUiTemplate_115317) : OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:115465",[controller,origin,(request2) => request2.url === origin ? { action: "allow" } : { action: "cancel" },(request2) => avatars.intercept(request2) ?? (request2.url === origin ? { action: "respond", response: { mimeType: "text/html", encoding: "utf-8", statusCode: 200, reasonPhrase: "OK", filePath: path } } : { action: "block" }),(event) => {
+  return OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:95146",[initialize,[path === "" ? OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:95215",[error === "" ? `\u6B63\u5728\u52A0\u8F7D${managementView === "memory" ? "\u8BB0\u5FC6" : definition2.title}\u2026` : error],__operitUiTemplate_95215) : OperitComposeGeneration.template(ctx,"com.operit.character_cards:dist/ui/memory-attachment/index.ui.js:95363",[controller,origin,(request2) => request2.url === origin ? { action: "allow" } : { action: "cancel" },(request2) => avatars.intercept(request2) ?? (request2.url === origin ? { action: "respond", response: { mimeType: "text/html", encoding: "utf-8", statusCode: 200, reasonPhrase: "OK", filePath: path } } : { action: "block" }),(event) => {
       if (event.type === "Disposed") dispose();
-    }],__operitUiTemplate_115465), ...managed === null ? [] : [renderManagedEntityScreen(ctx, managed, finishEntity)]]],__operitUiTemplate_115248);
+    }],__operitUiTemplate_95363), ...managed === null ? [] : [renderManagedEntityScreen(ctx, managed, finishEntity)]]],__operitUiTemplate_95146);
 }
 
 // src/ui/memory-attachment/index.ui.ts
@@ -2325,135 +1500,136 @@ function Screen(ctx) {
   return renderScreen(ctx, definition, "memory-attachment");
 }
 
-function __operitUiTemplate_56271(__ctx,__values){return __ctx.UI.Text({text:__values[0],fillMaxWidth:true,style:"bodyMedium",color:__values[1]}); }
-function __operitUiTemplate_56236(__ctx,__values){return __ctx.UI.SelectionContainer({key:__values[0]},__values[1]); }
-function __operitUiTemplate_56622(__ctx,__values){return __ctx.UI.Text({text:__values[0],style:"labelMedium",color:__values[1]}); }
-function __operitUiTemplate_56435(__ctx,__values){return __ctx.UI.Box({key:__values[0],paddingHorizontal:10,paddingVertical:5,backgroundColor:__values[1],backgroundShape:{cornerRadius:8}},__values[2]); }
-function __operitUiTemplate_57217(__ctx,__values){return __ctx.UI.Icon({name:"GroupsOutlined",size:34,tint:__values[0]}); }
-function __operitUiTemplate_57048(__ctx,__values){return __ctx.UI.Box({width:72,height:72,contentAlignment:"center",backgroundColor:__values[0],backgroundShape:{cornerRadius:20}},__values[1]); }
-function __operitUiTemplate_57292(__ctx,__values){return __ctx.UI.Image(__values[0]); }
-function __operitUiTemplate_57667(__ctx,__values){return __ctx.UI.Text({key:"entity-preview-name",text:__values[0],style:"headlineSmall",fontSize:24,fontWeight:"700",fillMaxWidth:true}); }
-function __operitUiTemplate_57836(__ctx,__values){return __ctx.UI.Text({text:__values[0],style:"labelMedium",color:__values[1]}); }
-function __operitUiTemplate_57616(__ctx,__values){return __ctx.UI.Column({weight:1,spacing:6},__values[0]); }
-function __operitUiTemplate_56947(__ctx,__values){return __ctx.UI.Row({fillMaxWidth:true,spacing:16,verticalAlignment:"center"},[__values[0],__values[1]]); }
-function __operitUiTemplate_58145(__ctx,__values){return __ctx.UI.FlowRow({key:"entity-preview-tags",spacing:6,runSpacing:6},__values[0]); }
-function __operitUiTemplate_56839(__ctx,__values){return __ctx.UI.Column({key:"entity-preview-identity",fillMaxWidth:true,spacing:14,paddingBottom:22},__values[0]); }
-function __operitUiTemplate_58821(__ctx,__values){return __ctx.UI.Icon({name:"FormatQuote",size:20,tint:__values[0]}); }
-function __operitUiTemplate_58907(__ctx,__values){return __ctx.UI.Text({text:__values[0],style:"titleSmall",fontWeight:"600",color:__values[1],weight:1}); }
-function __operitUiTemplate_58721(__ctx,__values){return __ctx.UI.Row({fillMaxWidth:true,spacing:8,verticalAlignment:"center"},__values[0]); }
-function __operitUiTemplate_58494(__ctx,__values){return __ctx.UI.Column(__values[0],[__values[1],__values[2]]); }
-function __operitUiTemplate_58397(__ctx,__values){return __ctx.UI.Box({key:__values[0],fillMaxWidth:true,paddingBottom:22},__values[1]); }
-function __operitUiTemplate_62837(__ctx,__values){return __ctx.UI.Text({text:"\u7EC4\u5185\u89D2\u8272",style:"titleSmall",fontWeight:"600",color:__values[0]}); }
-function __operitUiTemplate_62993(__ctx,__values){return __ctx.UI.Text({text:"\u6682\u672A\u6DFB\u52A0\u89D2\u8272",style:"bodyMedium",color:__values[0]}); }
-function __operitUiTemplate_63427(__ctx,__values){return __ctx.UI.Text({text:__values[0],style:"labelMedium",color:__values[1]}); }
-function __operitUiTemplate_63550(__ctx,__values){return __ctx.UI.Image(__values[0]); }
-function __operitUiTemplate_63895(__ctx,__values){return __ctx.UI.Text({text:__values[0],style:"titleSmall",fontWeight:"600",fillMaxWidth:true}); }
-function __operitUiTemplate_64075(__ctx,__values){return __ctx.UI.Text({text:__values[0],style:"bodySmall",color:__values[1],fillMaxWidth:true}); }
-function __operitUiTemplate_63840(__ctx,__values){return __ctx.UI.Column({weight:1,spacing:4},__values[0]); }
-function __operitUiTemplate_63260(__ctx,__values){return __ctx.UI.Row({key:__values[0],fillMaxWidth:true,paddingVertical:10,spacing:12,verticalAlignment:"center"},[__values[1],__values[2],__values[3]]); }
-function __operitUiTemplate_62728(__ctx,__values){return __ctx.UI.Column({key:"entity-preview-members",fillMaxWidth:true,spacing:10,paddingBottom:22},__values[0]); }
-function __operitUiTemplate_64770(__ctx,__values){return __ctx.UI.Icon({name:"Tune",size:20,tint:__values[0]}); }
-function __operitUiTemplate_64903(__ctx,__values){return __ctx.UI.Text({text:"\u914D\u7F6E\u6458\u8981",style:"titleSmall",fontWeight:"600"}); }
-function __operitUiTemplate_65004(__ctx,__values){return __ctx.UI.Text({text:__values[0],style:"bodySmall",color:__values[1]}); }
-function __operitUiTemplate_64850(__ctx,__values){return __ctx.UI.Column({weight:1,spacing:3},[__values[0],__values[1]]); }
-function __operitUiTemplate_65195(__ctx,__values){return __ctx.UI.Icon({name:__values[0],size:20,tint:__values[1]}); }
-function __operitUiTemplate_64670(__ctx,__values){return __ctx.UI.Row({fillMaxWidth:true,padding:16,spacing:10,verticalAlignment:"center"},[__values[0],__values[1],__values[2]]); }
-function __operitUiTemplate_64492(__ctx,__values){return __ctx.UI.Surface({key:"entity-preview-config-toggle",fillMaxWidth:true,color:"transparent",shape:{cornerRadius:16},onClick:__values[0]},__values[1]); }
-function __operitUiTemplate_65645(__ctx,__values){return __ctx.UI.Text({text:__values[0],style:"labelMedium",color:__values[1]}); }
-function __operitUiTemplate_65544(__ctx,__values){return __ctx.UI.Column({key:__values[0],fillMaxWidth:true,spacing:4},[__values[1],__values[2]]); }
-function __operitUiTemplate_65371(__ctx,__values){return __ctx.UI.Column({key:"entity-preview-config-details",fillMaxWidth:true,paddingStart:16,paddingEnd:16,paddingBottom:18,spacing:14},__values[0]); }
-function __operitUiTemplate_64334(__ctx,__values){return __ctx.UI.Column({key:"entity-preview-config",fillMaxWidth:true,backgroundColor:__values[0],backgroundShape:{cornerRadius:16}},__values[1]); }
-function __operitUiTemplate_79559(__ctx,__values){return __ctx.UI.Text({text:__values[0],fillMaxWidth:true,style:"bodyMedium"}); }
-function __operitUiTemplate_79659(__ctx,__values){return __ctx.UI.Text({text:__values[0],fillMaxWidth:true,style:"bodySmall",color:__values[1]}); }
-function __operitUiTemplate_79897(__ctx,__values){return __ctx.UI.Text({text:__values[0],style:"labelLarge",color:__values[1]}); }
-function __operitUiTemplate_79984(__ctx,__values){return __ctx.UI.SelectionContainer({},__values[0]); }
-function __operitUiTemplate_79797(__ctx,__values){return __ctx.UI.Column({key:__values[0],fillMaxWidth:true,paddingBottom:12,spacing:6},[__values[1],__values[2]]); }
-function __operitUiTemplate_80822(__ctx,__values){return __ctx.UI.Icon({name:"Fullscreen",size:18}); }
-function __operitUiTemplate_80524(__ctx,__values){return __ctx.UI.IconButton({key:__values[0],width:28,height:28,contentPadding:{horizontal:0,vertical:0},enabled:__values[1],onClick:__values[2]},__values[3]); }
-function __operitUiTemplate_80458(__ctx,__values){return __ctx.UI.Box({width:36,height:36,contentAlignment:"center"},__values[0]); }
-function __operitUiTemplate_80149(__ctx,__values){return __ctx.UI.TextField(__values[0]); }
-function __operitUiTemplate_80095(__ctx,__values){return __ctx.UI.Box({fillMaxWidth:true,paddingBottom:12},__values[0]); }
-function __operitUiTemplate_81009(__ctx,__values){return __ctx.UI.Checkbox({checked:__values[0],enabled:__values[1],onCheckedChange:__values[2]}); }
-function __operitUiTemplate_81072(__ctx,__values){return __ctx.UI.Text({text:__values[0],weight:1}); }
-function __operitUiTemplate_80927(__ctx,__values){return __ctx.UI.Row({key:__values[0],fillMaxWidth:true,verticalAlignment:"center",spacing:8},[__values[1],__values[2]]); }
-function __operitUiTemplate_81462(__ctx,__values){return __ctx.UI.Text({text:__values[0],weight:1,maxLines:1,overflow:"ellipsis",style:"bodyMedium"}); }
-function __operitUiTemplate_81559(__ctx,__values){return __ctx.UI.Icon({name:"Tune",size:24}); }
-function __operitUiTemplate_81384(__ctx,__values){return __ctx.UI.Row({fillMaxWidth:true,verticalAlignment:"center",spacing:12},[__values[0],__values[1]]); }
-function __operitUiTemplate_81342(__ctx,__values){return __ctx.UI.InputDecorator({label:__values[0],enabled:__values[1]},__values[2]); }
-function __operitUiTemplate_81228(__ctx,__values){return __ctx.UI.Surface({key:__values[0],fillMaxWidth:true,color:"transparent",onClick:__values[1]},__values[2]); }
-function __operitUiTemplate_81165(__ctx,__values){return __ctx.UI.Box({fillMaxWidth:true,paddingBottom:12},__values[0]); }
-function __operitUiTemplate_82582(__ctx,__values){return __ctx.UI.Text({text:__values[0],fontSize:14,fontWeight:"700",color:__values[1]}); }
-function __operitUiTemplate_82738(__ctx,__values){return __ctx.UI.Text({text:__values[0],fontSize:12,color:__values[1]}); }
-function __operitUiTemplate_82540(__ctx,__values){return __ctx.UI.Column({weight:1,spacing:1},[__values[0],__values[1]]); }
-function __operitUiTemplate_82928(__ctx,__values){return __ctx.UI.Switch({key:__values[0],checked:__values[1],enabled:__values[2],modifier:__values[3],onCheckedChange:__values[4]}); }
-function __operitUiTemplate_82402(__ctx,__values){return __ctx.UI.Row({fillMaxWidth:true,modifier:__values[0],verticalAlignment:"center",spacing:8},[__values[1],__values[2]]); }
-function __operitUiTemplate_83120(__ctx,__values){return __ctx.UI.Spacer({height:6}); }
-function __operitUiTemplate_82356(__ctx,__values){return __ctx.UI.Column({fillMaxWidth:true},__values[0]); }
-function __operitUiTemplate_82168(__ctx,__values){return __ctx.UI.Box({fillMaxWidth:true,modifier:__values[0],paddingHorizontal:10,paddingVertical:6},__values[1]); }
-function __operitUiTemplate_82110(__ctx,__values){return __ctx.UI.Box({key:__values[0],fillMaxWidth:true,paddingBottom:7},__values[1]); }
-function __operitUiTemplate_83376(__ctx,__values){return __ctx.UI.Box({key:__values[0],fillMaxWidth:true,paddingStart:__values[1],paddingEnd:__values[2],paddingTop:__values[3],paddingBottom:__values[4]},__values[5]); }
-function __operitUiTemplate_83298(__ctx,__values){return __ctx.UI.LazyColumn({key:__values[0],fillMaxWidth:true},__values[1]); }
-function __operitUiTemplate_84007(__ctx,__values){return __ctx.UI.Text({text:__values[0],style:"titleSmall"}); }
-function __operitUiTemplate_83870(__ctx,__values){return __ctx.UI.Tab({key:__values[0],selected:__values[1],enabled:__values[2],onClick:__values[3]},__values[4]); }
-function __operitUiTemplate_83745(__ctx,__values){return __ctx.UI.PrimaryTabRow({key:__values[0],fillMaxWidth:true,selectedTabIndex:__values[1],tabs:__values[2]}); }
-function __operitUiTemplate_84139(__ctx,__values){return __ctx.UI.Button({key:__values[0],text:__values[1],enabled:__values[2],onClick:__values[3]}); }
-function __operitUiTemplate_84203(__ctx,__values){return __ctx.UI.TextButton({key:__values[0],text:__values[1],enabled:__values[2],onClick:__values[3]}); }
-function __operitUiTemplate_84773(__ctx,__values){return __ctx.UI.Text(__values[0]); }
-function __operitUiTemplate_85011(__ctx,__values){return __ctx.UI.IconButton({key:"entity-close",icon:"Close",enabled:__values[0],onClick:__values[1]}); }
-function __operitUiTemplate_84579(__ctx,__values){return __ctx.UI.Row({key:"entity-header",fillMaxWidth:true,paddingStart:24,paddingTop:__values[0],paddingEnd:16,paddingBottom:__values[1],verticalAlignment:"center"},[__values[2],__values[3]]); }
-function __operitUiTemplate_85127(__ctx,__values){return __ctx.UI.LinearProgressIndicator({fillMaxWidth:true}); }
-function __operitUiTemplate_85225(__ctx,__values){return __ctx.UI.Text({key:"entity-error",text:__values[0],color:__values[1],fillMaxWidth:true,paddingHorizontal:24,paddingBottom:12}); }
-function __operitUiTemplate_85372(__ctx,__values){return __ctx.UI.Box(__values[0],__values[1]); }
-function __operitUiTemplate_85548(__ctx,__values){return __ctx.UI.FlowRow({key:"entity-footer",fillMaxWidth:true,paddingStart:24,paddingTop:0,paddingEnd:24,paddingBottom:20,horizontalArrangement:"end",spacing:8,runSpacing:8},__values[0]); }
-function __operitUiTemplate_84386(__ctx,__values){return __ctx.UI.Column(__values[0],__values[1]); }
-function __operitUiTemplate_85945(__ctx,__values){return __ctx.UI.TextField({key:"entity-expanded-input",label:__values[0],value:__values[1],fillMaxSize:true,minLines:16,maxLines:40,enabled:__values[2],onValueChange:__values[3]}); }
-function __operitUiTemplate_87463(__ctx,__values){return __ctx.UI.Text({text:__values[0],color:__values[1]}); }
-function __operitUiTemplate_87424(__ctx,__values){return __ctx.UI.Column({fillMaxWidth:true},[__values[0],__values[1]]); }
-function __operitUiTemplate_87897(__ctx,__values){return __ctx.UI.Icon({name:__values[0],size:20,tint:__values[1]}); }
-function __operitUiTemplate_87720(__ctx,__values){return __ctx.UI.Row({key:"entity-picker-clear",fillMaxWidth:true,paddingHorizontal:8,paddingVertical:9,verticalAlignment:"center",spacing:10,onClick:__values[0]},[__values[1],__values[2]]); }
-function __operitUiTemplate_88342(__ctx,__values){return __ctx.UI.Icon({name:__values[0],size:20,tint:__values[1]}); }
-function __operitUiTemplate_88515(__ctx,__values){return __ctx.UI.Column({weight:1},__values[0]); }
-function __operitUiTemplate_88153(__ctx,__values){return __ctx.UI.Row({key:__values[0],fillMaxWidth:true,paddingHorizontal:8,paddingVertical:9,verticalAlignment:"center",spacing:10,onClick:__values[1]},[__values[2],__values[3]]); }
-function __operitUiTemplate_87630(__ctx,__values){return __ctx.UI.LazyColumn({key:"entity-picker-list",weight:1,fillMaxWidth:true},__values[0]); }
-function __operitUiTemplate_87064(__ctx,__values){return __ctx.UI.Column({fillMaxSize:true},__values[0]); }
-function __operitUiTemplate_89864(__ctx,__values){return __ctx.UI.Box({fillMaxWidth:true,paddingHorizontal:18,paddingTop:10},__values[0]); }
-function __operitUiTemplate_90038(__ctx,__values){return __ctx.UI.Box({weight:1,fillMaxWidth:true},__values[0]); }
-function __operitUiTemplate_89731(__ctx,__values){return __ctx.UI.Column({fillMaxSize:true},[__values[0],__values[1],__values[2]]); }
-function __operitUiTemplate_91495(__ctx,__values){return __ctx.UI.Column({fillMaxWidth:true,spacing:8},__values[0]); }
-function __operitUiTemplate_93541(__ctx,__values){return __ctx.UI.Box({weight:1},__values[0]); }
-function __operitUiTemplate_93436(__ctx,__values){return __ctx.UI.Row({key:__values[0],fillMaxWidth:true,verticalAlignment:"center"},[__values[1],__values[2],__values[3]]); }
-function __operitUiTemplate_94925(__ctx,__values){return __ctx.UI.LoadingIndicator({size:32}); }
-function __operitUiTemplate_94863(__ctx,__values){return __ctx.UI.Box({fillMaxSize:true,contentAlignment:"center"},__values[0]); }
-function __operitUiTemplate_96074(__ctx,__values){return __ctx.UI.Image(__values[0]); }
-function __operitUiTemplate_96364(__ctx,__values){return __ctx.UI.Spacer({width:12}); }
-function __operitUiTemplate_96406(__ctx,__values){return __ctx.UI.Text({text:__values[0],style:"bodyMedium",weight:1,maxLines:1,overflow:"ellipsis"}); }
-function __operitUiTemplate_96549(__ctx,__values){return __ctx.UI.Spacer({width:8}); }
-function __operitUiTemplate_95996(__ctx,__values){return __ctx.UI.Row({fillMaxWidth:true,verticalAlignment:"center"},__values[0]); }
-function __operitUiTemplate_95926(__ctx,__values){return __ctx.UI.InputDecorator({label:"\u89D2\u8272\u5934\u50CF",enabled:__values[0]},__values[1]); }
-function __operitUiTemplate_95872(__ctx,__values){return __ctx.UI.Box({fillMaxWidth:true,paddingBottom:12},__values[0]); }
-function __operitUiTemplate_97531(__ctx,__values){return __ctx.UI.Text({text:"\u6807\u7B7E",weight:1,fontWeight:"700"}); }
-function __operitUiTemplate_97821(__ctx,__values){return __ctx.UI.Icon({name:"Tune",size:18}); }
-function __operitUiTemplate_97862(__ctx,__values){return __ctx.UI.Text({text:"\u7BA1\u7406\u6807\u7B7E"}); }
-function __operitUiTemplate_97764(__ctx,__values){return __ctx.UI.Row({spacing:8,verticalAlignment:"center"},[__values[0],__values[1]]); }
-function __operitUiTemplate_97600(__ctx,__values){return __ctx.UI.TextButton({key:"entity-tags-manage",enabled:__values[0],onClick:__values[1]},__values[2]); }
-function __operitUiTemplate_97466(__ctx,__values){return __ctx.UI.Row({fillMaxWidth:true,verticalAlignment:"center"},[__values[0],__values[1]]); }
-function __operitUiTemplate_97930(__ctx,__values){return __ctx.UI.Spacer({height:6}); }
-function __operitUiTemplate_98238(__ctx,__values){return __ctx.UI.Text({text:__values[0],maxLines:1,overflow:"ellipsis",modifier:__values[1]}); }
-function __operitUiTemplate_98124(__ctx,__values){return __ctx.UI.FilterChip({key:__values[0],selected:__values[1],enabled:__values[2],label:__values[3],onClick:__values[4]}); }
-function __operitUiTemplate_98054(__ctx,__values){return __ctx.UI.FlowRow({spacing:8,runSpacing:8},__values[0]); }
-function __operitUiTemplate_97395(__ctx,__values){return __ctx.UI.Column({fillMaxWidth:true,paddingBottom:12},[__values[0],__values[1],__values[2]]); }
-function __operitUiTemplate_103581(__ctx,__values){return __ctx.UI.Text({text:__values[0],color:__values[1]}); }
-function __operitUiTemplate_104724(__ctx,__values){return __ctx.UI.Text({text:"\u7EC4\u5185\u89D2\u8272",style:"titleSmall",fontWeight:"700",paddingTop:8,paddingBottom:8}); }
-function __operitUiTemplate_106027(__ctx,__values){return __ctx.UI.Icon({name:__values[0],size:18,tint:__values[1]}); }
-function __operitUiTemplate_106164(__ctx,__values){return __ctx.UI.Image(__values[0]); }
-function __operitUiTemplate_106432(__ctx,__values){return __ctx.UI.Text({text:__values[0],style:"bodyMedium",fontWeight:"700",maxLines:1,overflow:"ellipsis"}); }
-function __operitUiTemplate_106402(__ctx,__values){return __ctx.UI.Column({weight:1},__values[0]); }
-function __operitUiTemplate_105906(__ctx,__values){return __ctx.UI.Row({fillMaxWidth:true,paddingHorizontal:12,paddingVertical:8,spacing:10,verticalAlignment:"center"},[__values[0],__values[1],__values[2]]); }
-function __operitUiTemplate_105073(__ctx,__values){return __ctx.UI.Surface({key:__values[0],fillMaxWidth:true,color:__values[1],shape:{cornerRadius:10},modifier:__values[2],onClick:__values[3]},__values[4]); }
-function __operitUiTemplate_105020(__ctx,__values){return __ctx.UI.Box({fillMaxWidth:true,paddingBottom:6},__values[0]); }
-function __operitUiTemplate_107017(__ctx,__values){return __ctx.UI.HorizontalPager({key:"entity-pager",weight:1,fillMaxWidth:true,currentPage:__values[0],onPageChanged:__values[1]},__values[2]); }
-function __operitUiTemplate_106872(__ctx,__values){return __ctx.UI.Column({fillMaxSize:true},[__values[0],__values[1]]); }
-function __operitUiTemplate_108487(__ctx,__values){return __ctx.UI.Dialog({key:"character-presentation",onLoad:__values[0],closeOnDismissRequest:false,onDismissRequest:__values[1],containerColor:__values[2],shape:{cornerRadius:__values[3]},properties:{fullscreen:__values[4],usePlatformDefaultWidth:false,dismissOnClickOutside:false}},__values[5]); }
-function __operitUiTemplate_115317(__ctx,__values){return __ctx.UI.Text({text:__values[0]}); }
-function __operitUiTemplate_115465(__ctx,__values){return __ctx.UI.WebView({key:"character-memory-web",controller:__values[0],fillMaxSize:true,url:__values[1],javaScriptEnabled:true,domStorageEnabled:true,supportZoom:false,useWideViewPort:true,onShouldOverrideUrlLoading:__values[2],onInterceptRequest:__values[3],onLifecycleEvent:__values[4]}); }
-function __operitUiTemplate_115248(__ctx,__values){return __ctx.UI.Box({fillMaxSize:true,onLoad:__values[0]},__values[1]); }
+function __operitUiTemplate_35401(__ctx,__values){return __ctx.UI.Text({text:__values[0],fillMaxWidth:true,style:"bodyMedium",color:__values[1]}); }
+function __operitUiTemplate_35366(__ctx,__values){return __ctx.UI.SelectionContainer({key:__values[0]},__values[1]); }
+function __operitUiTemplate_35752(__ctx,__values){return __ctx.UI.Text({text:__values[0],style:"labelMedium",color:__values[1]}); }
+function __operitUiTemplate_35565(__ctx,__values){return __ctx.UI.Box({key:__values[0],paddingHorizontal:10,paddingVertical:5,backgroundColor:__values[1],backgroundShape:{cornerRadius:8}},__values[2]); }
+function __operitUiTemplate_36347(__ctx,__values){return __ctx.UI.Icon({name:"GroupsOutlined",size:34,tint:__values[0]}); }
+function __operitUiTemplate_36178(__ctx,__values){return __ctx.UI.Box({width:72,height:72,contentAlignment:"center",backgroundColor:__values[0],backgroundShape:{cornerRadius:20}},__values[1]); }
+function __operitUiTemplate_36422(__ctx,__values){return __ctx.UI.Image(__values[0]); }
+function __operitUiTemplate_36797(__ctx,__values){return __ctx.UI.Text({key:"entity-preview-name",text:__values[0],style:"headlineSmall",fontSize:24,fontWeight:"700",fillMaxWidth:true}); }
+function __operitUiTemplate_36966(__ctx,__values){return __ctx.UI.Text({text:__values[0],style:"labelMedium",color:__values[1]}); }
+function __operitUiTemplate_36746(__ctx,__values){return __ctx.UI.Column({weight:1,spacing:6},__values[0]); }
+function __operitUiTemplate_36077(__ctx,__values){return __ctx.UI.Row({fillMaxWidth:true,spacing:16,verticalAlignment:"center"},[__values[0],__values[1]]); }
+function __operitUiTemplate_37275(__ctx,__values){return __ctx.UI.FlowRow({key:"entity-preview-tags",spacing:6,runSpacing:6},__values[0]); }
+function __operitUiTemplate_35969(__ctx,__values){return __ctx.UI.Column({key:"entity-preview-identity",fillMaxWidth:true,spacing:14,paddingBottom:22},__values[0]); }
+function __operitUiTemplate_37951(__ctx,__values){return __ctx.UI.Icon({name:"FormatQuote",size:20,tint:__values[0]}); }
+function __operitUiTemplate_38037(__ctx,__values){return __ctx.UI.Text({text:__values[0],style:"titleSmall",fontWeight:"600",color:__values[1],weight:1}); }
+function __operitUiTemplate_37851(__ctx,__values){return __ctx.UI.Row({fillMaxWidth:true,spacing:8,verticalAlignment:"center"},__values[0]); }
+function __operitUiTemplate_37624(__ctx,__values){return __ctx.UI.Column(__values[0],[__values[1],__values[2]]); }
+function __operitUiTemplate_37527(__ctx,__values){return __ctx.UI.Box({key:__values[0],fillMaxWidth:true,paddingBottom:22},__values[1]); }
+function __operitUiTemplate_41685(__ctx,__values){return __ctx.UI.Text({text:"\u7EC4\u5185\u89D2\u8272",style:"titleSmall",fontWeight:"600",color:__values[0]}); }
+function __operitUiTemplate_41841(__ctx,__values){return __ctx.UI.Text({text:"\u6682\u672A\u6DFB\u52A0\u89D2\u8272",style:"bodyMedium",color:__values[0]}); }
+function __operitUiTemplate_42275(__ctx,__values){return __ctx.UI.Text({text:__values[0],style:"labelMedium",color:__values[1]}); }
+function __operitUiTemplate_42398(__ctx,__values){return __ctx.UI.Image(__values[0]); }
+function __operitUiTemplate_42743(__ctx,__values){return __ctx.UI.Text({text:__values[0],style:"titleSmall",fontWeight:"600",fillMaxWidth:true}); }
+function __operitUiTemplate_42923(__ctx,__values){return __ctx.UI.Text({text:__values[0],style:"bodySmall",color:__values[1],fillMaxWidth:true}); }
+function __operitUiTemplate_42688(__ctx,__values){return __ctx.UI.Column({weight:1,spacing:4},__values[0]); }
+function __operitUiTemplate_42108(__ctx,__values){return __ctx.UI.Row({key:__values[0],fillMaxWidth:true,paddingVertical:10,spacing:12,verticalAlignment:"center"},[__values[1],__values[2],__values[3]]); }
+function __operitUiTemplate_41576(__ctx,__values){return __ctx.UI.Column({key:"entity-preview-members",fillMaxWidth:true,spacing:10,paddingBottom:22},__values[0]); }
+function __operitUiTemplate_43618(__ctx,__values){return __ctx.UI.Icon({name:"Tune",size:20,tint:__values[0]}); }
+function __operitUiTemplate_43751(__ctx,__values){return __ctx.UI.Text({text:"\u914D\u7F6E\u6458\u8981",style:"titleSmall",fontWeight:"600"}); }
+function __operitUiTemplate_43852(__ctx,__values){return __ctx.UI.Text({text:__values[0],style:"bodySmall",color:__values[1]}); }
+function __operitUiTemplate_43698(__ctx,__values){return __ctx.UI.Column({weight:1,spacing:3},[__values[0],__values[1]]); }
+function __operitUiTemplate_44043(__ctx,__values){return __ctx.UI.Icon({name:__values[0],size:20,tint:__values[1]}); }
+function __operitUiTemplate_43518(__ctx,__values){return __ctx.UI.Row({fillMaxWidth:true,padding:16,spacing:10,verticalAlignment:"center"},[__values[0],__values[1],__values[2]]); }
+function __operitUiTemplate_43340(__ctx,__values){return __ctx.UI.Surface({key:"entity-preview-config-toggle",fillMaxWidth:true,color:"transparent",shape:{cornerRadius:16},onClick:__values[0]},__values[1]); }
+function __operitUiTemplate_44493(__ctx,__values){return __ctx.UI.Text({text:__values[0],style:"labelMedium",color:__values[1]}); }
+function __operitUiTemplate_44392(__ctx,__values){return __ctx.UI.Column({key:__values[0],fillMaxWidth:true,spacing:4},[__values[1],__values[2]]); }
+function __operitUiTemplate_44219(__ctx,__values){return __ctx.UI.Column({key:"entity-preview-config-details",fillMaxWidth:true,paddingStart:16,paddingEnd:16,paddingBottom:18,spacing:14},__values[0]); }
+function __operitUiTemplate_43182(__ctx,__values){return __ctx.UI.Column({key:"entity-preview-config",fillMaxWidth:true,backgroundColor:__values[0],backgroundShape:{cornerRadius:16}},__values[1]); }
+function __operitUiTemplate_58926(__ctx,__values){return __ctx.UI.Text({text:__values[0],fillMaxWidth:true,style:"bodyMedium"}); }
+function __operitUiTemplate_59026(__ctx,__values){return __ctx.UI.Text({text:__values[0],fillMaxWidth:true,style:"bodySmall",color:__values[1]}); }
+function __operitUiTemplate_59264(__ctx,__values){return __ctx.UI.Text({text:__values[0],style:"labelLarge",color:__values[1]}); }
+function __operitUiTemplate_59351(__ctx,__values){return __ctx.UI.SelectionContainer({},__values[0]); }
+function __operitUiTemplate_59164(__ctx,__values){return __ctx.UI.Column({key:__values[0],fillMaxWidth:true,paddingBottom:12,spacing:6},[__values[1],__values[2]]); }
+function __operitUiTemplate_60188(__ctx,__values){return __ctx.UI.Icon({name:"Fullscreen",size:18}); }
+function __operitUiTemplate_59890(__ctx,__values){return __ctx.UI.IconButton({key:__values[0],width:28,height:28,contentPadding:{horizontal:0,vertical:0},enabled:__values[1],onClick:__values[2]},__values[3]); }
+function __operitUiTemplate_59824(__ctx,__values){return __ctx.UI.Box({width:36,height:36,contentAlignment:"center"},__values[0]); }
+function __operitUiTemplate_59515(__ctx,__values){return __ctx.UI.TextField(__values[0]); }
+function __operitUiTemplate_59461(__ctx,__values){return __ctx.UI.Box({fillMaxWidth:true,paddingBottom:12},__values[0]); }
+function __operitUiTemplate_60375(__ctx,__values){return __ctx.UI.Checkbox({checked:__values[0],enabled:__values[1],onCheckedChange:__values[2]}); }
+function __operitUiTemplate_60438(__ctx,__values){return __ctx.UI.Text({text:__values[0],weight:1}); }
+function __operitUiTemplate_60293(__ctx,__values){return __ctx.UI.Row({key:__values[0],fillMaxWidth:true,verticalAlignment:"center",spacing:8},[__values[1],__values[2]]); }
+function __operitUiTemplate_60828(__ctx,__values){return __ctx.UI.Text({text:__values[0],weight:1,maxLines:1,overflow:"ellipsis",style:"bodyMedium"}); }
+function __operitUiTemplate_60925(__ctx,__values){return __ctx.UI.Icon({name:"Tune",size:24}); }
+function __operitUiTemplate_60750(__ctx,__values){return __ctx.UI.Row({fillMaxWidth:true,verticalAlignment:"center",spacing:12},[__values[0],__values[1]]); }
+function __operitUiTemplate_60708(__ctx,__values){return __ctx.UI.InputDecorator({label:__values[0],enabled:__values[1]},__values[2]); }
+function __operitUiTemplate_60594(__ctx,__values){return __ctx.UI.Surface({key:__values[0],fillMaxWidth:true,color:"transparent",onClick:__values[1]},__values[2]); }
+function __operitUiTemplate_60531(__ctx,__values){return __ctx.UI.Box({fillMaxWidth:true,paddingBottom:12},__values[0]); }
+function __operitUiTemplate_61948(__ctx,__values){return __ctx.UI.Text({text:__values[0],fontSize:14,fontWeight:"700",color:__values[1]}); }
+function __operitUiTemplate_62104(__ctx,__values){return __ctx.UI.Text({text:__values[0],fontSize:12,color:__values[1]}); }
+function __operitUiTemplate_61906(__ctx,__values){return __ctx.UI.Column({weight:1,spacing:1},[__values[0],__values[1]]); }
+function __operitUiTemplate_62294(__ctx,__values){return __ctx.UI.Switch({key:__values[0],checked:__values[1],enabled:__values[2],modifier:__values[3],onCheckedChange:__values[4]}); }
+function __operitUiTemplate_61768(__ctx,__values){return __ctx.UI.Row({fillMaxWidth:true,modifier:__values[0],verticalAlignment:"center",spacing:8},[__values[1],__values[2]]); }
+function __operitUiTemplate_62486(__ctx,__values){return __ctx.UI.Spacer({height:6}); }
+function __operitUiTemplate_61722(__ctx,__values){return __ctx.UI.Column({fillMaxWidth:true},__values[0]); }
+function __operitUiTemplate_61534(__ctx,__values){return __ctx.UI.Box({fillMaxWidth:true,modifier:__values[0],paddingHorizontal:10,paddingVertical:6},__values[1]); }
+function __operitUiTemplate_61476(__ctx,__values){return __ctx.UI.Box({key:__values[0],fillMaxWidth:true,paddingBottom:7},__values[1]); }
+function __operitUiTemplate_62742(__ctx,__values){return __ctx.UI.Box({key:__values[0],fillMaxWidth:true,paddingStart:__values[1],paddingEnd:__values[2],paddingTop:__values[3],paddingBottom:__values[4]},__values[5]); }
+function __operitUiTemplate_62664(__ctx,__values){return __ctx.UI.LazyColumn({key:__values[0],fillMaxWidth:true},__values[1]); }
+function __operitUiTemplate_63373(__ctx,__values){return __ctx.UI.Text({text:__values[0],style:"titleSmall"}); }
+function __operitUiTemplate_63236(__ctx,__values){return __ctx.UI.Tab({key:__values[0],selected:__values[1],enabled:__values[2],onClick:__values[3]},__values[4]); }
+function __operitUiTemplate_63111(__ctx,__values){return __ctx.UI.PrimaryTabRow({key:__values[0],fillMaxWidth:true,selectedTabIndex:__values[1],tabs:__values[2]}); }
+function __operitUiTemplate_63505(__ctx,__values){return __ctx.UI.Button({key:__values[0],text:__values[1],enabled:__values[2],onClick:__values[3]}); }
+function __operitUiTemplate_63569(__ctx,__values){return __ctx.UI.TextButton({key:__values[0],text:__values[1],enabled:__values[2],onClick:__values[3]}); }
+function __operitUiTemplate_64139(__ctx,__values){return __ctx.UI.Text(__values[0]); }
+function __operitUiTemplate_64377(__ctx,__values){return __ctx.UI.IconButton({key:"entity-close",icon:"Close",enabled:__values[0],onClick:__values[1]}); }
+function __operitUiTemplate_63945(__ctx,__values){return __ctx.UI.Row({key:"entity-header",fillMaxWidth:true,paddingStart:24,paddingTop:__values[0],paddingEnd:16,paddingBottom:__values[1],verticalAlignment:"center"},[__values[2],__values[3]]); }
+function __operitUiTemplate_64493(__ctx,__values){return __ctx.UI.LinearProgressIndicator({fillMaxWidth:true}); }
+function __operitUiTemplate_64591(__ctx,__values){return __ctx.UI.Text({key:"entity-error",text:__values[0],color:__values[1],fillMaxWidth:true,paddingHorizontal:24,paddingBottom:12}); }
+function __operitUiTemplate_64738(__ctx,__values){return __ctx.UI.Box(__values[0],__values[1]); }
+function __operitUiTemplate_64914(__ctx,__values){return __ctx.UI.FlowRow({key:"entity-footer",fillMaxWidth:true,paddingStart:24,paddingTop:0,paddingEnd:24,paddingBottom:20,horizontalArrangement:"end",spacing:8,runSpacing:8},__values[0]); }
+function __operitUiTemplate_63752(__ctx,__values){return __ctx.UI.Column(__values[0],__values[1]); }
+function __operitUiTemplate_65311(__ctx,__values){return __ctx.UI.TextField({key:"entity-expanded-input",label:__values[0],value:__values[1],fillMaxSize:true,minLines:16,maxLines:40,enabled:__values[2],onValueChange:__values[3]}); }
+function __operitUiTemplate_66828(__ctx,__values){return __ctx.UI.Text({text:__values[0],color:__values[1]}); }
+function __operitUiTemplate_66789(__ctx,__values){return __ctx.UI.Column({fillMaxWidth:true},[__values[0],__values[1]]); }
+function __operitUiTemplate_67262(__ctx,__values){return __ctx.UI.Icon({name:__values[0],size:20,tint:__values[1]}); }
+function __operitUiTemplate_67085(__ctx,__values){return __ctx.UI.Row({key:"entity-picker-clear",fillMaxWidth:true,paddingHorizontal:8,paddingVertical:9,verticalAlignment:"center",spacing:10,onClick:__values[0]},[__values[1],__values[2]]); }
+function __operitUiTemplate_67707(__ctx,__values){return __ctx.UI.Icon({name:__values[0],size:20,tint:__values[1]}); }
+function __operitUiTemplate_67880(__ctx,__values){return __ctx.UI.Column({weight:1},__values[0]); }
+function __operitUiTemplate_67518(__ctx,__values){return __ctx.UI.Row({key:__values[0],fillMaxWidth:true,paddingHorizontal:8,paddingVertical:9,verticalAlignment:"center",spacing:10,onClick:__values[1]},[__values[2],__values[3]]); }
+function __operitUiTemplate_66995(__ctx,__values){return __ctx.UI.LazyColumn({key:"entity-picker-list",weight:1,fillMaxWidth:true},__values[0]); }
+function __operitUiTemplate_66430(__ctx,__values){return __ctx.UI.Column({fillMaxSize:true},__values[0]); }
+function __operitUiTemplate_69229(__ctx,__values){return __ctx.UI.Box({fillMaxWidth:true,paddingHorizontal:18,paddingTop:10},__values[0]); }
+function __operitUiTemplate_69402(__ctx,__values){return __ctx.UI.Box({weight:1,fillMaxWidth:true},__values[0]); }
+function __operitUiTemplate_69096(__ctx,__values){return __ctx.UI.Column({fillMaxSize:true},[__values[0],__values[1],__values[2]]); }
+function __operitUiTemplate_70859(__ctx,__values){return __ctx.UI.Column({fillMaxWidth:true,spacing:8},__values[0]); }
+function __operitUiTemplate_72904(__ctx,__values){return __ctx.UI.Box({weight:1},__values[0]); }
+function __operitUiTemplate_72799(__ctx,__values){return __ctx.UI.Row({key:__values[0],fillMaxWidth:true,verticalAlignment:"center"},[__values[1],__values[2],__values[3]]); }
+function __operitUiTemplate_74288(__ctx,__values){return __ctx.UI.LoadingIndicator({size:32}); }
+function __operitUiTemplate_74226(__ctx,__values){return __ctx.UI.Box({fillMaxSize:true,contentAlignment:"center"},__values[0]); }
+function __operitUiTemplate_75435(__ctx,__values){return __ctx.UI.Image(__values[0]); }
+function __operitUiTemplate_75725(__ctx,__values){return __ctx.UI.Spacer({width:12}); }
+function __operitUiTemplate_75767(__ctx,__values){return __ctx.UI.Text({text:__values[0],style:"bodyMedium",weight:1,maxLines:1,overflow:"ellipsis"}); }
+function __operitUiTemplate_75910(__ctx,__values){return __ctx.UI.Spacer({width:8}); }
+function __operitUiTemplate_75357(__ctx,__values){return __ctx.UI.Row({fillMaxWidth:true,verticalAlignment:"center"},__values[0]); }
+function __operitUiTemplate_75287(__ctx,__values){return __ctx.UI.InputDecorator({label:"\u89D2\u8272\u5934\u50CF",enabled:__values[0]},__values[1]); }
+function __operitUiTemplate_75233(__ctx,__values){return __ctx.UI.Box({fillMaxWidth:true,paddingBottom:12},__values[0]); }
+function __operitUiTemplate_76890(__ctx,__values){return __ctx.UI.Text({text:"\u6807\u7B7E",weight:1,fontWeight:"700"}); }
+function __operitUiTemplate_77180(__ctx,__values){return __ctx.UI.Icon({name:"Tune",size:18}); }
+function __operitUiTemplate_77221(__ctx,__values){return __ctx.UI.Text({text:"\u7BA1\u7406\u6807\u7B7E"}); }
+function __operitUiTemplate_77123(__ctx,__values){return __ctx.UI.Row({spacing:8,verticalAlignment:"center"},[__values[0],__values[1]]); }
+function __operitUiTemplate_76959(__ctx,__values){return __ctx.UI.TextButton({key:"entity-tags-manage",enabled:__values[0],onClick:__values[1]},__values[2]); }
+function __operitUiTemplate_76825(__ctx,__values){return __ctx.UI.Row({fillMaxWidth:true,verticalAlignment:"center"},[__values[0],__values[1]]); }
+function __operitUiTemplate_77289(__ctx,__values){return __ctx.UI.Spacer({height:6}); }
+function __operitUiTemplate_77597(__ctx,__values){return __ctx.UI.Text({text:__values[0],maxLines:1,overflow:"ellipsis",modifier:__values[1]}); }
+function __operitUiTemplate_77483(__ctx,__values){return __ctx.UI.FilterChip({key:__values[0],selected:__values[1],enabled:__values[2],label:__values[3],onClick:__values[4]}); }
+function __operitUiTemplate_77413(__ctx,__values){return __ctx.UI.FlowRow({spacing:8,runSpacing:8},__values[0]); }
+function __operitUiTemplate_76754(__ctx,__values){return __ctx.UI.Column({fillMaxWidth:true,paddingBottom:12},[__values[0],__values[1],__values[2]]); }
+function __operitUiTemplate_78789(__ctx,__values){return __ctx.UI.Text({key:"entity-model-binding-error",text:__values[0],color:__values[1],style:"bodyMedium"}); }
+function __operitUiTemplate_83481(__ctx,__values){return __ctx.UI.Text({text:__values[0],color:__values[1]}); }
+function __operitUiTemplate_84622(__ctx,__values){return __ctx.UI.Text({text:"\u7EC4\u5185\u89D2\u8272",style:"titleSmall",fontWeight:"700",paddingTop:8,paddingBottom:8}); }
+function __operitUiTemplate_85925(__ctx,__values){return __ctx.UI.Icon({name:__values[0],size:18,tint:__values[1]}); }
+function __operitUiTemplate_86062(__ctx,__values){return __ctx.UI.Image(__values[0]); }
+function __operitUiTemplate_86330(__ctx,__values){return __ctx.UI.Text({text:__values[0],style:"bodyMedium",fontWeight:"700",maxLines:1,overflow:"ellipsis"}); }
+function __operitUiTemplate_86300(__ctx,__values){return __ctx.UI.Column({weight:1},__values[0]); }
+function __operitUiTemplate_85804(__ctx,__values){return __ctx.UI.Row({fillMaxWidth:true,paddingHorizontal:12,paddingVertical:8,spacing:10,verticalAlignment:"center"},[__values[0],__values[1],__values[2]]); }
+function __operitUiTemplate_84971(__ctx,__values){return __ctx.UI.Surface({key:__values[0],fillMaxWidth:true,color:__values[1],shape:{cornerRadius:10},modifier:__values[2],onClick:__values[3]},__values[4]); }
+function __operitUiTemplate_84918(__ctx,__values){return __ctx.UI.Box({fillMaxWidth:true,paddingBottom:6},__values[0]); }
+function __operitUiTemplate_86915(__ctx,__values){return __ctx.UI.HorizontalPager({key:"entity-pager",weight:1,fillMaxWidth:true,currentPage:__values[0],onPageChanged:__values[1]},__values[2]); }
+function __operitUiTemplate_86770(__ctx,__values){return __ctx.UI.Column({fillMaxSize:true},[__values[0],__values[1]]); }
+function __operitUiTemplate_88385(__ctx,__values){return __ctx.UI.Dialog({key:"character-presentation",onLoad:__values[0],closeOnDismissRequest:false,onDismissRequest:__values[1],containerColor:__values[2],shape:{cornerRadius:__values[3]},properties:{fullscreen:__values[4],usePlatformDefaultWidth:false,dismissOnClickOutside:false}},__values[5]); }
+function __operitUiTemplate_95215(__ctx,__values){return __ctx.UI.Text({text:__values[0]}); }
+function __operitUiTemplate_95363(__ctx,__values){return __ctx.UI.WebView({key:"character-memory-web",controller:__values[0],fillMaxSize:true,url:__values[1],javaScriptEnabled:true,domStorageEnabled:true,supportZoom:false,useWideViewPort:true,onShouldOverrideUrlLoading:__values[2],onInterceptRequest:__values[3],onLifecycleEvent:__values[4]}); }
+function __operitUiTemplate_95146(__ctx,__values){return __ctx.UI.Box({fillMaxSize:true,onLoad:__values[0]},__values[1]); }

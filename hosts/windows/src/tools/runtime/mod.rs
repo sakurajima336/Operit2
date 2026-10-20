@@ -1,8 +1,10 @@
+use crate::process::background_command;
+
 use std::collections::VecDeque;
 use std::env;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -154,7 +156,7 @@ impl ManagedRuntimeHost for WindowsManagedRuntimeHost {
     ) -> HostResult<Box<dyn ManagedRuntimeProcess>> {
         let executable = self
             .resolveRuntimeExecutable(request.program.clone(), request.executablePath.as_deref())?;
-        let mut command = Command::new(executable);
+        let mut command = background_command(executable);
         command.args(request.args);
         if let Some(cwd) = request.cwd {
             command.current_dir(cwd);
@@ -219,7 +221,7 @@ impl ManagedRuntimeHost for WindowsManagedRuntimeHost {
     ) -> HostResult<RuntimeCommandOutput> {
         let executable = self
             .resolveRuntimeExecutable(request.program.clone(), request.executablePath.as_deref())?;
-        let mut command = Command::new(executable);
+        let mut command = background_command(executable);
         command.args(request.args);
         if let Some(cwd) = request.cwd {
             command.current_dir(cwd);

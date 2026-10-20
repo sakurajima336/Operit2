@@ -1,6 +1,7 @@
+use crate::process::background_command;
+
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use operit_host_api::{
@@ -216,7 +217,7 @@ impl TtsSynthesisHost for WindowsTtsSynthesisHost {
         fs::write(&textPath, text.as_bytes()).map_err(|error| {
             HostError::new(format!("failed to write Windows system TTS text: {error}"))
         })?;
-        let statusResult = Command::new("powershell.exe")
+        let statusResult = background_command("powershell.exe")
             .arg("-NoProfile")
             .arg("-ExecutionPolicy")
             .arg("Bypass")

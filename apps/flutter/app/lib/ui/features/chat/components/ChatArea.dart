@@ -1123,30 +1123,53 @@ class _ChatLayoutScrollController extends ScrollController {
   ScrollController _delegate;
   final ValueGetter<bool> shouldAlignBottom;
   final ValueGetter<bool> shouldInitiallyAlignBottom;
+  ScrollPosition? _origin;
 
-  /// Transfers attached positions when the owner replaces its controller.
+  /// Moves the active layout origin when the owner replaces its controller.
   set delegate(ScrollController value) {
     if (identical(value, _delegate)) {
       return;
     }
-    for (final position in positions) {
-      _delegate.detach(position);
-      value.attach(position);
-    }
+    final origin = _origin;
+    final previous = _delegate;
     _delegate = value;
+    if (origin == null) {
+      return;
+    }
+    previous.detach(origin);
+    value.attach(origin);
   }
 
-  /// Exposes the same position to the owner's navigation and scroll listeners.
+  /// The active layout origin. A replaced viewport stays registered until it
+  /// unmounts, so [positions] can briefly contain that deactivated origin.
+  @override
+  ScrollPosition get position {
+    final origin = _origin;
+    if (origin == null) {
+      throw StateError('ScrollController not attached to any scroll views.');
+    }
+    return origin;
+  }
+
+  /// Registers a new layout origin and publishes only that origin to the owner.
   @override
   void attach(ScrollPosition position) {
     super.attach(position);
+    final previous = _origin;
+    _origin = position;
+    if (previous != null) {
+      _delegate.detach(previous);
+    }
     _delegate.attach(position);
   }
 
-  /// Releases the position from both controllers when a viewport is replaced.
+  /// Releases a viewport position. Only the active origin is on the owner.
   @override
   void detach(ScrollPosition position) {
-    _delegate.detach(position);
+    if (identical(position, _origin)) {
+      _delegate.detach(position);
+      _origin = null;
+    }
     super.detach(position);
   }
 

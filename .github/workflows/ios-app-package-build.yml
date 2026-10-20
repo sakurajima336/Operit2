@@ -78,6 +78,11 @@ jobs:
           dart pub global activate fvm "$FVM_VERSION"
           echo "$HOME/.pub-cache/bin" >> "$GITHUB_PATH"
 
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
       - name: Cache project Flutter SDK
         uses: actions/cache@v4
         with:
@@ -158,6 +163,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: operit2-ios-${{ github.sha }}
-          path: tools/release/dist/operit2-app-ios-arm64.zip
+          path: tools/release/dist/operit2-app-ios-arm64-*.zip
           if-no-files-found: error
           retention-days: 14

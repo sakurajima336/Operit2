@@ -61,8 +61,8 @@ function runtime(operations = {}) {
     const name = match[1];
     context[name] = registry.syncBinding((...args) => invoke(name, args));
   }
-  for (const match of asyncBlock.matchAll(/"([^"]+)"/g)) {
-    const name = match[1];
+  const asyncNames = Array.from(asyncBlock.matchAll(/"([^"]+)"/g), match => match[1]);
+  for (const name of [...asyncNames, '__operitNativeCallToolStructured']) {
     context[name] = registry.binding((id, ...args) => {
       Promise.resolve().then(() => invoke(name, args)).then(
         value => registry.settle(id, value, false),
@@ -191,6 +191,68 @@ test('script completion uses structured host values with JSON text disabled', as
   assert.equal(outputs.get('script-owner').literal, '{"data":1}');
   assert.equal(outputs.get('script-owner').nested.value, 7);
   assert.equal(context.__operitGetCallState('script-owner'), null);
+});
+
+/** Exercises cancellation through the real bootstrap while a new chat waits for shared cleanup. */
+test('cancelled tool execution releases a waiting chat initializer without reviving its session', async () => {
+  let finishRead, reads = 0;
+  const firstRead = new Promise(resolve => { finishRead = resolve; });
+  const { context, outputs, failures } = runtime({
+    /** Suspends the first storage read and serves the next call on the same retained handle. */
+    __operitNativeCallToolStructured(_type, name, parameters) {
+      assert.equal(name, 'storage_request');
+      switch (parameters.request.op) {
+        case 'open_preferences': return { success: true, data: { op: 'open', handle: 'preferences', path: 'chats.preferences.json' } };
+        case 'preferences_data':
+          if (++reads === 1) return firstRead;
+          return { success: true, data: { op: 'preferences_data', snapshot: { schemaVersion: 1, values: { selection: 'card:role' } } } };
+        default: throw new Error('Unexpected preference operation: ' + parameters.request.op);
+      }
+    },
+  });
+  vm.runInContext(source(sdk + 'js_sdk/storage_runtime.js'), context);
+  vm.runInContext(`globalThis.Tools = { Storage: {
+    /** Adapts the fixture tool surface to the production structured tool-call transport. */
+    request(request) { return toolCall('storage_request', { request: request }); }
+  } };`, context);
+  const params = { __operit_toolpkg_api_version: '2.0.0' };
+  executeScript(context, 'weather-owner', params, `
+    /** Retains the real preferences facade while its first queued read is suspended. */
+    exports.run = async function() {
+      globalThis.released = 0;
+      globalThis.store = await __operitPreferencesOpen({ path: 'chats.preferences.json' });
+      try {
+        await store.data();
+        throw new Error('Cancelled operation resumed successfully');
+      } finally {
+        released++;
+      }
+    };
+  `, 'run', 60, 10000);
+  await flush();
+  executeScript(context, 'new-chat-owner', params, `
+    /** Reads the binding through the same serialized queue using the new chat's own session. */
+    exports.run = async function() {
+      const binding = await store.data();
+      return { selection: binding.get('selection'), owner: __operitCurrentCallId };
+    };
+  `, 'run', 60, 10000);
+  await flush();
+  assert.equal(outputs.size, 0);
+  context.__operitCancelCallSession('weather-owner');
+  context.__operitHostPromiseRegistry.cancel('weather-owner');
+  await flush();
+  assert.equal(context.released, 1);
+  assert.deepEqual(structuredClone(outputs.get('new-chat-owner')), { selection: 'card:role', owner: 'new-chat-owner' });
+  assert.equal(reads, 2);
+  assert.equal(outputs.has('weather-owner'), false);
+  assert.equal(failures.size, 0);
+  assert.equal(context.__operitGetCallState('weather-owner'), null);
+  assert.equal(context.__operitGetCallState('new-chat-owner'), null);
+  finishRead({ success: true, data: { op: 'preferences_data', snapshot: { schemaVersion: 1, values: { selection: 'card:cancelled' } } } });
+  await flush();
+  assert.equal(context.released, 1);
+  assert.equal(outputs.size, 1);
 });
 
 /** Checks result conversion failures cannot mark a session completed before reporting the error. */

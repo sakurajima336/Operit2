@@ -2252,8 +2252,19 @@ impl EnhancedAIService {
                         tokenUsageThreshold
                     ),
                 );
+                // Compaction ends this execution before normal completion publishes its metrics.
+                let tokenSnapshot = self.captureCurrentTurnTokenSnapshot();
+                {
+                    let mut shared = self.shared_state();
+                    shared.last_turn_token_snapshot = Some(tokenSnapshot);
+                    shared.last_turn_context_window = Some(currentTokens);
+                    shared.last_reply_content = Some(context.roundManager.getDisplayContent());
+                }
                 if let Some(callback) = onTokenLimitExceeded {
                     callback();
+                }
+                if let Some(callbacks) = callbacks.as_ref() {
+                    callbacks.onTokenLimitExceeded();
                 }
                 self.invalidateExecutionContext(
                     context,
@@ -2537,7 +2548,6 @@ impl EnhancedAIService {
                 participantName,
                 avatarUri,
                 notifyReplyOverride,
-                callbacks,
             );
             return Ok(());
         }
@@ -2562,7 +2572,6 @@ impl EnhancedAIService {
                     participantName,
                     avatarUri,
                     notifyReplyOverride,
-                    callbacks,
                 );
                 return Ok(());
             }
@@ -2713,7 +2722,6 @@ impl EnhancedAIService {
             participantName,
             avatarUri,
             notifyReplyOverride,
-            callbacks,
         );
         Ok(())
     }
@@ -2944,7 +2952,7 @@ impl EnhancedAIService {
     }
 
     #[allow(clippy::too_many_arguments)]
-    /// Retains the completed reply and dispatches its existing completion callbacks.
+    /// Retains the completed reply and publishes its completion notification.
     fn finalizeAssistantResponse(
         &mut self,
         context: &mut MessageExecutionContext,
@@ -2955,12 +2963,8 @@ impl EnhancedAIService {
         participantName: Option<String>,
         avatarUri: Option<String>,
         notifyReplyOverride: Option<bool>,
-        callbacks: Option<Arc<dyn SendMessageCallbacks + Send + Sync>>,
     ) {
         self.shared_state().last_reply_content = Some(content.to_string());
-        if let Some(callbacks) = callbacks {
-            callbacks.onTokenLimitExceeded();
-        }
         self.notifyReplyCompleted(chatId, participantName, avatarUri, notifyReplyOverride);
     }
 

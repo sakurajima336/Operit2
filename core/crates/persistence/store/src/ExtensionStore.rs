@@ -370,6 +370,79 @@ impl ExtensionStore {
         self.write(&record)
     }
 
+    /// Installs a custom implementation under the built-in identity while retaining its settings.
+    pub fn customizePackage(
+        &self,
+        id: &str,
+        sourceName: &str,
+        members: Vec<String>,
+    ) -> Result<(), String> {
+        let mut record = self.record("package", id)?;
+        let previousSource = record.sourceName.clone();
+        if record.settings["builtin"] == true {
+            record.settings["builtinMembers"] = record.settings["members"].clone();
+        } else if record.settings["customized"] != true {
+            return Err(format!("Package is not a built-in customization: {id}"));
+        }
+        record.sourceName = sourceName.to_string();
+        record.settings["builtin"] = Value::Bool(false);
+        record.settings["customized"] = Value::Bool(true);
+        record.settings["members"] =
+            serde_json::to_value(members).map_err(|error| error.to_string())?;
+        self.publishPackageSource(&record, &previousSource)
+    }
+
+    /// Removes only custom code and restores the built-in installation with its existing data.
+    pub fn removePackageCustomization(&self, id: &str) -> Result<(), String> {
+        let mut record = self.record("package", id)?;
+        if record.settings["customized"] != true {
+            return Err(format!("Package is not customized: {id}"));
+        }
+        let members: Vec<String> =
+            serde_json::from_value(record.settings["builtinMembers"].clone())
+                .map_err(|error| error.to_string())?;
+        let previousSource = record.sourceName.clone();
+        record.sourceName.clear();
+        record.settings["builtin"] = Value::Bool(true);
+        record.settings["customized"] = Value::Bool(false);
+        record.settings["members"] =
+            serde_json::to_value(members).map_err(|error| error.to_string())?;
+        self.publishPackageSource(&record, &previousSource)
+    }
+
+    /// Publishes a source change and retires its previous archive without touching configuration roots.
+    fn publishPackageSource(
+        &self,
+        record: &ExtensionRecord,
+        previousSource: &str,
+    ) -> Result<(), String> {
+        self.validate(record)?;
+        let root = Self::root("package", &record.scope)?;
+        if record.scope == "space" && !record.sourceName.is_empty() {
+            let path = format!("{root}/{}", record.sourceName);
+            let bytes = self
+                .storage
+                .readBytes(&path)
+                .map_err(|error| error.to_string())?;
+            self.writeOwnedBytes(record, &path, &bytes)?;
+        }
+        self.write(record)?;
+        if !previousSource.is_empty() && previousSource != record.sourceName {
+            let path = format!("{root}/{previousSource}");
+            match record.scope.as_str() {
+                "device" => self
+                    .storage
+                    .delete(&path, false)
+                    .map_err(|error| error.to_string())?,
+                "space" => RuntimeFileSyncStore::new(self.storage.clone(), RUNTIME_SYNC_DIR_PATH)
+                    .delete(&path)?,
+                _ => return Err("Unknown extension scope".to_string()),
+            }
+        }
+        notifyCatalogChanged();
+        Ok(())
+    }
+
     /// Retires an archived package source in its exact scope without deleting its data.
     pub fn retirePackageSource(&self, id: &str, sourceName: &str, scope: &str) -> Result<(), String> {
         validateScope(scope)?;
@@ -505,6 +578,84 @@ impl ExtensionStore {
             .map_err(|e| e.to_string())?;
         notifyCatalogChanged();
         Ok(())
+    }
+
+    /// Removes every persisted installation of a failed package, including conflicting owners.
+    /// Each record keeps its own scope so shared removals still publish file tombstones.
+    pub fn deleteFailedPackageInstallations(&self, id: &str) -> Result<bool, String> {
+        let records = self
+            .records("package")?
+            .into_iter()
+            .filter(|record| record.id == id)
+            .collect::<Vec<_>>();
+        for record in &records {
+            self.remove(record)?;
+        }
+        if !records.is_empty() {
+            notifyCatalogChanged();
+        }
+        Ok(!records.is_empty())
+    }
+
+    /// Merges legacy device-scope builtin records into their required space installation.
+    ///
+    /// Older binaries registered every built-in package in device scope even when the
+    /// manifest required space ownership, so upgraded installs can hold both records and
+    /// fail ownership resolution. Only unambiguous builtin duplicates are merged; every
+    /// other conflict still surfaces to the caller.
+    #[allow(non_snake_case)]
+    pub fn reconcileBuiltinScopeDuplicates(
+        &self,
+        kind: &str,
+        id: &str,
+        requiredScope: &str,
+    ) -> Result<bool, String> {
+        validateScope(requiredScope)?;
+        if requiredScope != "space" {
+            return Ok(false);
+        }
+        let records = self
+            .records(kind)?
+            .into_iter()
+            .filter(|record| record.id == id)
+            .collect::<Vec<_>>();
+        if records.len() <= 1 {
+            return Ok(false);
+        }
+        let allBuiltin = records.iter().all(|record| {
+            record.settings.get("builtin").and_then(Value::as_bool) == Some(true)
+        });
+        let onlyLocalDuplicates = records
+            .iter()
+            .filter(|record| record.scope != requiredScope)
+            .all(|record| record.scope == "device");
+        let canonical = records
+            .iter()
+            .find(|record| record.scope == requiredScope)
+            .cloned();
+        let Some(canonical) = canonical else {
+            return Ok(false);
+        };
+        if !allBuiltin || !onlyLocalDuplicates {
+            return Ok(false);
+        }
+        let mut merged = canonical.settings.clone();
+        for duplicate in records.iter().filter(|record| record.scope != requiredScope) {
+            mergePackageSettings(&mut merged, &duplicate.settings);
+        }
+        merged["builtin"] = Value::Bool(true);
+        merged["installationScope"] = Value::String(requiredScope.to_string());
+        if merged != canonical.settings {
+            let mut updated = canonical.clone();
+            updated.settings = merged;
+            self.validate(&updated)?;
+            self.writeSettings(&updated)?;
+        }
+        for duplicate in records.iter().filter(|record| record.scope != requiredScope) {
+            self.removeRecordMetadata(duplicate)?;
+        }
+        notifyCatalogChanged();
+        Ok(true)
     }
 
     /// Resolves a known package scope before registration without requiring an installation record.
@@ -691,6 +842,11 @@ impl ExtensionStore {
     /// Removes owned content and records only after the target move has been published.
     fn remove(&self, record: &ExtensionRecord) -> Result<(), String> {
         self.deleteContent(record)?;
+        self.removeRecordMetadata(record)
+    }
+
+    /// Removes one record and its settings while leaving plugin content for the canonical owner.
+    fn removeRecordMetadata(&self, record: &ExtensionRecord) -> Result<(), String> {
         self.settingsStore(record)?
             .edit(|preferences| {
                 preferences.remove(&stringPreferencesKey("settings"));
@@ -932,6 +1088,59 @@ impl ExtensionStore {
         }
         Ok(())
     }
+}
+
+/// Merges legacy package settings without overriding values the canonical record owns.
+fn mergePackageSettings(target: &mut Value, source: &Value) {
+    for key in ["members", "enabledNames", "disabledNames"] {
+        mergeStringArray(target, source, key);
+    }
+    mergeSubpackageStates(target, source);
+    let targetOrder = target.get("order").and_then(Value::as_u64).unwrap_or(0);
+    let sourceOrder = source.get("order").and_then(Value::as_u64).unwrap_or(0);
+    if sourceOrder > targetOrder {
+        target["order"] = Value::from(sourceOrder);
+    }
+}
+
+/// Appends unseen string entries while preserving the canonical record's order.
+fn mergeStringArray(target: &mut Value, source: &Value, key: &str) {
+    let mut merged = target
+        .get(key)
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if let Some(values) = source.get(key).and_then(Value::as_array) {
+        for value in values.iter().filter_map(Value::as_str) {
+            if !merged.iter().any(|existing| existing == value) {
+                merged.push(value.to_string());
+            }
+        }
+    }
+    target[key] = serde_json::json!(merged);
+}
+
+/// Fills missing subpackage states from the legacy duplicate without overwriting canonical state.
+fn mergeSubpackageStates(target: &mut Value, source: &Value) {
+    let mut merged = target
+        .get("subpackageStates")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    if let Some(values) = source.get("subpackageStates").and_then(Value::as_object) {
+        for (name, enabled) in values {
+            merged
+                .entry(name.clone())
+                .or_insert_with(|| enabled.clone());
+        }
+    }
+    target["subpackageStates"] = Value::Object(merged);
 }
 
 /// Creates a collision-resistant entity path without deriving filesystem paths from display names.

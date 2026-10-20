@@ -119,7 +119,7 @@ export interface CharacterRecord {
   ttsConfigId: string | null; themeConfigId: string | null; memoryBindingMode: string; sharedMemoryId: string | null;
   sharedMemoryMounts: { sharedMemoryId: string; readable: boolean; writable: boolean }[];
   toolAccessConfig: { enabled: boolean; allowedBuiltinTools: string[]; allowedPackages: string[]; allowedSkills: string[]; allowedMcpServers: string[] };
-  isDefault: boolean; createdAt: number; updatedAt: number;
+  createdAt: number; updatedAt: number;
 }
 /** Defines the complete stored group record. */
 export interface GroupRecord { id: string; name: string; description: string; themeConfigId: string | null; members: { characterCardId: string; orderIndex: number }[]; createdAt: number; updatedAt: number }

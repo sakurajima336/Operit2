@@ -7,6 +7,7 @@ publish = false
 
 [features]
 default = []
+daemon = ["dep:tokio"]
 fs = ["dep:operit-host-native-filesystem"]
 http = ["dep:operit-host-native-http"]
 scheduler = ["dep:operit-host-native-scheduler"]

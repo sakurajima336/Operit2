@@ -2058,7 +2058,7 @@ pub trait HostJavaScriptRuntime {
         reject: bool,
     ) -> HostResult<()>;
 
-    /// Releases the Promise handles owned by the cancelled execution scope.
+    /// Rejects the cancelled scope's pending Promises so JavaScript cleanup can run.
     fn cancelHostJavaScriptPromises(&mut self, scope: &str) -> HostResult<()>;
 
     /// Registers a required synchronous structured binding without JSON text transport.

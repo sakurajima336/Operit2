@@ -82,8 +82,14 @@ impl FileSystemHost for TestFileSystemHost {
         unreachable!("unrelated file-system operation")
     }
 
-    fn readFile(&self, _path: &str) -> HostResult<String> {
-        unreachable!("unrelated file-system operation")
+    fn readFile(&self, path: &str) -> HostResult<String> {
+        self.storage
+            .lock()
+            .unwrap()
+            .files
+            .get(path)
+            .cloned()
+            .ok_or_else(|| HostError::new("File does not exist"))
     }
 
     fn readFileWithLimit(&self, _path: &str, _maxBytes: usize) -> HostResult<String> {
@@ -320,4 +326,99 @@ fn future_file_write_batches_flush_before_pending() {
     assert_eq!(host.append_count.load(std::sync::atomic::Ordering::Relaxed), 2);
     assert_eq!(future.as_mut().poll(&mut context), Poll::Ready(42));
     assert_eq!(host.append_count.load(std::sync::atomic::Ordering::Relaxed), 3);
+}
+
+/// Builds one oversized log body with line-length-tagged records.
+fn oversize_log_body(records: usize, line_bytes: usize) -> String {
+    let filler = "x".repeat(line_bytes);
+    (0..records)
+        .map(|index| format!("record {index} {filler}\n"))
+        .collect()
+}
+
+/// Evicts the oldest records of an oversized log file and keeps the newest.
+#[test]
+fn oversize_log_file_evicts_oldest_records() {
+    let host = Arc::new(TestFileSystemHost::default());
+    let files: Arc<dyn FileSystemHost> = host.clone();
+    let path = "/runtime/logs/operit.log";
+    ensure_log_file(&files, path).unwrap();
+    let body = oversize_log_body(640, 8 * 1024);
+    files.writeFile(path, &body, true).unwrap();
+    assert!(host.storage.lock().unwrap().files[path].len() as i64 > LOG_FILE_MAX_BYTES);
+
+    evict_log_file_oldest(&files, path);
+    let trimmed = host.storage.lock().unwrap().files[path].clone();
+    assert!(trimmed.contains("oldest records evicted"));
+    assert!(trimmed.contains("record 639 "), "newest records must survive");
+    assert!(!trimmed.contains("record 0 "), "oldest records must be evicted");
+    assert!(trimmed.len() > LOG_FILE_KEEP_BYTES as usize / 2, "roughly half the cap is kept");
+    assert!(trimmed.lines().next().unwrap().contains("AppLogger"));
+
+    let second_pass = trimmed.clone();
+    evict_log_file_oldest(&files, path);
+    assert_eq!(host.storage.lock().unwrap().files[path], second_pass, "must be a no-op under the cap");
+}
+
+/// Trims a legacy oversized log file when the logger binds its path.
+#[test]
+fn binding_trims_oversized_legacy_log_file() {
+    let host = Arc::new(TestFileSystemHost::default());
+    let path = "/runtime/logs/operit.log";
+    {
+        let mut storage = host.storage.lock().unwrap();
+        storage.directories.insert("/runtime/logs".into());
+        storage.files.insert(path.into(), oversize_log_body(640, 8 * 1024));
+    }
+    let files: Arc<dyn FileSystemHost> = host.clone();
+    ensure_log_file(&files, path).unwrap();
+    let trimmed = host.storage.lock().unwrap().files[path].clone();
+    assert!(trimmed.len() as i64 <= LOG_FILE_MAX_BYTES);
+    assert!(trimmed.contains("oldest records evicted"));
+}
+
+/// Keeps whole records only, including across multi-byte character cuts.
+#[test]
+fn newest_log_records_keeps_whole_lines_only() {
+    let content = "first\nsecond\nthird\n";
+    assert_eq!(newest_log_records(content, 50).as_deref(), Some(content));
+    assert_eq!(
+        newest_log_records(content, 8).as_deref(),
+        Some("third\n"),
+        "a cut inside a record drops that partial record"
+    );
+    assert_eq!(
+        newest_log_records("é\n中文记录\nlast\n", 6).as_deref(),
+        Some("last\n"),
+        "the cut advances past a split multi-byte character"
+    );
+    assert_eq!(newest_log_records("one-single-record", 4), None);
+}
+
+/// Evicts the oldest in-memory records once the history exceeds its cap.
+#[test]
+fn memory_history_is_capped_and_keeps_newest_entries() {
+    let mut entries: Vec<LogEntry> = Vec::new();
+    for index in 0..(MAX_MEMORY_ENTRIES + 1024) {
+        push_entry_capped(
+            &mut entries,
+            LogEntry {
+                priority: INFO,
+                verbose_level: None,
+                tag: "RetentionTest".into(),
+                message: format!("entry {index}"),
+                throwable: None,
+                timestamp_ms: index as u128,
+            },
+        );
+    }
+    // One overflow pass drains down to KEEP; the remainder never crosses the cap again.
+    let total = MAX_MEMORY_ENTRIES + 1024;
+    assert_eq!(entries.len(), KEEP_MEMORY_ENTRIES + (total - MAX_MEMORY_ENTRIES - 1));
+    assert!(entries.len() <= MAX_MEMORY_ENTRIES);
+    assert_eq!(
+        entries[0].message,
+        format!("entry {}", MAX_MEMORY_ENTRIES + 1 - KEEP_MEMORY_ENTRIES)
+    );
+    assert_eq!(entries.last().unwrap().message, format!("entry {}", total - 1));
 }

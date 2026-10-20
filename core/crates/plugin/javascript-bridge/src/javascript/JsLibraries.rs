@@ -593,8 +593,13 @@ fn assembleRuntimeBootstrapScript() -> String {
             }}
             function finalizeCall() {{
                 if (globalThis.__operitCurrentCallId === callId) {{
+                    // Prefer the surrounding session, but never leave a suspended call without
+                    // an owner when the surrounding call already finished: other calls may still
+                    // be awaiting host work and must keep a live execution id.
                     globalThis.__operitCurrentCallId =
-                        typeof previousCallId === 'string' ? previousCallId : '';
+                        typeof globalThis.__operitRestoreLiveCallId === 'function'
+                            ? globalThis.__operitRestoreLiveCallId(previousCallId, callId)
+                            : '';
                 }}
                 if (globalThis.__operit_call_runtime_ref === callRuntime) {{
                     if (previousCallRuntime && typeof previousCallRuntime === 'object') {{
@@ -1371,6 +1376,10 @@ fn assembleRuntimeBootstrapScript() -> String {
                     globalThis.__operitActiveModuleExports = invokePreviousActiveExports;
                 }}
                 markStage('handle_function_result');
+                // A nested call may have left the shared cursor on its own id; handleAsync
+                // must subscribe the returned promise to this call, not to that nested one.
+                globalThis.__operitCurrentCallId = callId;
+                globalThis.__operit_call_runtime_ref = callRuntime;
                 if (!callRuntime.handleAsync(functionResult)) {{
                     complete(functionResult);
                 }}
@@ -1409,7 +1418,7 @@ fn assembleRuntimeBootstrapScript() -> String {
         loadPluginConfigJs(),
         loadRuntimeContextJs(),
         buildLazyLibraryBootstrapScript(),
-        format!("{}\n{}", include_str!("../../../sdk/src/js_sdk/toolpkg_route_runtime.js"),
+        format!("{}\n{}\n__operitInstallV1Runtime(globalThis);", include_str!("../../../sdk/src/js_sdk/toolpkg_route_runtime.js"),
             JsExecutionScriptBuilder::buildExecutionRuntimeBridgeScript())
     )
 }

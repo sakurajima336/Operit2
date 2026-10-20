@@ -59,14 +59,15 @@ test('native role sidebar restores rounded nested legacy layout without timestam
   const screen = mount(context(chats, { activeStreamingChatIds: ['c2'] }), catalog(chats));
   const { tree } = await screen.load();
   if (process.env.OPERIT_NATIVE_SIDEBAR_FIXTURE) await writeFile(process.env.OPERIT_NATIVE_SIDEBAR_FIXTURE, JSON.stringify(tree, null, 2) + '\n');
-  assert.equal(tree.type, 'LazyColumn');
+  assert.equal(tree.type, 'Column');
   assert.equal(tree.props.fillMaxWidth, true);
   assert.equal(tree.props.fillMaxSize, undefined);
   assert.equal(tree.props.height, undefined);
   assert.equal(tree.props.paddingBottom, 16);
   assert.equal(tree.props.weight, undefined);
-  assert.equal(composeNodes(tree, node => node.type === 'LazyColumn').length, 1);
-  assert.ok(tree.children.some(node => node.props.key === 'sidebar-chat-drop-c1'), 'Chat rows must be direct lazy items');
+  assert.equal(composeNodes(tree, node => node.type === 'LazyColumn').length, 0);
+  assert.equal(tree.props.viewport, undefined);
+  assert.ok(tree.children.some(node => node.props.key === 'sidebar-chat-drop-c1'), 'Chat rows share the host scroll through a Column');
   assert.equal(composeNodes(tree, node => node.type === 'WebView').length, 0);
   assert.equal(composeNodes(tree, node => node.type === 'Text' && node.props.text === '1791059541109').length, 0);
   assert.equal(keyedNode(tree, 'sidebar-create-bar').props.height, 34);
@@ -148,6 +149,21 @@ test('chat rails are plugin-composed Boxes with generic hover styles and transit
   assert.equal(keyedNode(selected, 'sidebar-chat-rail-indicator-c2').props.hoverStyle.height, 16);
 });
 
+test('leaving the chat page clears row highlighting without reloading the catalog', async () => {
+  const chats = [summary('c1'), summary('c2')], screen = mount(context(chats), catalog(chats));
+  await screen.load();
+  const reads = screen.calls.filter(call => call.name === 'character-sidebar.catalog').length;
+  const away = await screen.update(context(chats, { currentChatId: null }));
+  for (const chat of chats) {
+    assert.equal(keyedNode(away.tree, 'sidebar-chat-rail-indicator-' + chat.id).props.height, 0);
+    const ops = keyedNode(away.tree, 'sidebar-chat-hit-' + chat.id).props.modifier.__modifierOps;
+    assert.equal(ops.find(op => op.name === 'background').args[0].alpha, 0);
+  }
+  const back = await screen.update(context(chats));
+  assert.equal(keyedNode(back.tree, 'sidebar-chat-rail-indicator-c1').props.height, 16);
+  assert.equal(screen.calls.filter(call => call.name === 'character-sidebar.catalog').length, reads);
+});
+
 test('chat swipe surfaces share the row radius and use compact centered action icons', async () => {
   const chats = [summary('c1'), summary('c2')], screen = mount(context(chats), catalog(chats));
   const { tree } = await screen.load();
@@ -214,21 +230,52 @@ test('native previews retain current pinned and streaming rows, and search finds
   assert.equal(composeNodes(filtered.tree, node => /^sidebar-chat-c\d+$/.test(node.props.key ?? '')).length, 1);
 });
 
+test('search matches workspace animation and input decoration and retains an active hidden filter', async () => {
+  const chats = [summary('c1'), summary('c2')];
+  const screen = mount(context(chats), catalog(chats));
+  const loaded = await screen.load();
+  const container = keyedNode(loaded.tree, 'sidebar-search-container');
+  assert.equal(container.props.animation.durationMillis, 180);
+  assert.equal(container.props.animation.curve, 'easeOutCubic');
+  assert.equal(container.props.animation.animateContentSize, true);
+  assert.equal(composeNodes(loaded.tree, node => node.props.key === 'sidebar-search').length, 0);
+  const opened = await screen.click(loaded.tree, 'sidebar-search-toggle');
+  if (process.env.OPERIT_NATIVE_SIDEBAR_SEARCH_FIXTURE) await writeFile(process.env.OPERIT_NATIVE_SIDEBAR_SEARCH_FIXTURE, JSON.stringify(keyedNode(opened.tree, 'sidebar-search-container'), null, 2) + '\n');
+  const field = keyedNode(opened.tree, 'sidebar-search');
+  assert.equal(field.props.decoration.isDense, true);
+  assert.equal(field.props.decoration.filled, true);
+  assert.equal(field.props.decoration.cornerRadius, 14);
+  assert.equal(field.props.decoration.contentPadding.horizontal, 12);
+  assert.equal(field.props.decoration.contentPadding.vertical, 10);
+  assert.equal(field.slots.leadingIcon[0].props.size, 20);
+  const filtered = await screen.dispatch(field.props.onValueChange, 'c2');
+  const closed = await screen.click(filtered.tree, 'sidebar-search-toggle');
+  assert.equal(composeNodes(closed.tree, node => node.props.key === 'sidebar-search').length, 0);
+  assert.ok(keyedNode(closed.tree, 'sidebar-chat-c2'));
+  assert.equal(composeNodes(closed.tree, node => node.props.key === 'sidebar-chat-c1').length, 0);
+  const toggle = keyedNode(closed.tree, 'sidebar-search-toggle');
+  assert.equal(toggle.children[0].props.name, 'SearchRounded');
+  assert.equal(toggle.children[0].props.tint.__colorToken, 'primary');
+  const reopened = await screen.click(closed.tree, 'sidebar-search-toggle');
+  assert.equal(keyedNode(reopened.tree, 'sidebar-search').props.value, 'c2');
+});
+
 /** Checks transport growth and backend isolation through the actual compiled sidebar and SDK. */
-test('expanding chat previews materializes one window without catalog IO', async () => {
+test('expanded conversations are complete Column content without viewport callbacks or catalog IO', async () => {
   const chats = Array.from({ length: 200 }, (_, i) => summary('c' + i, { group: null }));
   const data = catalog(chats);
   data.sections[0].conversationGroups = []; data.sections[0].ungroupedChats = chats;
   const screen = mount(context(chats), data);
   const loaded = await screen.load(), calls = screen.calls.length;
-  const preview = await screen.dispatch(loaded.tree.props.viewport.onRangeChanged,
-    { firstIndex: 0, lastIndex: loaded.tree.props.viewport.itemCount });
   const before = screen.events.length;
-  const expanded = await screen.click(preview.tree, 'sidebar-preview-ungrouped:card:travel');
+  const expanded = await screen.click(loaded.tree, 'sidebar-preview-ungrouped:card:travel');
   const targets = composeNodes(expanded.tree, node => node.type === 'DragTarget');
   const visibleChats = composeNodes(expanded.tree, node => /^sidebar-chat-c\d+$/.test(node.props.key ?? '')).length;
-  assert.equal(visibleChats, 22);
-  assert.equal(expanded.tree.props.viewport.itemCount, chats.length + 3);
+  assert.equal(visibleChats, chats.length);
+  assert.equal(expanded.tree.type, 'Column');
+  assert.equal(expanded.tree.props.viewport, undefined);
+  assert.ok(keyedNode(expanded.tree, 'sidebar-chat-c0'));
+  assert.ok(keyedNode(expanded.tree, 'sidebar-chat-c199'));
   assert.ok(targets.every(node => node.props.acceptedData === undefined));
   assert.equal(targets.reduce((count, node) => count + (node.props.excludedData?.length ?? 0), 0), visibleChats);
   assert.ok(targets.every(node => node.props.acceptedTypes.length === 1));
@@ -237,15 +284,13 @@ test('expanding chat previews materializes one window without catalog IO', async
   const update = screen.events[before].response.update;
   assert.ok(update.upserts.every(node => node.id.length < 12), 'Transport handles must not carry ancestor paths');
   assert.ok(JSON.stringify(update).length < chats.length * 6500, 'Expanded updates must stay within a linear per-chat transport budget');
-  const end = await screen.dispatch(expanded.tree.props.viewport.onRangeChanged, { firstIndex: 190, lastIndex: 203 });
-  assert.ok(keyedNode(end.tree, 'sidebar-chat-c199'));
-  const collapsed = await screen.click(end.tree, 'sidebar-preview-ungrouped:card:travel');
+  const collapsed = await screen.click(expanded.tree, 'sidebar-preview-ungrouped:card:travel');
   assert.equal(composeNodes(collapsed.tree, node => /^sidebar-chat-c\d+$/.test(node.props.key ?? '')).length, 4);
   assert.equal(screen.calls.length, calls);
   assert.ok(JSON.stringify(screen.events.at(-1).response.update).length < chats.length * 250, 'Collapse must transmit compact removal handles');
   const again = await screen.click(collapsed.tree, 'sidebar-preview-ungrouped:card:travel');
-  assert.equal(again.tree.props.viewport.firstIndex, 0, 'Re-expansion must not restore the old bottom window');
-  assert.equal(composeNodes(again.tree, node => /^sidebar-chat-c\d+$/.test(node.props.key ?? '')).length, 22);
+  assert.equal(again.tree.props.viewport, undefined);
+  assert.equal(composeNodes(again.tree, node => /^sidebar-chat-c\d+$/.test(node.props.key ?? '')).length, chats.length);
   assert.ok(keyedNode(again.tree, 'sidebar-chat-c0'), 'Top rows must arrive in the expansion commit');
   assert.equal(screen.calls.length, calls);
 });
@@ -275,6 +320,44 @@ test('generic long press and swipe callbacks render plugin-owned actions and con
   const deletion = await screen.dispatch(keyedNode(tree, 'sidebar-chat-swipe-c1').props.onEndAction);
   assert.ok(composeNodes(deletion.tree, node => node.type === 'Text' && node.props.text.includes('确认删除对话')).length > 0);
 });
+
+for (const view of ['characters', 'groups']) {
+  test(view + ' long press opens a host window without switching the current chat', async () => {
+    const chats = [summary('c1'), summary('c2')], roles = catalog(chats);
+    const data = view === 'characters' ? roles : { view, scopes: roles.sections.map(section => ({
+      id: section.id, title: section.title, ownerSelection: section.selection,
+      kind: section.kind, avatarUri: section.avatarUri, groups: section.conversationGroups,
+      ungrouped: section.ungroupedChats,
+    })) };
+    const current = { ...context(chats), input: { view }, chatSidebarCapabilities: { openInWindow: true } };
+    const screen = mount(current, data);
+    const { tree } = await screen.load();
+    const combined = keyedNode(tree, 'sidebar-chat-hit-c2').props.modifier.__modifierOps.find(op => op.name === 'combinedClickable').args[0];
+    const pressed = await screen.dispatch(combined.onLongClick);
+    const label = composeNodes(pressed.tree, node => node.type === 'Text' && node.props.text === '在新窗口打开');
+    assert.equal(label.length, 1);
+    const tile = composeNodes(pressed.tree, node => node.type === 'Surface' && node.props.onClick
+      && composeNodes(node, child => child === label[0]).length > 0)[0];
+    const reads = screen.calls.length;
+    const opened = await screen.dispatch(tile.props.onClick);
+    assert.deepEqual(JSON.parse(JSON.stringify(opened.actionResult)), { type: 'toolpkg.chat.openInWindow', chatId: 'c2' });
+    assert.equal(composeNodes(opened.tree, node => node.type === 'Dialog').length, 0);
+    assert.equal(keyedNode(opened.tree, 'sidebar-chat-rail-indicator-c1').props.height, 16);
+    assert.equal(keyedNode(opened.tree, 'sidebar-chat-rail-indicator-c2').props.height, 0);
+    assert.equal(screen.calls.length, reads);
+  });
+}
+
+for (const capabilities of [undefined, { openInWindow: false }]) {
+  test('long press hides detached windows when host capability is ' + JSON.stringify(capabilities), async () => {
+    const chats = [summary('c1')];
+    const screen = mount({ ...context(chats), ...(capabilities ? { chatSidebarCapabilities: capabilities } : {}) }, catalog(chats));
+    const { tree } = await screen.load();
+    const combined = keyedNode(tree, 'sidebar-chat-hit-c1').props.modifier.__modifierOps.find(op => op.name === 'combinedClickable').args[0];
+    const pressed = await screen.dispatch(combined.onLongClick);
+    assert.equal(composeNodes(pressed.tree, node => node.type === 'Text' && node.props.text === '在新窗口打开').length, 0);
+  });
+}
 
 test('swipe delete waits for confirmation and cancellation leaves the conversation intact', async () => {
   const chats = [summary('c1')], deleted = [];
@@ -432,7 +515,7 @@ test('concurrent input refresh joins the real pending promise instead of leaving
   const loading = screen.load(), refresh = screen.update(context(chats));
   const updated = screen.render();
   assert.equal(calls, 1);
-  assert.equal(keyedNode(updated.tree, 'native-character-sidebar').type, 'LazyColumn');
+  assert.equal(keyedNode(updated.tree, 'native-character-sidebar').type, 'Column');
   assert.equal(composeNodes(updated.tree, node => node.type === 'LoadingIndicator').length, 1);
   finish(); await Promise.all([loading, refresh]);
   assert.equal(screen.render().state['native-sidebar-state'].loading, false);
@@ -501,15 +584,11 @@ test('native custom avatars carry paths without reading their contents', async (
   const screen = mount(context(chats), data, { readBinary: async () => {
     reads++; throw new Error('Native DSL must leave image reads to the host');
   } });
-  let { tree } = await screen.load();
+  const { tree } = await screen.load();
   assert.equal(reads, 0);
   const avatars = new Map();
-  for (let firstIndex = 0; firstIndex < tree.props.viewport.itemCount; firstIndex += 12) {
-    ({ tree } = await screen.dispatch(tree.props.viewport.onRangeChanged, {
-      firstIndex, lastIndex: Math.min(firstIndex + 12, tree.props.viewport.itemCount),
-    }));
-    for (const node of composeNodes(tree, node => node.type === 'Image')) avatars.set(node.props.key, node.props.uri);
-  }
+  assert.equal(tree.props.viewport, undefined);
+  for (const node of composeNodes(tree, node => node.type === 'Image')) avatars.set(node.props.key, node.props.uri);
   assert.equal(avatars.size, 17);
   assert.equal(reads, 0);
   for (let i = 0; i < 17; i++) assert.equal(avatars.get('sidebar-avatar-card:avatar-' + i), '/test/avatar-' + i + '.png');
@@ -554,14 +633,10 @@ test('twenty default avatars serialize resource paths without any binary reads',
   const screen = mount(context(chats), data, { readBinary: async () => {
     reads++; throw new Error('Unexpected binary read');
   } });
-  let { tree } = await screen.load();
+  const { tree } = await screen.load();
   const avatars = new Map();
-  for (let firstIndex = 0; firstIndex < tree.props.viewport.itemCount; firstIndex += 12) {
-    ({ tree } = await screen.dispatch(tree.props.viewport.onRangeChanged, {
-      firstIndex, lastIndex: Math.min(firstIndex + 12, tree.props.viewport.itemCount),
-    }));
-    for (const node of composeNodes(tree, node => node.type === 'Image')) avatars.set(node.props.key, node.props.uri);
-  }
+  assert.equal(tree.props.viewport, undefined);
+  for (const node of composeNodes(tree, node => node.type === 'Image')) avatars.set(node.props.key, node.props.uri);
   assert.equal(avatars.size, 20);
   assert.equal(reads, 0);
   assert.equal(screen.calls.filter(call => call.resource).length, 1);

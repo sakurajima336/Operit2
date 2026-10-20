@@ -89,23 +89,14 @@ fn document(id: i64) -> (String, String, Value) {
 
 /// Exercises actual bounded commits, exact identities, durable reopen, and once-only source adoption.
 #[test]
-fn relational_owner_metadata_preserves_integer_counters_and_real_search_weights() {
+fn json_owner_metadata_preserves_integer_counters_and_real_search_weights() {
     let fixture = Fixture::new();
     let value = ownerMetadata(
         "character:legacy",
         MemorySettings::default(),
         MemorySearchConfig::default(),
     );
-    fixture
-        .writer()
-        .relational
-        .put(&[(
-            "owners".into(),
-            "character:legacy".into(),
-            value.clone(),
-            None,
-        )])
-        .unwrap();
+    fixture.writer().adoptRecord("owners", "character:legacy", value.clone()).unwrap();
     let actual = fixture
         .writer()
         .get("owners", "character:legacy")
@@ -114,157 +105,171 @@ fn relational_owner_metadata_preserves_integer_counters_and_real_search_weights(
     assert_eq!(actual["value"], value);
 }
 
-/// Exercises actual bounded commits, exact identities, durable reopen, and once-only source adoption.
+/// Converts the exact released namespace while retaining already current plugin data.
 #[test]
-fn v28_object_adoption_verifies_and_retires_business_records_once() {
-    let fixture = Fixture::new();
-    let writer = fixture.writer();
-    let marker = writer
-        .legacyGet("imports", "objects-to-relational-v1")
-        .unwrap()
-        .unwrap();
-    let mut card = serde_json::to_value(&data().cards[0]).unwrap();
-    card["themeConfigId"] = Value::Null;
-    card["chatProviderId"] = Value::Null;
-    let mut source_memory = memory(12);
-    let expected_card = card.clone();
-    let expected_memory = source_memory.2.clone();
-    // Older structured JS hosts persisted safe integer timestamps as JSON floats.
-    card["createdAt"] = json!(100.0);
-    card["updatedAt"] = json!(200.0);
-    for field in ["createdAt", "updatedAt", "lastAccessedAt"] {
-        source_memory.2["record"][field] =
-            json!(source_memory.2["record"][field].as_i64().unwrap() as f64);
-    }
-    writer
-        .request(StorageRequest::Commit {
-            handle: writer.handle.clone(),
-            mutations: vec![
-                StorageMutation {
-                    collection: "imports".into(),
-                    key: "objects-to-relational-v1".into(),
-                    value: Value::Null,
-                    deleted: true,
-                    check_version: true,
-                    expected_version: Some(requiredString(&marker, "version").unwrap().into()),
-                },
-                StorageMutation {
-                    collection: "cards".into(),
-                    key: "legacy".into(),
-                    value: card.clone(),
-                    deleted: false,
-                    check_version: true,
-                    expected_version: None,
-                },
-                StorageMutation {
-                    collection: source_memory.0.clone(),
-                    key: source_memory.1.clone(),
-                    value: source_memory.2.clone(),
-                    deleted: false,
-                    check_version: true,
-                    expected_version: None,
-                },
-            ],
-        })
-        .unwrap();
-    // Resume an interrupted attempt that already wrote the equivalent integer card.
-    writer
-        .relational
-        .put(&[("cards".into(), "legacy".into(), expected_card.clone(), None)])
-        .unwrap();
-    let reopened = CharacterPluginWriter::open(fixture.host.clone(), fixture.host.clone()).unwrap();
-    assert_eq!(
-        reopened.get("cards", "legacy").unwrap().unwrap()["value"],
-        expected_card
-    );
-    assert_eq!(
-        reopened.get("memories", &source_memory.1).unwrap().unwrap()["value"],
-        expected_memory
-    );
-    assert!(reopened.legacyList("cards").unwrap().is_empty());
-    assert!(reopened.legacyList("memories").unwrap().is_empty());
-    assert_eq!(
-        reopened
-            .legacyGet("imports", "objects-to-relational-v1")
-            .unwrap()
-            .unwrap()["value"]["complete"],
-        true
-    );
-    card = expected_card;
-    card["name"] = json!("Edited after adoption");
-    reopened
-        .commit(vec![reopened
-            .mutation("cards", "legacy", card.clone())
-            .unwrap()])
-        .unwrap();
-    let again = CharacterPluginWriter::open(fixture.host.clone(), fixture.host.clone()).unwrap();
-    assert_eq!(
-        again.get("cards", "legacy").unwrap().unwrap()["value"],
-        card
-    );
-}
-
-/// Requires explicit global flags before any fresh import can publish business data.
-#[test]
-fn core_rows_keep_authors_and_bindings_without_historical_configuration() {
+fn released_core_bindings_keep_authors_and_current_namespaces() {
     let fixture = Fixture::new();
     let writer = fixture.writer();
     writer.import("operit2-v27", data()).unwrap();
-    let database =
-        SqliteStore::openWithHost(fixture.host.clone(), "runtime/test-core.sqlite").unwrap();
+    let database = SqliteStore::openWithHost(fixture.host.clone(), "runtime/test-core.sqlite").unwrap();
     operit_store::db::AppDatabase::createAllTables(&database).unwrap();
-    for (id, extensions) in [
-        (
-            "bound",
-            json!({PLUGIN_ID:{"version":1,"selection":"card:legacy"},"other.plugin":{"retained":true}}),
-        ),
-        (
-            "v27",
-            json!({LEGACY_BINDING_NAMESPACE:{"characterCardName":"Original","characterGroupId":null}}),
-        ),
-        (
-            "imported",
-            json!({PLUGIN_ID:{"recordId":"imported","schemaVersion":1}}),
-        ),
-        ("same-id", json!({})),
-    ] {
-        database.execute("INSERT INTO chats(id,title,createdAt,updatedAt,pluginExtensions) VALUES(?1,?1,1,1,?2)", vec![SqliteValue::Text(id.into()), SqliteValue::Text(extensions.to_string())]).unwrap();
-    }
-    for id in ["imported", "same-id", "uncommitted"] {
-        writer
-            .adoptRecord(
-                "chat_drafts",
-                id,
-                json!({"version":1,"selection":"card:legacy"}),
-            )
-            .unwrap();
-    }
-    let profile = json!({
-        "id":"legacy","name":"Historical role","avatarUri":null,"introPrompt":"Frozen prompt",
-        "userPreferencesText":"Frozen USER","openingStatement":"Hello",
-        "modelBinding":{"providerId":"provider","modelId":"model"},"ttsConfigId":"voice",
-        "toolAccess":{"enabled":false,"allowedBuiltinTools":[],"allowedPackages":[],"allowedSkills":[],"allowedMcpServers":[]},
-        "resources":[{"key":"character:legacy","readable":true,"writable":true}]
-    });
-    let snapshot = json!({"version":1,"selection":"card:legacy","promptFunctionType":"CHAT","primaryOwnerKey":"character:legacy","profile":profile,"participants":[profile]});
-    database.execute("INSERT INTO messages(chatId,sender,timestamp,orderIndex,pluginExtensions) VALUES('bound','ai',10,0,?1)", vec![SqliteValue::Text(json!({PLUGIN_ID:snapshot,"other.plugin":{"retained":true}}).to_string())]).unwrap();
+    database.execute("INSERT INTO chats(id,title,createdAt,updatedAt,pluginExtensions) VALUES('legacy','Legacy',1,1,?1)", vec![SqliteValue::Text(json!({
+        LEGACY_BINDING_NAMESPACE:{"characterCardName":"Original","characterGroupId":null},
+        "other.plugin":{"keep":true}
+    }).to_string())]).unwrap();
     adoptCoreConfigurationRows(&database, writer).unwrap();
-    for id in ["bound", "v27", "imported"] {
+    assert_eq!(writer.get("chat_bindings", "legacy").unwrap().unwrap()["value"]["selection"], "card:legacy");
+    let value: String = database.queryOne("SELECT pluginExtensions FROM chats WHERE id='legacy'",vec![]).unwrap().unwrap().get(0).unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&value).unwrap(), json!({"other.plugin":{"keep":true}}));
+    adoptCoreConfigurationRows(&database, writer).unwrap();
+}
+
+/// Cleans stale name references across live and synchronized history while leaving chats available for explicit rebinding.
+#[test]
+fn stale_legacy_bindings_do_not_abort_core_history_migration() {
+    for (legacy, duplicate, resolved) in [
+        (
+            json!({"characterCardName":"Operit","characterGroupId":null}),
+            false,
+            false,
+        ),
+        (
+            json!({"characterCardName":"User renamed card","characterGroupId":null}),
+            true,
+            false,
+        ),
+        (
+            json!({"characterCardName":"User renamed card","characterGroupId":"deleted-group"}),
+            false,
+            false,
+        ),
+        (
+            json!({"characterCardName":"User renamed card","characterGroupId":null}),
+            false,
+            true,
+        ),
+    ] {
+        let fixture = Fixture::new();
+        let writer = fixture.writer();
+        let mut source = data();
+        source.cards[0].name = "User renamed card".to_string();
+        if duplicate {
+            let mut second = source.cards[0].clone();
+            second.id = "second-card".to_string();
+            second.isDefault = false;
+            source.cards.push(second);
+            source.owners.push(ownerMetadata(
+                "character:second-card",
+                MemorySettings::default(),
+                MemorySearchConfig::default(),
+            ));
+            source.documents.insert("character:second-card".into(), b"# Second card\n".to_vec());
+        }
+        writer.import("operit2-v27", source).unwrap();
+        let cards = writer.list("cards").unwrap();
+        let metadata = writer.get("meta", "state").unwrap().unwrap();
+        let database =
+            SqliteStore::openWithHost(fixture.host.clone(), "runtime/stale-bindings.sqlite")
+                .unwrap();
+        operit_store::db::AppDatabase::createAllTables(&database).unwrap();
+        let extensions = json!({
+            LEGACY_BINDING_NAMESPACE:legacy,
+            "other.plugin":{"keep":true},
+            "host.chat.identity":{"title":"Historical role name","avatarUri":null}
+        });
+        let encoded = extensions.to_string();
+        database.execute("INSERT INTO chats(id,title,createdAt,updatedAt,pluginExtensions) VALUES('legacy','Kept conversation',1,1,?1)", vec![SqliteValue::Text(encoded.clone())]).unwrap();
+        database.execute("INSERT INTO messages(chatId,sender,timestamp,orderIndex,roleName,pluginExtensions) VALUES('legacy','ai',10,0,'Historical role name',?1)", vec![SqliteValue::Text(encoded.clone())]).unwrap();
+        database.execute("INSERT INTO message_variants(chatId,messageTimestamp,variantIndex,roleName,pluginExtensions) VALUES('legacy',10,0,'Historical role name',?1)", vec![SqliteValue::Text(encoded)]).unwrap();
+        database.execute("INSERT INTO sync_sql_operations VALUES('legacy-op','test-device',1,'chat','chat','legacy','upsert','snapshot',1,7)", Vec::new()).unwrap();
+        for (synchronized, live) in [
+            ("sync_sql_chat_rows", "chats"),
+            ("sync_sql_message_rows", "messages"),
+            ("sync_sql_message_variant_rows", "message_variants"),
+        ] {
+            let columns = database
+                .queryRows(&format!("PRAGMA table_info({synchronized})"), Vec::new())
+                .unwrap()
+                .into_iter()
+                .map(|row| row.get::<_, String>(1).unwrap())
+                .filter(|name| name != "opId")
+                .map(|name| format!("\"{name}\""))
+                .collect::<Vec<_>>()
+                .join(",");
+            database.execute(&format!("INSERT INTO {synchronized}(opId,{columns}) SELECT 'legacy-op',{columns} FROM {live}"), Vec::new()).unwrap();
+        }
+        adoptCoreConfigurationRows(&database, writer).unwrap();
+        let binding = writer.get("chat_bindings", "legacy").unwrap();
+        if resolved {
+            assert_eq!(
+                binding.unwrap()["value"],
+                json!({"version":1,"selection":"card:legacy"})
+            );
+        } else {
+            assert!(binding.is_none());
+        }
+        for table in [
+            "chats",
+            "messages",
+            "message_variants",
+            "sync_sql_chat_rows",
+            "sync_sql_message_rows",
+            "sync_sql_message_variant_rows",
+        ] {
+            let rows = database
+                .queryRows(&format!("SELECT pluginExtensions FROM {table}"), Vec::new())
+                .unwrap();
+            assert_eq!(rows.len(), 1);
+            let actual: Value =
+                serde_json::from_str(&rows[0].get::<_, String>(0).unwrap()).unwrap();
+            let mut expected = extensions.clone();
+            expected
+                .as_object_mut()
+                .unwrap()
+                .remove(LEGACY_BINDING_NAMESPACE);
+            if resolved && table != "chats" && table != "sync_sql_chat_rows" {
+                expected[PLUGIN_ID] = json!({"participantId":"legacy"});
+            }
+            assert_eq!(actual, expected, "wrong migration result for {table}");
+        }
+        assert_eq!(writer.list("cards").unwrap(), cards);
+        assert_eq!(writer.get("meta", "state").unwrap().unwrap(), metadata);
+        // An explicit rebind must survive subsequent startup migration passes.
+        let rebound = json!({"version":1,"selection":"card:legacy"});
+        writer
+            .adoptRecord("chat_bindings", "legacy", rebound.clone())
+            .unwrap();
+        adoptCoreConfigurationRows(&database, writer).unwrap();
         assert_eq!(
-            writer.get("chat_bindings", id).unwrap().unwrap()["value"]["selection"],
-            "card:legacy"
+            writer.get("chat_bindings", "legacy").unwrap().unwrap()["value"],
+            rebound
         );
     }
-    assert!(writer.get("chat_bindings", "same-id").unwrap().is_none());
-    assert!(writer
-        .get("chat_bindings", "uncommitted")
-        .unwrap()
-        .is_none());
-    assert!(writer.list("chat_drafts").unwrap().is_empty());
+}
+
+/// Keeps a current explicit binding when an obsolete human-name reference remains in Core chat metadata.
+#[test]
+fn stale_legacy_names_do_not_replace_current_chat_bindings() {
+    let fixture = Fixture::new();
+    let writer = fixture.writer();
+    writer.import("operit2-v27", data()).unwrap();
+    let current = json!({"version":1,"selection":"card:legacy"});
+    writer
+        .adoptRecord("chat_bindings", "legacy", current.clone())
+        .unwrap();
+    let database =
+        SqliteStore::openWithHost(fixture.host.clone(), "runtime/current-binding.sqlite").unwrap();
+    operit_store::db::AppDatabase::createAllTables(&database).unwrap();
+    database.execute("INSERT INTO chats(id,title,createdAt,updatedAt,pluginExtensions) VALUES('legacy','Kept',1,1,?1)", vec![SqliteValue::Text(json!({LEGACY_BINDING_NAMESPACE:{"characterCardName":"Operit","characterGroupId":null}}).to_string())]).unwrap();
+    adoptCoreConfigurationRows(&database, writer).unwrap();
+    assert_eq!(
+        writer.get("chat_bindings", "legacy").unwrap().unwrap()["value"],
+        current
+    );
     let extensions: String = database
         .queryOne(
-            "SELECT pluginExtensions FROM chats WHERE id='bound'",
-            vec![],
+            "SELECT pluginExtensions FROM chats WHERE id='legacy'",
+            Vec::new(),
         )
         .unwrap()
         .unwrap()
@@ -272,26 +277,73 @@ fn core_rows_keep_authors_and_bindings_without_historical_configuration() {
         .unwrap();
     assert_eq!(
         serde_json::from_str::<Value>(&extensions).unwrap(),
-        json!({"other.plugin":{"retained":true}})
+        json!({})
     );
-    let extensions: String = database
-        .queryOne(
-            "SELECT pluginExtensions FROM messages WHERE chatId='bound'",
-            vec![],
-        )
-        .unwrap()
-        .unwrap()
-        .get(0)
-        .unwrap();
-    let extensions: Value = serde_json::from_str(&extensions).unwrap();
-    assert_eq!(extensions["other.plugin"]["retained"], true);
-    assert_eq!(extensions[PLUGIN_ID], json!({"participantId":"legacy"}));
-    assert!(extensions.get("host.chat.identity").is_none());
-    assert!(!extensions.to_string().contains("Frozen"));
-    adoptCoreConfigurationRows(&database, writer).unwrap();
-    let again: String = database.queryOne("SELECT pluginExtensions FROM messages WHERE chatId='bound'", vec![]).unwrap().unwrap().get(0).unwrap();
-    assert_eq!(serde_json::from_str::<Value>(&again).unwrap(), extensions);
+}
 
+/// Repairs both released import encodings across live and synchronized history without changing saved identities.
+#[test]
+fn historical_message_avatars_are_adopted_after_completed_imports() {
+    let fixture = Fixture::new();
+    let writer = fixture.writer();
+    let mut source = data();
+    source.cards[0].avatarUri = Some("/app/character/avatar.png".into());
+    writer.import("operit1", source).unwrap();
+    let database = SqliteStore::openWithHost(fixture.host.clone(), "runtime/avatar-history.sqlite").unwrap();
+    operit_store::db::AppDatabase::createAllTables(&database).unwrap();
+    database.execute("INSERT INTO chats(id,title,createdAt,updatedAt) VALUES('history','History',1,1)", vec![]).unwrap();
+    let cases = [
+        ("ai", "Original", json!({}), true),
+        ("ai", "Historical name", json!({PLUGIN_ID:{"participantId":"legacy"},"other.plugin":{"keep":true}}), true),
+        ("ai", "Original", json!({"host.chat.identity":{"title":"Saved name","avatarUri":null}}), false),
+        ("user", "Original", json!({}), false),
+        ("ai", "Deleted role", json!({}), false),
+        ("ai", "Original", json!({PLUGIN_ID:{"participantId":"deleted-card"}}), false),
+        ("ai", "Historical name", json!({LEGACY_BINDING_NAMESPACE:{"characterCardName":"Original","characterGroupId":null}}), true),
+    ];
+    for (index, (sender, name, extensions, _)) in cases.iter().enumerate() {
+        database.execute("INSERT INTO messages(chatId,sender,timestamp,orderIndex,roleName,pluginExtensions) VALUES('history',?1,?2,?2,?3,?4)", vec![SqliteValue::Text((*sender).into()),SqliteValue::Integer(index as i64),SqliteValue::Text((*name).into()),SqliteValue::Text(extensions.to_string())]).unwrap();
+        database.execute("INSERT INTO message_variants(chatId,messageTimestamp,variantIndex,roleName,pluginExtensions) VALUES('history',?1,0,?2,?3)", vec![SqliteValue::Integer(index as i64),SqliteValue::Text((*name).into()),SqliteValue::Text(extensions.to_string())]).unwrap();
+    }
+    database.execute("INSERT INTO sync_sql_operations VALUES('history-op','test-device',1,'chat','chat','history','upsert','snapshot',1,8)", vec![]).unwrap();
+    for (synchronized, live) in [("sync_sql_message_rows","messages"),("sync_sql_message_variant_rows","message_variants")] {
+        let columns = database.queryRows(&format!("PRAGMA table_info({synchronized})"), vec![]).unwrap().into_iter()
+            .map(|row| row.get::<_,String>(1).unwrap()).filter(|name| name != "opId")
+            .map(|name| format!("\"{name}\"")).collect::<Vec<_>>().join(",");
+        database.execute(&format!("INSERT INTO {synchronized}(opId,{columns}) SELECT 'history-op',{columns} FROM {live}"), vec![]).unwrap();
+    }
+    for _ in 0..2 {
+        adoptCoreConfigurationRows(&database, writer).unwrap();
+        for (table, timestamp) in [("messages","timestamp"),("message_variants","messageTimestamp"),("sync_sql_message_rows","timestamp"),("sync_sql_message_variant_rows","messageTimestamp")] {
+            let rows = database.queryRows(&format!("SELECT pluginExtensions FROM {table} ORDER BY {timestamp}"), vec![]).unwrap();
+            assert_eq!(rows.len(), cases.len());
+            for (row, (_, name, before, repaired)) in rows.iter().zip(&cases) {
+                let actual: Value = serde_json::from_str(&row.get::<_,String>(0).unwrap()).unwrap();
+                let mut expected = before.clone();
+                expected.as_object_mut().unwrap().remove(LEGACY_BINDING_NAMESPACE);
+                if *repaired {
+                    expected[PLUGIN_ID] = json!({"participantId":"legacy"});
+                    expected["host.chat.identity"] = json!({"title":name,"avatarUri":"/app/character/avatar.png"});
+                }
+                assert_eq!(actual, expected, "wrong historical avatar in {table}");
+            }
+        }
+    }
+}
+
+/// Keeps ambiguous old names unassigned while exact participant IDs retain their own avatar.
+#[test]
+fn historical_avatar_adoption_requires_an_exact_author() {
+    let cards = vec![
+        json!({"id":"first","name":"Same name","avatarUri":"/app/first.png"}),
+        json!({"id":"second","name":"Same name","avatarUri":"/app/second.png"}),
+    ];
+    let mut unnamed = BTreeMap::new();
+    adoptMessageIdentity(&mut unnamed, &cards, Some("Same name")).unwrap();
+    assert!(unnamed.is_empty());
+    let mut identified = BTreeMap::from([(PLUGIN_ID.into(), json!({"participantId":"second"}))]);
+    adoptMessageIdentity(&mut identified, &cards, Some("Historical name")).unwrap();
+    assert_eq!(identified["host.chat.identity"], json!({"title":"Historical name","avatarUri":"/app/second.png"}));
 }
 
 /// Requires explicit global flags before any fresh import can publish business data.
@@ -343,6 +395,117 @@ fn imports_pages_and_reopens_without_replacing_completed_data() {
             .unwrap(),
         b"# Actual source profile\n"
     );
+}
+
+/// Builds a legacy group with explicit identities and unchanged source ordering metadata.
+fn group(id: &str, members: &[(&str, i32)]) -> CharacterGroupCard {
+    CharacterGroupCard {
+        id: id.to_string(),
+        name: "Original group".to_string(),
+        description: "Retained description".to_string(),
+        members: members
+            .iter()
+            .map(|(id, order)| GroupMemberConfig {
+                characterCardId: id.to_string(),
+                orderIndex: *order,
+            })
+            .collect(),
+        createdAt: 100,
+        updatedAt: 200,
+    }
+}
+
+/// Repairs only missing member identities and leaves the same snapshot unchanged on a second pass.
+#[test]
+fn removes_missing_group_members_without_changing_surviving_records() {
+    let mut source = data();
+    source.groups = vec![
+        group("mixed", &[("deleted", 0), ("legacy", 7), ("also-deleted", 9)]),
+        group("valid", &[("legacy", 3)]),
+    ];
+    let valid = source.groups[1].clone();
+    let mut expected = source.groups[0].clone();
+    expected.members = vec![expected.members[1].clone()];
+    let dropped = dropUnresolvableRecords(&mut source);
+    assert_eq!(dropped.groupMembers, 2);
+    assert_eq!(dropped.relationships, 0);
+    assert_eq!(dropped.documentChunks, 0);
+    assert_eq!(source.groups, vec![expected, valid]);
+    assert_eq!(dropUnresolvableRecords(&mut source), DroppedLegacyRecords::default());
+    validateMigrationData(&source).unwrap();
+}
+
+/// Imports both legacy formats without rebinding a deleted role to a same-name replacement.
+#[test]
+fn imports_groups_with_deleted_characters_from_both_legacy_sources() {
+    for source_id in ["operit2-v27", "operit1:test:100"] {
+        let fixture = Fixture::new();
+        let mut source = data();
+        source.cards[0].name = "Viya".to_string();
+        source.groups = vec![
+            group("012f6aeb", &[("c6292a6b-b552-4d83-8491-e9f7381b24e8", 0), ("legacy", 7)]),
+            group("fc7d15e6", &[("legacy", 3)]),
+        ];
+        source.active = Some(json!({"CharacterGroup":{"id":"012f6aeb"}}));
+        let expected_active = source.active.clone().unwrap();
+        let mut expected_groups = source.groups.clone();
+        expected_groups[0].members.remove(0);
+        fixture.writer().import(source_id, source).unwrap();
+        let reopened = CharacterPluginWriter::open(fixture.host.clone(), fixture.host.clone()).unwrap();
+        for expected in expected_groups {
+            let mut value = serde_json::to_value(&expected).unwrap();
+            value["themeConfigId"] = Value::Null;
+            assert_eq!(reopened.get("groups", &expected.id).unwrap().unwrap()["value"], value);
+        }
+        assert_eq!(reopened.list("cards").unwrap().len(), 1);
+        assert_eq!(reopened.get("cards", "legacy").unwrap().unwrap()["value"]["name"], "Viya");
+        let metadata = reopened.get("meta", "state").unwrap().unwrap()["value"].clone();
+        assert_eq!(metadata["active"], expected_active);
+        assert_eq!(metadata["migrationStatus"], "complete");
+        assert!(reopened.get("imports", source_id).unwrap().is_some());
+        reopened.import(source_id, CharacterMigrationData::default()).unwrap();
+        assert_eq!(reopened.list("groups").unwrap().len(), 2);
+        assert_eq!(reopened.get("groups", "012f6aeb").unwrap().unwrap()["value"]["members"],
+            json!([{"characterCardId":"legacy","orderIndex":7}]));
+    }
+}
+
+/// Retains a group's identity and active selection even when every former member was deleted.
+#[test]
+fn keeps_active_group_after_removing_all_deleted_members() {
+    let fixture = Fixture::new();
+    let mut source = data();
+    source.groups.push(group("empty", &[("deleted", 0)]));
+    source.active = Some(json!({"CharacterGroup":{"id":"empty"}}));
+    let mut expected = serde_json::to_value(&source.groups[0]).unwrap();
+    expected["members"] = json!([]);
+    expected["themeConfigId"] = Value::Null;
+    fixture.writer().import("operit2-v27", source).unwrap();
+    assert_eq!(fixture.writer().get("groups", "empty").unwrap().unwrap()["value"], expected);
+    assert_eq!(fixture.writer().get("meta", "state").unwrap().unwrap()["value"]["active"],
+        json!({"CharacterGroup":{"id":"empty"}}));
+}
+
+/// Keeps malformed identities and unrelated reference errors subject to validation before publication.
+#[test]
+fn group_reference_repair_does_not_hide_invalid_source_data() {
+    for malformed_member in [true, false] {
+        let fixture = Fixture::new();
+        let mut source = data();
+        let member_id = if malformed_member { "" } else { "deleted" };
+        source.groups.push(group("group", &[(member_id, 0)]));
+        let expected_error = if malformed_member {
+            "Imported group character is missing"
+        } else {
+            source.cards[0].attachedTagIds.push("".to_string());
+            "Missing imported tag: "
+        };
+        assert_eq!(fixture.writer().import("operit2-v27", source).unwrap_err(), expected_error);
+        assert!(fixture.writer().get("meta", "state").unwrap().is_none());
+        assert!(fixture.writer().get("imports", "operit2-v27").unwrap().is_none());
+        assert!(fixture.writer().list("groups").unwrap().is_empty());
+        assert!(fixture.writer().list("cards").unwrap().is_empty());
+    }
 }
 
 /// Keeps resolvable relationships and drops references to a legacy memory that was deleted without cleanup.
@@ -481,7 +644,7 @@ fn invalid_or_incomplete_import_never_authorizes_cleanup() {
             .unwrap(),
         b"source preferences"
     );
-    let mutation = fixture.writer().mutation("meta", "state", json!({"version":4,"active":{"CharacterCard":{"id":"legacy"}},"migrationStatus":"writing","migrationSource":"operit2-v27"})).unwrap();
+    let mutation = fixture.writer().mutation("meta", "state", json!({"version":1,"active":{"CharacterCard":{"id":"legacy"}},"migrationStatus":"writing","migrationSource":"operit2-v27"})).unwrap();
     fixture.writer().commit(vec![mutation]).unwrap();
     fixture.writer().import("operit2-v27", data()).unwrap();
     assert_eq!(
@@ -516,18 +679,18 @@ fn cleanup_rejects_outside_paths_before_any_deletion() {
     );
 }
 
-/// Resolves only exact original names and group identities, rejecting ambiguous old names.
+/// Resolves unique user-defined names and group IDs without requiring a particular card or choosing another target.
 #[test]
-fn resolves_binding_and_checks_cross_owner_resources() {
-    let cards = vec![json!({"id":"one","name":"Original","isDefault":true})];
+fn resolves_only_unique_legacy_binding_targets() {
+    let cards = vec![json!({"id":"one","name":"User renamed card","isDefault":true})];
     assert_eq!(
         resolveBinding(
             &cards,
             &[],
-            &json!({"characterCardName":"Original","characterGroupId":null})
+            &json!({"characterCardName":"User renamed card","characterGroupId":null})
         )
         .unwrap(),
-        json!({"version":1,"selection":"card:one"})
+        Some(json!({"version":1,"selection":"card:one"}))
     );
     assert_eq!(
         resolveBinding(
@@ -535,15 +698,64 @@ fn resolves_binding_and_checks_cross_owner_resources() {
             &[],
             &json!({"characterCardName":null,"characterGroupId":null})
         )
-        .unwrap()["selection"],
-        "card:one"
+        .unwrap(),
+        Some(json!({"version":1,"selection":"model:chat"}))
+    );
+    for name in ["Operit", "Deleted card"] {
+        assert_eq!(
+            resolveBinding(
+                &cards,
+                &[],
+                &json!({"characterCardName":name,"characterGroupId":null})
+            )
+            .unwrap(),
+            None
+        );
+    }
+    assert_eq!(
+        resolveBinding(&[], &[], &json!({"characterCardName":"Operit"})).unwrap(),
+        None
+    );
+    let duplicate = json!({"id":"two","name":"User renamed card","isDefault":false});
+    assert_eq!(
+        resolveBinding(
+            &[cards[0].clone(), duplicate],
+            &[],
+            &json!({"characterCardName":"User renamed card"})
+        )
+        .unwrap(),
+        None
+    );
+    let groups = vec![json!({"id":"group","name":"User group"})];
+    assert_eq!(
+        resolveBinding(
+            &cards,
+            &groups,
+            &json!({"characterCardName":"Operit","characterGroupId":"group"})
+        )
+        .unwrap(),
+        Some(json!({"version":1,"selection":"group:group"}))
+    );
+    assert_eq!(
+        resolveBinding(
+            &cards,
+            &groups,
+            &json!({"characterCardName":"User renamed card","characterGroupId":"deleted-group"})
+        )
+        .unwrap(),
+        None
     );
     assert!(resolveBinding(
-        &[cards[0].clone(), cards[0].clone()],
+        &[json!({"name":"Malformed imported card"})],
         &[],
-        &json!({"characterCardName":"Original"})
+        &json!({"characterCardName":"Malformed imported card"})
     )
     .is_err());
+}
+
+/// Rejects invalid paths while retaining exact cross-owner resource identities.
+#[test]
+fn checks_cross_owner_resources() {
     assert!(validateResourcePath("../outside").is_err());
     assert_eq!(
         legacyResourceStoragePath("/app/data/data/memory/characters/legacy/doc.txt").unwrap(),
@@ -845,6 +1057,7 @@ fn migrates_card_and_group_themes_without_changing_other_bindings() {
     source.active = Some(json!({"CharacterGroup":{"id":"group"}}));
     let mut expected_card = serde_json::to_value(&source.cards[0]).unwrap();
     expected_card["chatProviderId"] = Value::Null;
+    expected_card.as_object_mut().unwrap().remove("isDefault");
     let mut expected_group = serde_json::to_value(&source.groups[0]).unwrap();
     let expected_tag = serde_json::to_value(&source.tags[0]).unwrap();
     fixture.writer().import("operit2-v27", source).unwrap();
@@ -875,8 +1088,10 @@ fn migrates_card_and_group_themes_without_changing_other_bindings() {
         crate::data::preferences::ThemeConfigManager::ThemeConfigManager::new(fixture.host.clone());
     let configs = manager.list().unwrap();
     assert_eq!(configs.len(), 2);
-    let card_id = "legacy-theme:operit2-v27:cards:legacy";
-    let group_id = "legacy-theme:operit2-v27:groups:group";
+    let card_id = configs.iter().find(|config| config.name == expected_card["name"].as_str().unwrap()).unwrap().id.as_str();
+    let group_id = configs.iter().find(|config| config.name == expected_group["name"].as_str().unwrap()).unwrap().id.as_str();
+    uuid::Uuid::parse_str(card_id).unwrap();
+    uuid::Uuid::parse_str(group_id).unwrap();
     expected_card["themeConfigId"] = json!(card_id);
     expected_group["themeConfigId"] = json!(group_id);
     assert_eq!(
@@ -924,67 +1139,14 @@ fn migrates_card_and_group_themes_without_changing_other_bindings() {
             && !key.starts_with("character_group_theme_")));
 }
 
-/// Repairs the previously completed schema and leaves later role/configuration edits intact on reopen.
-#[test]
-fn upgrades_completed_core_theme_migration_once() {
-    let fixture = Fixture::new();
-    let mut source = data();
-    source
-        .cleanup_paths
-        .push(legacyMemoryRoot("character:legacy").unwrap());
-    fixture.writer().import("operit2-v27", source).unwrap();
-    let mut marker = fixture
-        .writer()
-        .get("imports", "operit2-v27")
-        .unwrap()
-        .unwrap()["value"]
-        .clone();
-    marker.as_object_mut().unwrap().remove("themeTargets");
-    marker["cleanupComplete"] = json!(true);
-    fixture
-        .writer()
-        .commit(vec![fixture
-            .writer()
-            .mutation("imports", "operit2-v27", marker)
-            .unwrap()])
-        .unwrap();
-    let preferences = themePreferences(&fixture);
-    preferences
-        .edit(|saved| {
-            saved.set(
-                &stringPreferencesKey("character_card_theme_legacy_theme_mode"),
-                "dark".to_string(),
-            )
-        })
-        .unwrap();
-    fixture.writer().migrateCoreThemes().unwrap();
-    let id = "legacy-theme:operit2-v27:cards:legacy";
-    let manager =
-        crate::data::preferences::ThemeConfigManager::ThemeConfigManager::new(fixture.host.clone());
-    manager
-        .rename(id.to_string(), "User renamed".to_string())
-        .unwrap();
-    fixture.writer().migrateCoreThemes().unwrap();
-    assert_eq!(manager.list().unwrap().len(), 1);
-    assert_eq!(manager.get(id.to_string()).unwrap().name, "User renamed");
-    assert_eq!(
-        fixture
-            .writer()
-            .get("imports", "operit2-v27:themes-v1")
-            .unwrap()
-            .unwrap()["value"]["complete"],
-        true
-    );
-}
-
 /// Stops on invalid source data without publishing a theme plan, changing a binding or deleting source bytes.
 #[test]
 fn invalid_legacy_theme_stops_before_publication_and_cleanup() {
     for (key, value) in [
         ("character_card_theme_legacy_theme_mode", "invalid"),
         ("character_card_theme_legacy_font_scale", "NaN"),
-        ("character_card_theme_legacy_unknown", "true"),
-        ("character_card_theme_missing_theme_mode", "dark"),
+        ("character_card_theme_legacy_input_image_scale", "NaN"),
+        ("character_card_theme_legacy_input_use_image", "not-a-boolean"),
     ] {
         let fixture = Fixture::new();
         fixture.writer().import("operit2-v27", data()).unwrap();
@@ -1011,7 +1173,7 @@ fn invalid_legacy_theme_stops_before_publication_and_cleanup() {
         );
         assert!(fixture
             .writer()
-            .get("imports", "operit2-v27:themes-v1")
+            .get("imports", "operit2-v27:themes")
             .unwrap()
             .is_none());
         assert!(
@@ -1019,42 +1181,6 @@ fn invalid_legacy_theme_stops_before_publication_and_cleanup() {
                 .is_null()
         );
     }
-}
-
-/// Preserves an explicit custom appearance while creating the independent role themes.
-#[test]
-fn completed_migration_upgrade_preserves_explicit_custom_appearance() {
-    let fixture = Fixture::new();
-    fixture.writer().import("operit2-v27", data()).unwrap();
-    let preferences = themePreferences(&fixture);
-    preferences
-        .edit(|saved| {
-            saved.set(
-                &stringPreferencesKey("active_theme_config_id"),
-                "null".to_string(),
-            );
-            saved.set(&stringPreferencesKey("theme_mode"), "light".to_string());
-            saved.set(
-                &stringPreferencesKey("character_card_theme_legacy_theme_mode"),
-                "dark".to_string(),
-            );
-        })
-        .unwrap();
-    fixture.writer().migrateCoreThemes().unwrap();
-    let saved = preferences.data().unwrap();
-    assert_eq!(
-        saved.get(&stringPreferencesKey("theme_mode")).unwrap(),
-        "light"
-    );
-    assert_eq!(
-        saved
-            .get(&stringPreferencesKey("active_theme_config_id"))
-            .unwrap(),
-        &Value::Null
-    );
-    let manager =
-        crate::data::preferences::ThemeConfigManager::ThemeConfigManager::new(fixture.host.clone());
-    assert_eq!(manager.list().unwrap()[0].snapshot["themeMode"], "dark");
 }
 
 /// Rejects conflicting independent bindings without altering source themes or user-owned configuration references.
@@ -1082,7 +1208,7 @@ fn theme_migration_never_replaces_a_saved_role_binding() {
     );
     assert!(fixture
         .writer()
-        .get("imports", "operit2-v27:themes-v1")
+        .get("imports", "operit2-v27:themes")
         .unwrap()
         .is_none());
 }
@@ -1138,8 +1264,9 @@ fn resumes_theme_adoption_after_configuration_conflict() {
         .unwrap();
     let manager =
         crate::data::preferences::ThemeConfigManager::ThemeConfigManager::new(fixture.host.clone());
+    let allocated = persistThemePlan(&fixture);
     let conflict = crate::data::preferences::ThemeConfigManager::ThemeConfig {
-        id: "legacy-theme:operit2-v27:cards:legacy".to_string(),
+        id: allocated,
         name: "Conflicting source".to_string(),
         snapshot: readLegacyCharacterThemeSnapshot(
             &operit_store::PreferencesDataStore::emptyPreferences(),
@@ -1161,7 +1288,7 @@ fn resumes_theme_adoption_after_configuration_conflict() {
     assert_eq!(
         fixture
             .writer()
-            .get("imports", "operit2-v27:themes-v1")
+            .get("imports", "operit2-v27:themes")
             .unwrap()
             .unwrap()["value"]["complete"],
         false
@@ -1205,8 +1332,9 @@ fn theme_cleanup_rejects_source_changed_during_interruption() {
         .unwrap();
     let manager =
         crate::data::preferences::ThemeConfigManager::ThemeConfigManager::new(fixture.host.clone());
+    let allocated = persistThemePlan(&fixture);
     let conflict = crate::data::preferences::ThemeConfigManager::ThemeConfig {
-        id: "legacy-theme:operit2-v27:cards:legacy".to_string(),
+        id: allocated,
         name: "Conflicting source".to_string(),
         snapshot: readLegacyCharacterThemeSnapshot(
             &operit_store::PreferencesDataStore::emptyPreferences(),
@@ -1248,7 +1376,7 @@ fn theme_cleanup_rejects_source_changed_during_interruption() {
     assert_eq!(
         fixture
             .writer()
-            .get("imports", "operit2-v27:themes-v1")
+            .get("imports", "operit2-v27:themes")
             .unwrap()
             .unwrap()["value"]["complete"],
         false
@@ -1421,7 +1549,7 @@ fn archive_theme_adoption_uses_source_snapshot_and_keeps_destination_preferences
     assert_eq!(
         fixture
             .writer()
-            .get("imports", "operit1:archive:1:themes-v1")
+            .get("imports", "operit1:archive:1:themes")
             .unwrap()
             .unwrap()["value"],
         json!({"complete":true})
@@ -1461,65 +1589,837 @@ fn retired_character_keys_do_not_discard_a_mixed_native_transaction() {
     assert!(isRetiredCharacterOperation(&operation));
 }
 
-/// Converts released SQL/object references and native inline settings, then removes all old payloads.
+/// Marks version-one source records for the TS upgrader without changing a current plugin schema.
 #[test]
-fn configuration_retirement_removes_sql_and_objects_without_rewriting_sync_history() {
+fn current_plugin_import_delegates_legacy_identity_upgrade_to_typescript() {
     let fixture = Fixture::new();
     let writer = fixture.writer();
-    writer.import("operit2-v27", data()).unwrap();
-    let database = SqliteStore::openWithHost(fixture.host.clone(), "runtime/retire-core.sqlite").unwrap();
-    operit_store::db::AppDatabase::createAllTables(&database).unwrap();
-    database.execute("INSERT INTO chats(id,title,createdAt,updatedAt) VALUES('chat','Chat',1,1)", vec![]).unwrap();
-    let relational = SqliteStore::openWithHost(fixture.host.clone(), &format!("{}/characters-relational.sqlite",writer.directory)).unwrap();
-    relational.execute("CREATE TABLE message_snapshots (_key TEXT PRIMARY KEY,profile__id TEXT,secret TEXT)",vec![]).unwrap();
-    relational.execute("CREATE TABLE message_snapshots_participants (_key TEXT PRIMARY KEY,secret TEXT)",vec![]).unwrap();
-    relational.execute("INSERT INTO message_snapshots VALUES('old-sql','legacy','Frozen SQL prompt')",vec![]).unwrap();
-    relational.execute("INSERT INTO _operit_tables VALUES('message_snapshots','{}')",vec![]).unwrap();
-    relational.execute("INSERT INTO _operit_versions VALUES('message_snapshots','old-sql',1,'device',1)",vec![]).unwrap();
-    writer.request(StorageRequest::Commit { handle:writer.handle.clone(), mutations: vec![StorageMutation {
-        collection:"message_snapshots".into(), key:"old-object".into(), value:json!({"profile":{"id":"legacy","introPrompt":"Frozen object prompt"}}),
-        deleted:false,check_version:true,expected_version:None,
-    }]}).unwrap();
-    for (time, extensions) in [
-        (1,json!({PLUGIN_ID:{"recordId":"old-sql","schemaVersion":1},"other.plugin":{"keep":true}})),
-        (2,json!({PLUGIN_ID:{"recordId":"old-object","schemaVersion":1},"host.chat.identity":{"participantId":"legacy"}})),
-        (3,json!({"host.chat.model":{"schemaVersion":1,"profile":{"id":"model:chat","introPrompt":"Frozen native prompt"}},"host.chat.identity":{"title":"Model title","avatarUri":null,"participantId":"model:chat"}})),
-    ] {
-        database.execute("INSERT INTO messages(chatId,sender,roleName,timestamp,orderIndex,pluginExtensions) VALUES('chat','ai','Keep text',?1,?1,?2)",vec![SqliteValue::Integer(time),SqliteValue::Text(extensions.to_string())]).unwrap();
-        database.execute("INSERT INTO message_variants(chatId,messageTimestamp,variantIndex,roleName,pluginExtensions) VALUES('chat',?1,2,'Keep variant',?2)",vec![SqliteValue::Integer(time),SqliteValue::Text(extensions.to_string())]).unwrap();
-    }
-    database.execute("INSERT INTO message_parts(chatId,messageTimestamp,variantIndex,partId,sequence,kind,content,attributesJson) VALUES('chat',1,0,'body',0,'markdown','Keep message body','{}')",vec![]).unwrap();
-    adoptCoreConfigurationRows(&database,writer).unwrap();
-    let body: String = database.queryOne("SELECT content FROM message_parts WHERE partId='body'",vec![]).unwrap().unwrap().get(0).unwrap();
-    assert_eq!(body,"Keep message body");
-    for table in ["messages","message_variants"] {
-        for row in database.queryRows(&format!("SELECT roleName,pluginExtensions FROM {table} ORDER BY rowid"),vec![]).unwrap() {
-            let content: String = row.get(0).unwrap(); assert!(content.starts_with("Keep"));
-            let extensions: Value = serde_json::from_str(&row.get::<_,String>(1).unwrap()).unwrap();
-            let native = extensions.get("host.chat.model").is_some();
-            let id = if native {"model:chat"} else {"legacy"};
-            let owner = if native {"host.chat.model"} else {PLUGIN_ID};
-            assert_eq!(extensions[owner],json!({"participantId":id}));
-            if native {
-                assert_eq!(extensions["host.chat.identity"],json!({"title":"Model title","avatarUri":null}));
-            } else {
-                assert!(extensions.get("host.chat.identity").is_none());
-            }
-            assert!(!extensions.to_string().contains("Frozen"));
-            if native { assert_eq!(extensions["host.chat.identity"]["title"],"Model title"); }
-        }
-    }
-    let object_store = SqliteStore::openWithHost(fixture.host.clone(),&format!("{}/characters.sqlite",writer.directory)).unwrap();
-    let original_journal = object_store.queryRows("SELECT payload FROM _operit_log WHERE payload LIKE '%Frozen object prompt%'",vec![]).unwrap();
-    assert_eq!(original_journal.len(),1);
-    for store in [&relational,&object_store] {
-        assert!(store.queryRows("SELECT name FROM sqlite_master WHERE name GLOB 'message_snapshots*'",vec![]).unwrap().is_empty());
-        for table in ["_operit_values","_operit_versions"] {
-            assert!(store.queryRows(&format!("SELECT key FROM {table} WHERE collection GLOB 'message_snapshots*'"),vec![]).unwrap().is_empty());
-        }
+    let metadata = json!({"version":1,"active":{"Model":{"id":"chat"}},
+        "memoryPreferences":{"userDescriptionEnabled":true,"autoUpdateEnabled":true}});
+    writer.commit(vec![writer.mutation("meta", "state", metadata).unwrap()]).unwrap();
+    writer.import("operit1-new-source", data()).unwrap();
+    let current = writer.get("meta", "state").unwrap().unwrap()["value"].clone();
+    assert_eq!(current["version"], 1);
+    assert_eq!(current["legacyImportPending"], true);
+    assert_eq!(current["migrationStatus"], "complete");
+    assert_eq!(writer.get("cards", "legacy").unwrap().unwrap()["value"]["id"], "legacy");
+    assert!(writer.get("owners", "character:legacy").unwrap().is_some());
+}
 
+/// Refuses source adoption while the TS migration owns the canonical record namespace.
+#[test]
+fn source_import_cannot_write_during_typescript_schema_upgrade() {
+    let fixture = Fixture::new();
+    let writer = fixture.writer();
+    let metadata = json!({"version":1,"active":{"Model":{"id":"chat"}},
+        "memoryPreferences":{"userDescriptionEnabled":true,"autoUpdateEnabled":true}});
+    writer.commit(vec![writer.mutation("meta", "state", metadata.clone()).unwrap()]).unwrap();
+    PreferencesDataStore::newWithStorage(fixture.host.clone(), format!("{}/migration.preferences.json", writer.directory))
+        .edit(|preferences| preferences.set(&stringPreferencesKey("plan"), json!({"from":"released","to":1}))).unwrap();
+    assert!(writer.import("blocked-source", data()).unwrap_err().contains("legacy import is incomplete"));
+    assert_eq!(writer.get("meta", "state").unwrap().unwrap()["value"], metadata);
+    assert!(writer.get("cards", "legacy").unwrap().is_none());
+}
+
+/// Publishes an interrupted theme plan before injecting a conflicting destination record.
+fn persistThemePlan(fixture: &Fixture) -> String {
+    let writer = fixture.writer();
+    let source = writer.get("imports", "operit2-v27").unwrap().unwrap();
+    let targets: Vec<(String, String)> = serde_json::from_value(source["value"]["themeTargets"].clone()).unwrap();
+    let plan = writer.planThemes(&themePreferences(fixture).data().unwrap(), &targets).unwrap();
+    let identity = plan.bindings[0].config.id.clone();
+    writer.commit(vec![writer.mutation("imports", "operit2-v27:themes", serde_json::to_value(plan).unwrap()).unwrap()]).unwrap();
+    identity
+}
+
+/// Preserves edited named themes retained alongside restored v27 role preferences.
+#[test]
+fn restored_legacy_theme_labels_do_not_occupy_new_theme_identities() {
+    let fixture = Fixture::new();
+    fixture.writer().import("operit2-v27", data()).unwrap();
+    let manager = ThemeConfigManager::new(fixture.host.clone());
+    let retained = ThemeConfig {
+        id: "legacy-theme:operit2-v27:cards:legacy".to_string(),
+        name: "Retained edited theme".to_string(),
+        snapshot: readLegacyCharacterThemeSnapshot(&operit_store::PreferencesDataStore::emptyPreferences(), "character_card_theme_legacy_").unwrap().0,
+        createdAt: 100,
+        updatedAt: 300,
+    };
+    manager.importLegacyConfigurations(&[retained.clone()], None).unwrap();
+    themePreferences(&fixture).edit(|saved| {
+        saved.set(&stringPreferencesKey("character_card_theme_legacy_theme_mode"), "dark".to_string());
+    }).unwrap();
+    fixture.writer().migrateCoreThemes().unwrap();
+    assert_eq!(manager.get(retained.id.clone()).unwrap(), retained);
+    let role = fixture.writer().get("cards", "legacy").unwrap().unwrap();
+    let migrated_id = role["value"]["themeConfigId"].as_str().unwrap();
+    uuid::Uuid::parse_str(migrated_id).unwrap();
+    assert_eq!(manager.get(migrated_id.to_string()).unwrap().snapshot["themeMode"], "dark");
+    let committed = manager.list().unwrap();
+    fixture.writer().migrateCoreThemes().unwrap();
+    assert_eq!(manager.list().unwrap(), committed);
+}
+
+/// Converts the documented fixed-mode alias and preserves explicit provider/model identities in persisted records.
+#[test]
+fn migrates_fixed_model_modes_without_erasing_provider_bindings() {
+    for mode in ["FIXED_CONFIG", "FIXED_MODEL"] {
+        let fixture = Fixture::new();
+        let mut source = data();
+        source.cards[0].chatModelBindingMode = mode.to_string();
+        source.cards[0].chatProviderId = Some("original-provider".to_string());
+        source.cards[0].chatModelId = Some("original-model".to_string());
+        fixture.writer().import("fixed-model-binding", source).unwrap();
+        let entry = fixture.writer().get("cards", "legacy").unwrap().unwrap();
+        assert_eq!(entry["value"]["chatModelBindingMode"], "FIXED_MODEL");
+        assert_eq!(entry["value"]["chatProviderId"], "original-provider");
+        assert_eq!(entry["value"]["chatModelId"], "original-model");
+        assert_eq!(entry["value"]["characterSetting"], "setting");
     }
-    adoptCoreConfigurationRows(&database,writer).unwrap();
-    assert!(writer.get("cards","legacy").unwrap().is_some());
-    assert!(writer.list("owners").unwrap().len()>0);
+}
+
+/// Retains incomplete and unknown source selections so the installed plugin can offer explicit rebinding.
+#[test]
+fn retains_unresolved_model_bindings_without_selecting_a_replacement() {
+    for mode in ["UNRECOGNIZED_MODE", "FIXED_CONFIG", "FIXED_MODEL"] {
+        let fixture = Fixture::new();
+        let mut source = data();
+        source.cards[0].chatModelBindingMode = mode.to_string();
+        fixture.writer().import("unresolved-model-binding", source).unwrap();
+        let entry = fixture.writer().get("cards", "legacy").unwrap().unwrap();
+        let expected = if mode == "FIXED_CONFIG" { "FIXED_MODEL" } else { mode };
+        assert_eq!(entry["value"]["chatModelBindingMode"], expected);
+        assert_eq!(entry["value"]["chatProviderId"], Value::Null);
+        assert_eq!(entry["value"]["chatModelId"], Value::Null);
+    }
+}
+
+/// Builds a real source prompt tag whose identity is independent of its display name.
+fn migrationTag(id: &str, name: &str) -> PromptTag {
+    PromptTag {
+        id: id.to_string(),
+        name: name.to_string(),
+        description: "Original tag description".to_string(),
+        promptContent: "Original prompt content".to_string(),
+        tagType: TagType::CUSTOM,
+        createdAt: 100,
+        updatedAt: 200,
+    }
+}
+
+/// Removes only missing tag attachments while retaining valid order, full card content and tag records.
+#[test]
+fn removes_missing_tag_attachments_without_changing_surviving_records() {
+    let mut source = data();
+    source.tags = vec![migrationTag("tag-one", "Same name"), migrationTag("tag-two", "Same name")];
+    source.cards[0].attachedTagIds = vec![
+        "deleted-tag".to_string(), "tag-two".to_string(),
+        "d5846b23-05bd-4f4f-984a-b097917454ce".to_string(), "tag-one".to_string(),
+    ];
+    let tags = source.tags.clone();
+    let mut expected = source.cards[0].clone();
+    expected.attachedTagIds = vec!["tag-two".to_string(), "tag-one".to_string()];
+    let dropped = dropUnresolvableRecords(&mut source);
+    assert_eq!(dropped.tagAttachments, 2);
+    assert_eq!(dropped.sharedMemoryMounts, 0);
+    assert_eq!(dropped.groupMembers, 0);
+    assert_eq!(dropped.relationships, 0);
+    assert_eq!(dropped.documentChunks, 0);
+    assert_eq!(source.cards, vec![expected]);
+    assert_eq!(source.tags, tags);
+    validateMigrationData(&source).unwrap();
+    assert_eq!(dropUnresolvableRecords(&mut source), DroppedLegacyRecords::default());
+}
+
+/// Imports dangling tag references from both released sources and confirms durable completion without invented tags.
+#[test]
+fn imports_cards_with_deleted_tags_from_both_legacy_sources() {
+    for source_id in ["operit1", "operit2-v27"] {
+        for retain_tag in [false, true] {
+            let fixture = Fixture::new();
+            let mut source = data();
+            source.cards[0].attachedTagIds = vec!["d5846b23-05bd-4f4f-984a-b097917454ce".to_string()];
+            if retain_tag {
+                source.tags.push(migrationTag("real-tag", "Original"));
+                source.cards[0].attachedTagIds.push("real-tag".to_string());
+            }
+            source.records.push(memory(1));
+            let mut expected = serde_json::to_value(&source.cards[0]).unwrap();
+            expected.as_object_mut().unwrap().remove("isDefault");
+            expected["themeConfigId"] = Value::Null;
+            expected["attachedTagIds"] = if retain_tag { json!(["real-tag"]) } else { json!([]) };
+            fixture.writer().import(source_id, source).unwrap();
+            let reopened = CharacterPluginWriter::open(fixture.host.clone(), fixture.host.clone()).unwrap();
+            assert_eq!(reopened.get("cards", "legacy").unwrap().unwrap()["value"], expected);
+            assert_eq!(reopened.list("tags").unwrap().len(), usize::from(retain_tag));
+            assert_eq!(reopened.list("memories").unwrap().len(), 1);
+            let metadata = reopened.get("meta", "state").unwrap().unwrap()["value"].clone();
+            assert_eq!(metadata["migrationStatus"], "complete");
+            assert_eq!(metadata["active"], json!({"CharacterCard":{"id":"legacy"}}));
+            assert!(reopened.get("imports", source_id).unwrap().is_some());
+            reopened.import(source_id, CharacterMigrationData::default()).unwrap();
+            assert_eq!(reopened.get("cards", "legacy").unwrap().unwrap()["value"], expected);
+        }
+    }
+}
+
+/// Prunes deleted mount targets while retaining permissions and the explicit primary library selection.
+#[test]
+fn removes_deleted_shared_memory_mounts_without_rebinding_primary_memory() {
+    for source_id in ["operit1", "operit2-v27"] {
+        let fixture = Fixture::new();
+        let mut source = data();
+        source.stores.push(SharedMemoryStore {
+            id: "real-store".to_string(), name: "Original store".to_string(), createdAt: 100, updatedAt: 200,
+        });
+        source.owners.push(ownerMetadata("shared:real-store", MemorySettings::default(), MemorySearchConfig::default()));
+        source.documents.insert("shared:real-store".to_string(), b"# Original shared profile".to_vec());
+        source.cards[0].memoryBindingMode = "SHARED".to_string();
+        source.cards[0].sharedMemoryId = Some("real-store".to_string());
+        source.cards[0].sharedMemoryMounts = vec![
+            CharacterSharedMemoryMount { sharedMemoryId: "deleted-store".to_string(), readable: true, writable: true },
+            CharacterSharedMemoryMount { sharedMemoryId: "real-store".to_string(), readable: true, writable: false },
+        ];
+        let mut expected_card = source.cards[0].clone();
+        expected_card.sharedMemoryMounts.remove(0);
+        let expected_store = source.stores[0].clone();
+        let dropped = dropUnresolvableRecords(&mut source);
+        assert_eq!(dropped.sharedMemoryMounts, 1);
+        assert_eq!(dropped.tagAttachments, 0);
+        assert_eq!(source.cards[0], expected_card);
+        assert_eq!(source.stores, vec![expected_store]);
+        validateMigrationData(&source).unwrap();
+        assert_eq!(dropUnresolvableRecords(&mut source), DroppedLegacyRecords::default());
+        // Exercise the import entry with the stale mount present so pruning must precede validation.
+        source.cards[0].sharedMemoryMounts.insert(0, CharacterSharedMemoryMount {
+            sharedMemoryId: "deleted-store".to_string(), readable: false, writable: true,
+        });
+        fixture.writer().import(source_id, source).unwrap();
+        let entry = fixture.writer().get("cards", "legacy").unwrap().unwrap();
+        assert_eq!(entry["value"]["sharedMemoryMounts"], serde_json::to_value(&expected_card.sharedMemoryMounts).unwrap());
+        assert_eq!(entry["value"]["memoryBindingMode"], "SHARED");
+        assert_eq!(entry["value"]["sharedMemoryId"], "real-store");
+        assert_eq!(fixture.writer().list("stores").unwrap().len(), 1);
+        assert!(fixture.writer().get("imports", source_id).unwrap().is_some());
+    }
+}
+
+/// Preserves malformed references for precise validation instead of treating them as deleted targets.
+#[test]
+fn dangling_reference_cleanup_does_not_discard_malformed_references() {
+    for tag_reference in [false, true] {
+        let fixture = Fixture::new();
+        let mut source = data();
+        if tag_reference {
+            source.cards[0].attachedTagIds = vec!["deleted-tag".to_string(), "".to_string()];
+        } else {
+            source.cards[0].sharedMemoryMounts.push(CharacterSharedMemoryMount {
+                sharedMemoryId: "".to_string(), readable: true, writable: false,
+            });
+        }
+        let expected = if tag_reference { "Missing imported tag: " } else { "Imported memory mount is missing" };
+        assert_eq!(fixture.writer().import("operit2-v27", source).unwrap_err(), expected);
+        assert!(fixture.writer().get("meta", "state").unwrap().is_none());
+        assert!(fixture.writer().get("imports", "operit2-v27").unwrap().is_none());
+        assert!(fixture.writer().list("cards").unwrap().is_empty());
+    }
+}
+
+/// Converts supported settings and collects every obsolete key for cleanup without a retired-field allowlist.
+#[test]
+fn legacy_role_theme_projects_supported_fields_and_collects_arbitrary_cleanup_inputs() {
+    for prefix in [
+        "character_card_theme_c9cd4098-e3f9-4979-9675-fb8b486b3f9e_",
+        "character_group_theme_legacy-group_",
+    ] {
+        let mut source = operit_store::PreferencesDataStore::emptyPreferences();
+        let entries = vec![
+            (
+                format!("{prefix}bubble_ai_bubble_liquid_glass"),
+                json!("not-a-boolean"),
+            ),
+            (
+                format!("{prefix}unknown_string"),
+                json!("{unparsed historical bytes}"),
+            ),
+            (format!("{prefix}unknown_boolean"), json!(true)),
+            (
+                format!("{prefix}unknown_object"),
+                json!({"version":99,"values":[null,17,"历史"]}),
+            ),
+            (format!("{prefix}unknown_null"), Value::Null),
+            (
+                format!("{prefix}unknown_integer"),
+                json!(9007199254740993_i64),
+            ),
+            (format!("{prefix}theme_mode"), json!("dark")),
+            (
+                format!("{prefix}bubble_ai_bubble_color"),
+                json!("4278190335"),
+            ),
+            (
+                format!("{prefix}input_rounded_corners_enabled"),
+                json!("false"),
+            ),
+            (format!("{prefix}input_image_scale"), json!("1.75")),
+            (
+                format!("{prefix}input_image_uri"),
+                json!("vfs:/original-input.png"),
+            ),
+        ];
+        for (key, value) in &entries {
+            source.set(&stringPreferencesKey(key), value.clone());
+        }
+        source.set(&stringPreferencesKey("unrelated"), "retained".to_string());
+        let (mut snapshot, retained_entries) =
+            readLegacyCharacterThemeSnapshot(&source, prefix).unwrap();
+        assert_eq!(snapshot["themeMode"], "dark");
+        assert_eq!(snapshot["bubbleAiBubbleColor"], json!(4278190335_u64));
+        assert_eq!(snapshot["inputRoundedCornersEnabled"], false);
+        assert_eq!(snapshot["inputImageScale"], json!(1.75));
+        assert_eq!(snapshot["inputImageUri"], "vfs:/original-input.png");
+        assert_eq!(
+            retained_entries.into_iter().collect::<BTreeMap<_, _>>(),
+            entries.into_iter().collect::<BTreeMap<_, _>>()
+        );
+        crate::data::preferences::ThemePreferenceSnapshot::validateThemePreferenceSnapshot(
+            &snapshot,
+        )
+        .unwrap();
+        // New snapshots still reject foreign fields; migration does not extend their schema.
+        snapshot.insert("unknownHistoricalSetting".to_string(), json!(true));
+        assert!(
+            crate::data::preferences::ThemePreferenceSnapshot::validateThemePreferenceSnapshot(
+                &snapshot
+            )
+            .is_err()
+        );
+        assert_eq!(
+            source.get(&stringPreferencesKey("unrelated")).unwrap(),
+            "retained"
+        );
+    }
+}
+
+/// Removes obsolete fields and temporary plans after verified adoption without duplicating themes on restart.
+#[test]
+fn migrates_supported_role_themes_and_discards_obsolete_fields() {
+    for (source_id, clean_preferences) in [
+        ("operit2-v27", true),
+        ("operit1:archive:no-cleanup", false),
+        ("operit1:archive:cleanup", true),
+    ] {
+        let mut fixture = Fixture::new();
+        let mut source = data();
+        source.groups.push(group("legacy-group", &[("legacy", 0)]));
+        fixture.writer().import(source_id, source).unwrap();
+        let preferences = themePreferences(&fixture);
+        let entries = vec![
+            (
+                "character_card_theme_legacy_bubble_ai_bubble_liquid_glass".to_string(),
+                json!("true"),
+            ),
+            (
+                "character_group_theme_legacy-group_bubble_user_bubble_liquid_glass".to_string(),
+                json!("false"),
+            ),
+            (
+                "character_card_theme_legacy_unknown".to_string(),
+                json!({"unparsed":"historical","items":[null,7]}),
+            ),
+            (
+                "character_group_theme_legacy-group_unknown".to_string(),
+                json!(9007199254740993_i64),
+            ),
+            (
+                "character_card_theme_legacy_theme_mode".to_string(),
+                json!("dark"),
+            ),
+            (
+                "character_group_theme_legacy-group_font_scale".to_string(),
+                json!("1.1"),
+            ),
+            (
+                "character_card_theme_legacy_input_use_image".to_string(),
+                json!("false"),
+            ),
+        ];
+        preferences
+            .edit(|saved| {
+                for (key, value) in &entries {
+                    saved.set(&stringPreferencesKey(key), value.clone());
+                }
+                saved.set(&stringPreferencesKey("unrelated"), "keep".to_string());
+            })
+            .unwrap();
+        let source_snapshot = preferences.data().unwrap();
+        let targets = vec![
+            ("cards".to_string(), "legacy".to_string()),
+            ("groups".to_string(), "legacy-group".to_string()),
+        ];
+        if source_id == "operit2-v27" {
+            fixture.writer().migrateCoreThemes().unwrap();
+        } else {
+            fixture
+                .writer()
+                .migrateThemes(source_id, &source_snapshot, &targets, clean_preferences)
+                .unwrap();
+        }
+        let card = fixture.writer().get("cards", "legacy").unwrap().unwrap()["value"].clone();
+        let group = fixture
+            .writer()
+            .get("groups", "legacy-group")
+            .unwrap()
+            .unwrap()["value"]
+            .clone();
+        let manager = ThemeConfigManager::new(fixture.host.clone());
+        let card_config = manager
+            .get(card["themeConfigId"].as_str().unwrap().to_string())
+            .unwrap();
+        let group_config = manager
+            .get(group["themeConfigId"].as_str().unwrap().to_string())
+            .unwrap();
+        assert_eq!(card_config.snapshot["themeMode"], "dark");
+        assert_eq!(card_config.snapshot["inputUseImage"], false);
+        assert_eq!(group_config.snapshot["fontScale"], json!(1.1));
+        let marker_key = format!("{source_id}:themes");
+        let retained = fixture
+            .writer()
+            .get("imports", &marker_key)
+            .unwrap()
+            .unwrap()["value"]
+            .clone();
+        assert_eq!(retained, json!({"complete":true}));
+        let saved = preferences.data().unwrap();
+        for (key, value) in &entries {
+            assert_eq!(
+                saved.get(&stringPreferencesKey(key)),
+                if clean_preferences { None } else { Some(value) }
+            );
+        }
+        assert_eq!(
+            saved.get(&stringPreferencesKey("unrelated")).unwrap(),
+            "keep"
+        );
+        let configs = manager.list().unwrap();
+        assert_eq!(configs.len(), 2);
+        fixture.writer.take();
+        fixture.writer =
+            Some(CharacterPluginWriter::open(fixture.host.clone(), fixture.host.clone()).unwrap());
+        if source_id == "operit2-v27" {
+            fixture.writer().migrateCoreThemes().unwrap();
+        } else {
+            fixture
+                .writer()
+                .migrateThemes(source_id, &saved, &targets, clean_preferences)
+                .unwrap();
+        }
+        assert_eq!(
+            fixture.writer().get("cards", "legacy").unwrap().unwrap()["value"],
+            card
+        );
+        assert_eq!(
+            fixture
+                .writer()
+                .get("groups", "legacy-group")
+                .unwrap()
+                .unwrap()["value"],
+            group
+        );
+        assert_eq!(
+            fixture
+                .writer()
+                .get("imports", &marker_key)
+                .unwrap()
+                .unwrap()["value"],
+            retained
+        );
+        assert_eq!(manager.list().unwrap(), configs);
+    }
+}
+
+/// Resumes interrupted cleanup with stable theme identities and deletes the temporary migration inputs on completion.
+#[test]
+fn resumes_theme_plan_across_cleanup_and_discards_temporary_inputs() {
+    for after_cleanup in [false, true] {
+        let mut fixture = Fixture::new();
+        fixture.writer().import("operit2-v27", data()).unwrap();
+        let preferences = themePreferences(&fixture);
+        preferences
+            .edit(|saved| {
+                saved.set(
+                    &stringPreferencesKey("character_card_theme_legacy_unknown"),
+                    json!({"bytes":"retained"}),
+                );
+                saved.set(
+                    &stringPreferencesKey("character_card_theme_legacy_theme_mode"),
+                    "dark".to_string(),
+                );
+            })
+            .unwrap();
+        let allocated = persistThemePlan(&fixture);
+        let pending = fixture
+            .writer()
+            .get("imports", "operit2-v27:themes")
+            .unwrap()
+            .unwrap()["value"]
+            .clone();
+        if after_cleanup {
+            fixture.writer().migrateCoreThemes().unwrap();
+            // Model a process exit after source cleanup but before the completion marker was written.
+            fixture
+                .writer()
+                .commit(vec![fixture
+                    .writer()
+                    .mutation("imports", "operit2-v27:themes", pending.clone())
+                    .unwrap()])
+                .unwrap();
+            assert!(!preferences
+                .data()
+                .unwrap()
+                .contains(&stringPreferencesKey("character_card_theme_legacy_unknown")));
+        }
+        fixture.writer.take();
+        fixture.writer =
+            Some(CharacterPluginWriter::open(fixture.host.clone(), fixture.host.clone()).unwrap());
+        fixture.writer().migrateCoreThemes().unwrap();
+        let retained = fixture
+            .writer()
+            .get("imports", "operit2-v27:themes")
+            .unwrap()
+            .unwrap()["value"]
+            .clone();
+        assert_eq!(retained, json!({"complete":true}));
+        assert_eq!(
+            fixture.writer().get("cards", "legacy").unwrap().unwrap()["value"]["themeConfigId"],
+            allocated
+        );
+        let manager = ThemeConfigManager::new(fixture.host.clone());
+        assert_eq!(manager.list().unwrap().len(), 1);
+        assert_eq!(
+            manager.get(allocated).unwrap().snapshot["themeMode"],
+            "dark"
+        );
+        assert!(!preferences
+            .data()
+            .unwrap()
+            .contains(&stringPreferencesKey("character_card_theme_legacy_unknown")));
+    }
+}
+
+/// Refuses to delete unverified historical values changed after planning and leaves cleanup unfinished.
+#[test]
+fn theme_cleanup_preserves_changed_unrecognized_source_values() {
+    let fixture = Fixture::new();
+    fixture.writer().import("operit2-v27", data()).unwrap();
+    let preferences = themePreferences(&fixture);
+    let key = stringPreferencesKey("character_card_theme_legacy_unknown");
+    preferences
+        .edit(|saved| saved.set(&key, json!({"version":1})))
+        .unwrap();
+    persistThemePlan(&fixture);
+    let pending = fixture
+        .writer()
+        .get("imports", "operit2-v27:themes")
+        .unwrap()
+        .unwrap()["value"]
+        .clone();
+    preferences
+        .edit(|saved| saved.set(&key, json!({"version":2})))
+        .unwrap();
+    let error = fixture.writer().migrateCoreThemes().unwrap_err();
+    assert_eq!(
+        error,
+        "Legacy theme source changed before cleanup: character_card_theme_legacy_unknown"
+    );
+    assert_eq!(
+        preferences.data().unwrap().get(&key).unwrap(),
+        &json!({"version":2})
+    );
+    assert_eq!(
+        fixture
+            .writer()
+            .get("imports", "operit2-v27:themes")
+            .unwrap()
+            .unwrap()["value"],
+        pending
+    );
+}
+
+/// Converts every declared color field using the same legacy scalar decoder for cards and groups.
+#[test]
+fn legacy_role_theme_colors_use_one_schema_conversion() {
+    use crate::data::preferences::ThemePreferenceSnapshot::{snapshotFields, FieldKind};
+    for prefix in [
+        "character_card_theme_legacy_",
+        "character_group_theme_legacy-group_",
+    ] {
+        for field in snapshotFields().filter(|field| matches!(field.kind, FieldKind::OptionalColor))
+        {
+            for (raw, expected) in [
+                (json!("-16711936"), json!(4278255360_u32)),
+                (json!(-1), json!(u32::MAX)),
+                (json!("2147483648"), json!(2147483648_u32)),
+                (json!("null"), Value::Null),
+                (Value::Null, Value::Null),
+            ] {
+                let mut source = operit_store::PreferencesDataStore::emptyPreferences();
+                source.set(
+                    &stringPreferencesKey(&format!("{prefix}{}", field.preference_key)),
+                    raw,
+                );
+                let snapshot = readLegacyCharacterThemeSnapshot(&source, prefix).unwrap().0;
+                assert_eq!(snapshot[field.json_key], expected, "{}", field.json_key);
+            }
+        }
+    }
+}
+
+/// Cleans empty and deleted role namespaces without publishing themes for those obsolete owners.
+#[test]
+fn orphaned_role_theme_preferences_do_not_abort_startup() {
+    let fixture = Fixture::new();
+    fixture.writer().import("operit2-v27", data()).unwrap();
+    let preferences = themePreferences(&fixture);
+    let keys = [
+        "character_card_theme__custom_ai_avatar_uri",
+        "character_group_theme__unknown",
+        "character_card_theme_deleted_theme_mode",
+        "character_group_theme_deleted_custom_primary_color",
+    ];
+    preferences
+        .edit(|saved| {
+            for key in keys {
+                saved.set(&stringPreferencesKey(key), json!({"obsolete":true}));
+            }
+            saved.set(
+                &stringPreferencesKey("character_card_theme_legacy_custom_primary_color"),
+                "-16711936".to_string(),
+            );
+            saved.set(&stringPreferencesKey("unrelated"), json!("keep"));
+        })
+        .unwrap();
+    fixture.writer().migrateCoreThemes().unwrap();
+    let saved = preferences.data().unwrap();
+    for key in keys {
+        assert!(saved.get(&stringPreferencesKey(key)).is_none());
+    }
+    assert!(saved
+        .get(&stringPreferencesKey(
+            "character_card_theme_legacy_custom_primary_color"
+        ))
+        .is_none());
+    assert_eq!(
+        saved.get(&stringPreferencesKey("unrelated")),
+        Some(&json!("keep"))
+    );
+    let manager = ThemeConfigManager::new(fixture.host.clone());
+    let themes = manager.list().unwrap();
+    assert_eq!(themes.len(), 1);
+    assert_eq!(
+        themes[0].snapshot["customPrimaryColor"],
+        json!(4278255360_u32)
+    );
+    assert_eq!(
+        fixture
+            .writer()
+            .get("imports", "operit2-v27:themes")
+            .unwrap()
+            .unwrap()["value"],
+        json!({"complete":true})
+    );
+    fixture.writer().migrateCoreThemes().unwrap();
+    assert_eq!(manager.list().unwrap(), themes);
+}
+
+/// Starts both role migrations from the October 8 writer's complete string map and verifies canonical data and cleanup.
+#[test]
+fn october_eighth_role_themes_migrate_before_startup_validation() {
+    let released: Value = serde_json::from_str(include_str!(
+        "../preferences/theme_preferences_oct08_fixture.json"
+    ))
+    .unwrap();
+    let expected: BTreeMap<String, Value> =
+        serde_json::from_value(released["snapshot"].clone()).unwrap();
+    let fixture = Fixture::new();
+    let mut source = data();
+    source.groups.push(CharacterGroupCard {
+        id: "group".to_string(),
+        name: "Group".to_string(),
+        description: String::new(),
+        members: vec![GroupMemberConfig {
+            characterCardId: "legacy".to_string(),
+            orderIndex: 0,
+        }],
+        createdAt: 100,
+        updatedAt: 200,
+    });
+    source.active = Some(json!({"CharacterGroup":{"id":"group"}}));
+    fixture.writer().import("operit2-v27", source).unwrap();
+    let mut saved = released["preferences"].clone();
+    for prefix in [
+        "character_card_theme_legacy_",
+        "character_group_theme_group_",
+    ] {
+        for (key, value) in released["preferences"].as_object().unwrap() {
+            if key != "custom_user_avatar_uri" {
+                saved[format!("{prefix}{key}")] = value.clone();
+            }
+        }
+    }
+    fixture
+        .host
+        .writeBytes(
+            operit_util::OperitPaths::USER_PREFERENCES_PATH,
+            &serde_json::to_vec(&saved).unwrap(),
+        )
+        .unwrap();
+    fixture.writer().migrateCoreThemes().unwrap();
+    let manager = ThemeConfigManager::new(fixture.host.clone());
+    let themes = manager.list().unwrap();
+    assert_eq!(themes.len(), 2);
+    for theme in &themes {
+        assert_eq!(theme.snapshot, expected);
+    }
+    for (collection, id) in [("cards", "legacy"), ("groups", "group")] {
+        let record = fixture.writer().get(collection, id).unwrap().unwrap();
+        assert!(themes
+            .iter()
+            .any(|theme| record["value"]["themeConfigId"] == theme.id));
+    }
+    assert_eq!(manager.getActive().unwrap().unwrap().name, "Group");
+    let migrated = themePreferences(&fixture).data().unwrap();
+    assert!(!migrated
+        .iterEntries()
+        .any(|(key, _)| key.starts_with("character_card_theme_")
+            || key.starts_with("character_group_theme_")));
+    assert_eq!(
+        fixture
+            .writer()
+            .get("imports", "operit2-v27:themes")
+            .unwrap()
+            .unwrap()["value"],
+        json!({"complete":true})
+    );
+    fixture.writer().migrateCoreThemes().unwrap();
+    assert_eq!(manager.list().unwrap(), themes);
+}
+
+/// Resumes an installed schema-three runtime after the released validator rejected a role color during startup.
+#[test]
+fn installed_startup_theme_failure_resumes_after_process_restart() {
+    use crate::data::preferences::ThemePreferenceSnapshot::validateThemePreferenceSnapshot;
+    let mut fixture = Fixture::new();
+    fixture.writer().import("operit2-v27", data()).unwrap();
+    let saved = json!({
+        "__operit_preferences_schema_version":3,
+        "character_card_theme_legacy_custom_primary_color":"-16711936",
+        "character_card_theme_legacy_theme_mode":"dark"
+    });
+    fixture
+        .host
+        .writeBytes(
+            operit_util::OperitPaths::USER_PREFERENCES_PATH,
+            &serde_json::to_vec(&saved).unwrap(),
+        )
+        .unwrap();
+    // The released reader decoded this stored string and then rejected the signed integer.
+    let mut old_snapshot: BTreeMap<String, Value> =
+        serde_json::from_str(include_str!("../preferences/theme_snapshot_fixture.json")).unwrap();
+    old_snapshot.insert("customPrimaryColor".into(), json!(-16711936));
+    let error = validateThemePreferenceSnapshot(&old_snapshot)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.starts_with("Invalid theme snapshot field customPrimaryColor:"),
+        "{error}"
+    );
+    assert!(fixture
+        .writer()
+        .get("imports", "operit2-v27:themes")
+        .unwrap()
+        .is_none());
+    let original_card = fixture.writer().get("cards", "legacy").unwrap().unwrap()["value"].clone();
+    fixture.writer.take();
+    fixture.writer =
+        Some(CharacterPluginWriter::open(fixture.host.clone(), fixture.host.clone()).unwrap());
+    fixture.writer().migrateCoreThemes().unwrap();
+    let manager = ThemeConfigManager::new(fixture.host.clone());
+    let themes = manager.list().unwrap();
+    assert_eq!(themes.len(), 1);
+    assert_eq!(
+        themes[0].snapshot["customPrimaryColor"],
+        json!(4278255360_u32)
+    );
+    assert_eq!(themes[0].snapshot["themeMode"], "dark");
+    let mut expected_card = original_card;
+    expected_card["themeConfigId"] = json!(themes[0].id);
+    assert_eq!(
+        fixture.writer().get("cards", "legacy").unwrap().unwrap()["value"],
+        expected_card
+    );
+    let saved = themePreferences(&fixture).data().unwrap();
+    assert_eq!(
+        saved.get(&stringPreferencesKey("__operit_preferences_schema_version")),
+        Some(&json!(4))
+    );
+    assert!(!saved
+        .iterEntries()
+        .any(|(key, _)| key.starts_with("character_card_theme_")));
+    assert_eq!(
+        fixture
+            .writer()
+            .get("imports", "operit2-v27:themes")
+            .unwrap()
+            .unwrap()["value"],
+        json!({"complete":true})
+    );
+    fixture.writer().migrateCoreThemes().unwrap();
+    assert_eq!(manager.list().unwrap(), themes);
+}
+
+/// Preserves missing primary libraries through both import sources without selecting another owner.
+#[test]
+fn retains_unresolved_primary_memory_bindings_without_blocking_import() {
+    for source_id in ["operit1", "operit2-v27"] {
+        for mode in ["SHARED", "CHARACTER"] {
+            for shared_id in [None, Some(""), Some("  "), Some("deleted-store")] {
+                let fixture = Fixture::new();
+                let mut source = data();
+                source.cards[0].memoryBindingMode = mode.to_string();
+                source.cards[0].sharedMemoryId = shared_id.map(str::to_string);
+                source.records.push(memory(1));
+                let mut expected = serde_json::to_value(&source.cards[0]).unwrap();
+                expected.as_object_mut().unwrap().remove("isDefault");
+                expected["themeConfigId"] = Value::Null;
+                assert_eq!(
+                    dropUnresolvableRecords(&mut source),
+                    DroppedLegacyRecords::default()
+                );
+                validateMigrationData(&source).unwrap();
+                fixture.writer().import(source_id, source).unwrap();
+                let writer =
+                    CharacterPluginWriter::open(fixture.host.clone(), fixture.host.clone())
+                        .unwrap();
+                assert_eq!(
+                    writer.get("cards", "legacy").unwrap().unwrap()["value"],
+                    expected
+                );
+                assert!(writer.list("stores").unwrap().is_empty());
+                assert_eq!(writer.list("owners").unwrap().len(), 1);
+                assert_eq!(writer.list("memories").unwrap().len(), 1);
+                assert_eq!(
+                    writer.get("meta", "state").unwrap().unwrap()["value"]["migrationStatus"],
+                    "complete"
+                );
+                writer
+                    .import(source_id, CharacterMigrationData::default())
+                    .unwrap();
+                assert_eq!(
+                    writer.get("cards", "legacy").unwrap().unwrap()["value"],
+                    expected
+                );
+            }
+        }
+    }
 }

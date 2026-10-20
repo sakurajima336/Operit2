@@ -2,6 +2,8 @@
 
 A manifest can fix its installation scope with `"installation_scope": "device"` or `"installation_scope": "space"`. The parser, package registration, bundled import, marketplace install, and scope moves enforce this declaration. A fixed-scope package cannot be installed or moved into the other scope. The package UI shows its required scope and hides scope moves.
 
+Older binaries registered every built-in package in device scope regardless of its manifest. When an upgrade leaves both a legacy device record and the required space record for the same built-in package, the package scan merges their enabled lists, members, subpackage states, and order into the space owner, then removes the stale device record. Only unambiguous built-in duplicates are healed; non-built-in owners and every other duplicate still fail with an ownership conflict instead of being merged.
+
 Device installations own local data. Space installations own synchronized data. Storage synchronization follows the registered directory owner; `Storage.open` does not accept a synchronization switch. Goal and Plan both require a space installation and keep their state in their own databases, independently of chat workspaces. Workspace records are not migrated.
 
 ## Implemented methods and decorators

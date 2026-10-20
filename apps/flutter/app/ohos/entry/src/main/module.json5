@@ -25,6 +25,7 @@
       },
       {
         "name": "EntryAbility",
+        "backgroundModes": ["taskKeeping"],
         "srcEntry": "./ets/entryability/EntryAbility.ets",
         "description": "$string:EntryAbility_desc",
         "icon": "$media:icon",
@@ -45,6 +46,7 @@
       }
     ],
     "requestPermissions": [
+      {"name": "ohos.permission.KEEP_BACKGROUND_RUNNING"},
       {"name" :  "ohos.permission.INTERNET"},
       {"name" :  "ohos.permission.GET_NETWORK_INFO"},
       {"name": "ohos.permission.kernel.ALLOW_WRITABLE_CODE_MEMORY"},

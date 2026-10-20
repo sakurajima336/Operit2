@@ -1,3 +1,4 @@
+import { characterModelBindingMode } from "./model-binding";
 import { parseChatSelection } from "./chat-bindings";
 import type { CharacterRepository } from "./canonical";
 import { configurationReadScope } from "./configuration-reads";
@@ -121,7 +122,7 @@ const characterFields: Fields = {
   advancedCustomPrompt: optional(text), marks: optional(text), chatModelBindingMode: optional(enumeration("FOLLOW_GLOBAL", "FIXED_MODEL")),
   chatModelId: optional(nullable(text)), chatProviderId: optional(nullable(text)), ttsConfigId: optional(nullable(text)), themeConfigId: optional(nullable(text)), memoryBindingMode: optional(enumeration("CHARACTER", "SHARED")),
   sharedMemoryId: optional(nullable(text)), sharedMemoryMounts: optional(array(mount)), toolAccessConfig: optional(toolAccess),
-  isDefault: optional(boolean), createdAt: optional(integer), updatedAt: optional(integer),
+  createdAt: optional(integer), updatedAt: optional(integer),
 };
 const groupFields: Fields = { name: optional(nonblank), description: optional(text), themeConfigId: optional(nullable(text)), members: optional(array(member)), createdAt: optional(integer), updatedAt: optional(integer) };
 const tagFields: Fields = { name: optional(nonblank), description: optional(text), promptContent: optional(text), tagType: optional(enumeration("TONE", "CHARACTER", "FUNCTION", "CUSTOM")), createdAt: optional(integer), updatedAt: optional(integer) };
@@ -316,7 +317,7 @@ async function chatParticipant(
   nonblank(card.name, "profile.name");
   const models = await service.listModels();
   let modelBinding: ChatConfigurationRequest["defaultModelBinding"];
-  switch (card.chatModelBindingMode) {
+  switch (characterModelBindingMode(card.chatModelBindingMode)) {
     case "FOLLOW_GLOBAL": modelBinding = { ...request.defaultModelBinding }; break;
     case "FIXED_MODEL": {
       nonblank(card.chatModelId, "profile.fixedModelId");
@@ -331,7 +332,7 @@ async function chatParticipant(
       modelBinding = { providerId: candidates[0].providerId, modelId: candidates[0].modelId };
       break;
     }
-    default: throw new Error("Invalid model binding mode: " + card.chatModelBindingMode);
+    default: throw new Error("角色卡“" + card.name + "”的模型绑定模式无效，请在角色卡设置中重新绑定模型：" + card.chatModelBindingMode);
   }
   const resolvedModels = models.filter(
     /** Requires the actual configured provider/model pair. */
