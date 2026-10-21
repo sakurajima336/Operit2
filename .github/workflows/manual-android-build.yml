@@ -177,6 +177,47 @@ jobs:
           "$env:APPDATA\Pub\Cache\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
           fvm install --skip-pub-get
 
+      # gitee.com 的匿名 git 克隆在 CI 上经常断流（RPC failed / early EOF），
+      # 而这三个插件只在 OHOS 上用到，Android 构建完全不引用，直接摘掉依赖。
+      - name: Drop OHOS-only gitee dependencies
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $path = 'apps/flutter/app/pubspec.yaml'
+          $lines = Get-Content $path
+          $out = New-Object System.Collections.Generic.List[string]
+          $targets = @('video_player_ohos','path_provider_ohos','url_launcher_ohos')
+          $i = 0
+          $removed = 0
+          while ($i -lt $lines.Count) {
+            $line = $lines[$i]
+            $name = $line.TrimEnd(':')
+            if ($targets -contains $name -and $line.StartsWith('  ') -and -not $line.StartsWith('    ')) {
+              $block = @($line)
+              $i++
+              while ($i -lt $lines.Count -and ($lines[$i].StartsWith('    ') -or $lines[$i].Trim() -eq '')) {
+                $block += $lines[$i]
+                $i++
+              }
+              if ($block -match 'gitee\.com') {
+                $out.Add("  # removed for CI (gitee clone unreliable): $name")
+                $removed++
+                continue
+              }
+              $block | ForEach-Object { $out.Add($_) }
+              continue
+            }
+            $out.Add($line)
+            $i++
+          }
+          if ($removed -gt 0) {
+            Set-Content -Path $path -Value $out -Encoding utf8
+            Write-Host "removed $removed gitee dependency block(s)"
+          } else {
+            Write-Host "no gitee dependency blocks present (upstream may have fixed it)"
+          }
+          Select-String -Path $path -Pattern 'gitee\.com' | ForEach-Object { Write-Host "remaining gitee ref: $($_.Line.Trim())" }
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
