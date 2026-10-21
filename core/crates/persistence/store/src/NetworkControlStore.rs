@@ -545,6 +545,12 @@ impl NetworkControlStore {
         if self.nodeLocalOnly { return self.projectControlOperationsUnlocked(std::slice::from_ref(operation)); }
         self.syncOperationStore
             .appendUnobservedOperation(operation)
+            .map_err(|error| error.to_string())?;
+        // Acknowledge the control sequence on its own clock so the same page is
+        // not exported on every synchronization pass. Business sequences stay
+        // behind this command so earlier chat or file operations are not lost.
+        self.syncOperationStore
+            .observeNetworkControlOperation(operation)
             .map_err(|error| error.to_string())
     }
 

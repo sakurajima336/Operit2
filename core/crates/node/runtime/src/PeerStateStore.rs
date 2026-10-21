@@ -416,7 +416,12 @@ impl PeerStateStore {
                 let mut current = supplied.clone();
                 if !replace {
                     if let Some(info) = persisted {
-                        current.model = info.model;
+                        // A user rename survives restarts, while the legacy
+                        // architecture-derived CLI label is replaced by the
+                        // supplied host-name label.
+                        if !LinkDeviceInfo::isLegacyCliAutoModel(&info.model) {
+                            current.model = info.model;
+                        }
                     }
                 }
                 let info = record
@@ -1225,6 +1230,36 @@ mod tests {
                 .preferences(RUNTIME_LINK_ACCESS_IDENTITY_PATH)
                 .unwrap()
                 .entries()
+        );
+    }
+
+    /// Replaces the legacy CLI auto label with the host-name label while keeping identity.
+    #[test]
+    fn startup_replaces_legacy_cli_auto_model_with_the_supplied_host_name() {
+        let store = PeerStateStore::new(Arc::new(Storage::default()));
+        let legacyModel = format!("server(cli)-{}", std::env::consts::ARCH);
+        writeRecord(
+            &store,
+            RUNTIME_LINK_ACCESS_IDENTITY_PATH,
+            "record",
+            serde_json::json!({
+                "deviceId": "stable-node",
+                "deviceInfo": { "platform": "linux", "model": legacyModel }
+            }),
+        );
+        let supplied = LinkDeviceInfo {
+            platform: "linux".into(),
+            model: "server(cli)-build-01".into(),
+            pairingIncarnation: None,
+        };
+        let current = store.deviceInfo(supplied, false).unwrap();
+        assert_eq!(current.model, "server(cli)-build-01");
+        let records = store
+            .records::<Value>(RUNTIME_LINK_ACCESS_IDENTITY_PATH)
+            .unwrap();
+        assert_eq!(
+            records["record"]["deviceInfo"]["model"],
+            "server(cli)-build-01"
         );
     }
 

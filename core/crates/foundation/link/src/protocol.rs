@@ -677,6 +677,37 @@ impl LinkDeviceInfo {
         deviceInfo
     }
 
+    /// Describes the local CLI device with its role and host name.
+    /// The host name replaces the architecture so otherwise identical servers
+    /// remain distinguishable in a device space.
+    #[allow(non_snake_case)]
+    pub fn nativeCliOnHost(role: &str, hostName: Option<&str>) -> Self {
+        let mut deviceInfo = Self::native();
+        let hostLabel = hostName
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(|name| {
+                name.chars()
+                    .filter(|character| !character.is_control())
+                    .take(64)
+                    .collect::<String>()
+            })
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| deviceInfo.model.clone());
+        deviceInfo.model = format!("{}(cli)-{}", role, hostLabel);
+        deviceInfo
+    }
+
+    /// Returns whether a persisted model is the legacy architecture-based CLI
+    /// label that a current CLI startup may replace with its host name.
+    pub fn isLegacyCliAutoModel(model: &str) -> bool {
+        let Some((role, architecture)) = model.split_once("(cli)-") else {
+            return false;
+        };
+        matches!(role, "client" | "server" | "session")
+            && architecture == std::env::consts::ARCH
+    }
+
     pub fn native() -> Self {
         Self {
             platform: std::env::consts::OS.to_string(),
@@ -1016,8 +1047,45 @@ impl std::fmt::Display for CoreLinkError {
 impl std::error::Error for CoreLinkError {}
 
 #[cfg(test)]
-mod internal_error_tests {
+mod protocol_tests {
     use super::CoreLinkError;
+    use super::LinkDeviceInfo;
+
+    /// Verifies CLI identities prefer the stable host label over the architecture.
+    #[test]
+    fn cli_device_name_prefers_the_host_name() {
+        let info = LinkDeviceInfo::nativeCliOnHost("server", Some("build-01"));
+        assert_eq!(info.model, "server(cli)-build-01");
+        assert_eq!(
+            info.displayName(),
+            format!("{}-server(cli)-build-01", info.platform)
+        );
+    }
+
+    /// Verifies a missing host label keeps the historical architecture fallback.
+    #[test]
+    fn cli_device_name_falls_back_to_the_architecture() {
+        let info = LinkDeviceInfo::nativeCliOnHost("client", Some("  \t "));
+        assert_eq!(
+            info.model,
+            format!("client(cli)-{}", std::env::consts::ARCH)
+        );
+    }
+
+    /// Verifies only the old auto-generated CLI labels are eligible for migration.
+    #[test]
+    fn legacy_cli_auto_models_are_recognized() {
+        let legacy = format!("server(cli)-{}", std::env::consts::ARCH);
+        assert!(LinkDeviceInfo::isLegacyCliAutoModel(&legacy));
+        assert!(LinkDeviceInfo::isLegacyCliAutoModel(&format!(
+            "client(cli)-{}",
+            std::env::consts::ARCH
+        )));
+        assert!(!LinkDeviceInfo::isLegacyCliAutoModel("server(cli)-other"));
+        assert!(!LinkDeviceInfo::isLegacyCliAutoModel("server(cli)-"));
+        assert!(!LinkDeviceInfo::isLegacyCliAutoModel("build-01"));
+        assert!(!LinkDeviceInfo::isLegacyCliAutoModel("other(cli)-x86_64"));
+    }
 
     #[test]
     fn internal_error_retains_message_and_caller_location() {

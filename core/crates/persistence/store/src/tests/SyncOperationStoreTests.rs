@@ -217,6 +217,51 @@ fn domain_reads_reuse_logs_and_observe_local_remote_and_unobserved_appends() {
     assert!(shared.operationsSince(&SyncClock::empty(), &domains, usize::MAX).unwrap().is_empty());
 }
 
+/// Acknowledging a control operation must not hide business operations that
+/// share the same origin and straddle its sequence.
+#[test]
+fn network_control_acknowledgement_preserves_business_sequences() {
+    use crate::NetworkControlStore::NETWORK_CONTROL_SYNC_DOMAIN;
+    let storage = Arc::new(MemoryStorageHost::default());
+    let store = SyncOperationStore::new(storage, "control-clock-test");
+    let domains = vec![
+        "chat".to_string(),
+        NETWORK_CONTROL_SYNC_DOMAIN.to_string(),
+    ];
+    let earlier = operationFromOrigin("peer", 5, "message", "earlier", "upsert", json!({}));
+    let mut control = operationFromOrigin("peer", 6, "command", "policy", "apply", json!({}));
+    control.domain = NETWORK_CONTROL_SYNC_DOMAIN.to_string();
+    let later = operationFromOrigin("peer", 7, "message", "later", "upsert", json!({}));
+    for operation in [&earlier, &control, &later] {
+        store.appendUnobservedOperation(operation).unwrap();
+    }
+    store.observeNetworkControlOperation(&control).unwrap();
+    // The acknowledged control page no longer exports, while both business
+    // operations on either side of its sequence still do.
+    let clock = store.localClock().unwrap();
+    let pending = store
+        .operationsSince(&clock, &domains, usize::MAX)
+        .unwrap();
+    assert_eq!(sequences(&pending), vec![5, 7]);
+    store.observeOperation(&earlier).unwrap();
+    let clock = store.localClock().unwrap();
+    let pending = store
+        .operationsSince(&clock, &domains, usize::MAX)
+        .unwrap();
+    assert_eq!(pending, vec![later.clone()]);
+    // Replaying the same control page stays idempotent.
+    store.observeNetworkControlOperation(&control).unwrap();
+    let clock = store.localClock().unwrap();
+    assert_eq!(
+        store
+            .operationsSince(&clock, &domains, usize::MAX)
+            .unwrap(),
+        vec![later]
+    );
+    // The acknowledgement is restricted to the control domain.
+    assert!(store.observeNetworkControlOperation(&earlier).is_err());
+}
+
 /// Verifies cached policy reads immediately apply revocation and match a fresh replay.
 #[test]
 fn policy_cache_observes_remote_revocation_and_matches_fresh_replay() {

@@ -23,7 +23,7 @@ use operit_util::RuntimeStoreRoot::{setDefaultRuntimeStoreRootConfig, RuntimeSto
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
@@ -197,7 +197,13 @@ pub(super) fn newTestJsEngineState(
     let runtime = testJavaScriptRuntimeHost()
         .createHostJavaScriptRuntime()
         .expect("test JavaScript runtime must start");
-    JsEngineState::newWithRuntime(runtime, executionHost, None, Arc::new(Mutex::new(None)))
+    JsEngineState::newWithRuntime(
+        runtime,
+        executionHost,
+        None,
+        Arc::new(Mutex::new(None)),
+        Arc::new(AtomicBool::new(true)),
+    )
         .expect("test JavaScript state must initialize")
 }
 
@@ -817,6 +823,47 @@ async fn async_tool_call_yields_to_ready_javascript_promise() {
         started.elapsed() < Duration::from_millis(100),
         "tool execution must not block the QuickJS worker"
     );
+    engine.destroy();
+}
+
+/// Verifies the promise-job pump resumes execution when a callback wake is lost.
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test(flavor = "current_thread")]
+async fn lost_callback_wake_is_recovered_by_the_promise_job_pump() {
+    ensure_test_runtime_root();
+    let engine = newTestJsEngine(Arc::new(TestPluginConfigExecutionHost::default()));
+    engine
+        .worker
+        .asyncCallbackWakeEnabled
+        .store(false, Ordering::Release);
+    let started = Instant::now();
+    let output = engine
+        .execute_script_function(
+            r#"
+                exports.wait = async function() {
+                    var slept = await Tools.System.sleep(20);
+                    return slept.sleptMs;
+                };
+            "#,
+            "wait",
+            &testParams(),
+            &BTreeMap::new(),
+            None,
+            true,
+            2,
+            None,
+        )
+        .await
+        .expect("the promise job pump must resume a lost callback wake");
+    assert_eq!(output.as_deref(), Some("20"));
+    assert!(
+        started.elapsed() < Duration::from_millis(1500),
+        "the pump must recover the lost wake well before the 2 second deadline"
+    );
+    engine
+        .worker
+        .asyncCallbackWakeEnabled
+        .store(true, Ordering::Release);
     engine.destroy();
 }
 

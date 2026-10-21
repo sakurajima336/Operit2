@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
+use crate::NetworkControlStore::NETWORK_CONTROL_SYNC_DOMAIN;
 use crate::PreferencesEncryption::PreferencesEncryption;
 use crate::RuntimeStorageHost::{defaultRuntimeStorageHost, runtimeStoragePath};
 use crate::RuntimeStorePaths::RuntimeStorePaths;
@@ -758,13 +759,27 @@ impl SyncOperationStore {
                         }
                         index.domainOperations.extend(domains);
                     }
-                    let minimumSequence = clock
-                        .sequenceFor(&deviceId)
-                        .max(exportFloors.get(&deviceId).copied().unwrap_or(0));
+                    let exportFloor = exportFloors.get(&deviceId).copied().unwrap_or(0);
+                    let businessMinimum = clock.sequenceFor(&deviceId).max(exportFloor);
+                    // Control operations acknowledge a separate per-origin floor so
+                    // relaying authority can never hide earlier or later business
+                    // operations from the same device.
+                    let controlMinimum = clock
+                        .sequenceFor(&networkControlClockKey(&deviceId))
+                        .max(exportFloor)
+                        .max(businessMinimum);
                     domainSet
                         .iter()
-                        .flat_map(|domain| index.domainOperations[domain].iter())
-                        .filter(|operation| operation.sequence > minimumSequence)
+                        .flat_map(|domain| {
+                            let minimumSequence = if domain == NETWORK_CONTROL_SYNC_DOMAIN {
+                                controlMinimum
+                            } else {
+                                businessMinimum
+                            };
+                            index.domainOperations[domain]
+                                .iter()
+                                .filter(move |operation| operation.sequence > minimumSequence)
+                        })
                         .cloned()
                         .collect::<Vec<_>>()
                 };
@@ -773,23 +788,22 @@ impl SyncOperationStore {
                 }
                 continue;
             }
+            let exportFloor = exportFloors.get(&deviceId).copied().unwrap_or(0);
+            let businessMinimum = clock.sequenceFor(&deviceId).max(exportFloor);
             let content = {
                 let mut operationLog = lockSyncState(&operationLog, "operation log")?;
                 self.loadOperationLogIndex(&deviceId, &mut operationLog)?;
-                let minimumSequence = clock
-                    .sequenceFor(&deviceId)
-                    .max(exportFloors.get(&deviceId).copied().unwrap_or(0));
-                if operationLog.highestSequence <= minimumSequence {
+                if operationLog.highestSequence <= businessMinimum {
                     String::new()
                 } else {
                     let startOffset = operationLog
                         .sequenceOffsets
-                        .range((minimumSequence + 1)..)
+                        .range((businessMinimum + 1)..)
                         .next()
                         .map(|(_, offset)| *offset)
                         .ok_or_else(|| {
                             SyncOperationStoreError::Message(format!(
-                                "sync operation log index is missing sequence after {minimumSequence} for {deviceId}"
+                                "sync operation log index is missing sequence after {businessMinimum} for {deviceId}"
                             ))
                         })?;
                     let byteLength = usize::try_from(
@@ -810,11 +824,17 @@ impl SyncOperationStore {
                     self.readOperationLogRange(&deviceId, startOffset, byteLength)?
                 }
             };
+            let controlMinimum = clock
+                .sequenceFor(&networkControlClockKey(&deviceId))
+                .max(exportFloors.get(&deviceId).copied().unwrap_or(0))
+                .max(businessMinimum);
             for operation in self.decodeOperationLog(&content)? {
-                if operation.sequence <= clock.sequenceFor(&deviceId) {
-                    continue;
-                }
-                if operation.sequence <= exportFloors.get(&deviceId).copied().unwrap_or(0) {
+                let minimumSequence = if operation.domain == NETWORK_CONTROL_SYNC_DOMAIN {
+                    controlMinimum
+                } else {
+                    businessMinimum
+                };
+                if operation.sequence <= minimumSequence {
                     continue;
                 }
                 if !domainSet.is_empty() && !domainSet.contains(&operation.domain) {
@@ -1057,6 +1077,34 @@ impl SyncOperationStore {
             return Ok(true);
         }
         Ok(false)
+    }
+
+    /// Acknowledges one received control operation on its own per-origin clock.
+    ///
+    /// Control operations are replayed into every peer but must not advance the
+    /// origin's business sequence: a later authority command would otherwise
+    /// hide an earlier chat or file operation that this device still needs.
+    pub fn observeNetworkControlOperation(
+        &self,
+        operation: &SyncOperation,
+    ) -> Result<(), SyncOperationStoreError> {
+        if operation.domain != NETWORK_CONTROL_SYNC_DOMAIN {
+            return Err(SyncOperationStoreError::Message(format!(
+                "network-control acknowledgement requires a {NETWORK_CONTROL_SYNC_DOMAIN} operation"
+            )));
+        }
+        let mut clockState = lockSyncState(&self.sharedState.clock, "clock")?;
+        let mut clock = self
+            .loadCachedJson(&mut clockState, &self.clockPath())?
+            .clone();
+        let key = networkControlClockKey(&operation.originDeviceId);
+        if operation.sequence <= clock.sequenceFor(&key) {
+            return Ok(());
+        }
+        clock.setSequence(key, operation.sequence);
+        self.writeLocalClockValue(&clock)?;
+        clockState.value = clock;
+        Ok(())
     }
 
     /// Reads one origin operation-log byte snapshot while its per-origin lock is held.
@@ -1856,6 +1904,12 @@ fn syncEntityVersionKey(operation: &SyncOperation) -> Result<String, SyncOperati
         operation.entityId.as_str(),
     ))
     .map_err(SyncOperationStoreError::from)
+}
+
+/// Builds the per-origin clock key that acknowledges network-control operations.
+#[allow(non_snake_case)]
+fn networkControlClockKey(originDeviceId: &str) -> String {
+    format!("{originDeviceId}:control")
 }
 
 #[cfg(test)]

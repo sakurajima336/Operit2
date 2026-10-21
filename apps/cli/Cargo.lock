@@ -2236,6 +2236,7 @@ dependencies = [
  "flate2",
  "fs2",
  "futures-util",
+ "gethostname",
  "hmac",
  "image",
  "mdns-sd",

@@ -42,6 +42,10 @@ use operit_util::AppLogger::AppLogger;
 
 const TAG: &str = "OperitQuickJsEngine";
 const TOOLPKG_SCRIPT_TIMEOUT_SECONDS: u64 = 60;
+/// Returns control to ready promise jobs even when a host-callback wake is lost.
+const PROMISE_JOB_PUMP_MILLIS: u64 = 200;
+/// Keeps owner-lifetime streaming calls responsive without a permanent fast timer.
+const OWNER_LIFETIME_PROMISE_JOB_PUMP_MILLIS: u64 = 1_000;
 type ToolPkgTextResources = BTreeMap<String, String>;
 
 #[allow(non_snake_case)]
@@ -76,6 +80,8 @@ struct JsEngineWorker {
     stateHandle: HostJavaScriptRuntimeStateHandle,
     alive: Arc<AtomicBool>,
     executionHost: Option<Arc<dyn JsExecutionHost>>,
+    #[cfg(test)]
+    asyncCallbackWakeEnabled: Arc<AtomicBool>,
 }
 
 enum JsAsyncCallback {
@@ -269,9 +275,12 @@ struct JsEngineState {
     composeDslTextResources: Option<Arc<ToolPkgTextResources>>,
     detachedCallContexts: BTreeMap<String, JsCallContext>,
     pendingScriptExecutions: BTreeMap<String, JsPendingScriptExecution>,
+    promiseJobPumpScheduled: Arc<AtomicBool>,
     registeredScriptSources: BTreeMap<String, String>,
     jsEnvironmentInitialized: bool,
     packageBinding: Arc<OnceLock<JsPackageBinding>>,
+    #[cfg(test)]
+    asyncCallbackWakeEnabled: Arc<AtomicBool>,
 }
 
 impl JsEngineWorker {
@@ -293,6 +302,10 @@ impl JsEngineWorker {
         let workerExecutionHost = executionHost.clone();
         let backgroundWake = Arc::new(Mutex::new(None));
         let backgroundWakeForState = backgroundWake.clone();
+        #[cfg(test)]
+        let asyncCallbackWakeEnabled = Arc::new(AtomicBool::new(true));
+        #[cfg(test)]
+        let asyncCallbackWakeEnabledForState = asyncCallbackWakeEnabled.clone();
         let stateHandle = runtimeHost
             .createHostJavaScriptRuntimeState(
                 "OperitQuickJsEngine",
@@ -303,6 +316,8 @@ impl JsEngineWorker {
                         executionHost,
                         toolPkgContext,
                         backgroundWakeForState,
+                        #[cfg(test)]
+                        asyncCallbackWakeEnabledForState,
                     )
                     .map_err(HostError::new)?;
                     Ok(Box::new(state))
@@ -370,6 +385,8 @@ impl JsEngineWorker {
             stateHandle,
             alive,
             executionHost: workerExecutionHost,
+            #[cfg(test)]
+            asyncCallbackWakeEnabled,
         })
     }
 
@@ -1097,6 +1114,7 @@ impl JsEngineState {
         executionHost: Option<Arc<dyn JsExecutionHost>>,
         toolPkgContext: Option<ToolPkgExecutionContext>,
         backgroundWake: Arc<Mutex<Option<JsBackgroundWake>>>,
+        #[cfg(test)] asyncCallbackWakeEnabled: Arc<AtomicBool>,
     ) -> Result<Self, String> {
         // JsEngineWorker::new already validates and binds this host before
         // creating the runtime state. Keep that same owner for worker requests
@@ -1119,9 +1137,12 @@ impl JsEngineState {
             composeDslTextResources: None,
             detachedCallContexts: BTreeMap::new(),
             pendingScriptExecutions: BTreeMap::new(),
+            promiseJobPumpScheduled: Arc::new(AtomicBool::new(false)),
             registeredScriptSources: BTreeMap::new(),
             jsEnvironmentInitialized: false,
             packageBinding,
+            #[cfg(test)]
+            asyncCallbackWakeEnabled,
         };
         state.registerHostBindings()?;
         // Trusted SDK initialization belongs to runtime creation, not a caller's
@@ -1686,7 +1707,56 @@ impl JsEngineState {
             }
         }
         clearThreadLocalCallState();
+        self.armPromiseJobPump();
         advanced
+    }
+
+    /// Re-arms a slow pump while active executions still own ready or pending promise jobs.
+    #[allow(non_snake_case)]
+    fn armPromiseJobPump(&mut self) {
+        if self.pendingScriptExecutions.is_empty() {
+            return;
+        }
+        // Finite requests must finish before their deadline; owner-lifetime streams
+        // only need a safety net because their host pushes normally wake the runtime.
+        let delayMillis = if self
+            .pendingScriptExecutions
+            .values()
+            .any(|pending| pending.deadlineMillis.is_some())
+        {
+            PROMISE_JOB_PUMP_MILLIS
+        } else {
+            OWNER_LIFETIME_PROMISE_JOB_PUMP_MILLIS
+        };
+        if self.promiseJobPumpScheduled.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let wake = self
+            .backgroundWake
+            .lock()
+            .expect("background wake mutex poisoned")
+            .clone();
+        let Some(wake) = wake else {
+            self.promiseJobPumpScheduled.store(false, Ordering::Release);
+            return;
+        };
+        let pumpScheduled = self.promiseJobPumpScheduled.clone();
+        let scheduled = defaultHostRuntimeTaskSchedulerHost()
+            .scheduleDelayedHostRuntimeTask(
+                "operit-js-promise-job-pump",
+                delayMillis,
+                Box::new(move || {
+                    pumpScheduled.store(false, Ordering::Release);
+                    wake();
+                }),
+            );
+        if let Err(error) = scheduled {
+            self.promiseJobPumpScheduled.store(false, Ordering::Release);
+            AppLogger::e(
+                TAG,
+                &format!("schedule JavaScript promise job pump failed: {error}"),
+            );
+        }
     }
 
     /// Advances detached JavaScript calls after their original request has returned.
@@ -1957,8 +2027,14 @@ impl JsEngineState {
 
         let asyncCallbackSender = self.asyncCallbackSender.clone();
         let backgroundWake = self.backgroundWake.clone();
+        #[cfg(test)]
+        let asyncCallbackWakeEnabled = self.asyncCallbackWakeEnabled.clone();
         let asyncCallbackSink: JsAsyncCallbackSink = Arc::new(move |callback| {
             let _ = asyncCallbackSender.send(callback);
+            #[cfg(test)]
+            if !asyncCallbackWakeEnabled.load(Ordering::Acquire) {
+                return;
+            }
             if let Some(wake) = backgroundWake
                 .lock()
                 .expect("background wake mutex poisoned")

@@ -63,6 +63,18 @@ pub(crate) fn create_cli_host_manager() -> HostManager {
     create_cli_host_manager_with_toast_host(Arc::new(console_toast))
 }
 
+/// Returns the OS host name so CLI Cores on different machines stay distinguishable.
+#[allow(non_snake_case)]
+fn cliHostName() -> Option<String> {
+    gethostname::gethostname().into_string().ok()
+}
+
+/// Builds the CLI presentation identity used by pairing and the device space.
+#[allow(non_snake_case)]
+fn cliDeviceInfo(role: &str) -> LinkDeviceInfo {
+    LinkDeviceInfo::nativeCliOnHost(role, cliHostName().as_deref())
+}
+
 /// Writes one non-TUI toast into the active CLI terminal.
 fn console_toast(message: &str) -> HostResult<()> {
     eprintln!("{message}");
@@ -216,7 +228,7 @@ pub(crate) async fn create_cli_core_application(
 ) -> Result<CoreApplication, String> {
     let mut config = CoreApplicationConfig::new(
         create_cli_host_manager(),
-        LinkDeviceInfo::nativeCli(deviceName),
+        cliDeviceInfo(deviceName),
     );
     // A short-lived CLI Core running next to the daemon/TUI must not claim
     // the persistent Space sync worker as well.
@@ -239,7 +251,7 @@ pub(crate) async fn create_cli_core_application_with_node_services(
     services: Option<operit_node_runtime::NodeServices::NodeServices>,
 ) -> Result<CoreApplication, String> {
     let mut config = CoreApplicationConfig::new(
-        create_cli_host_manager(), LinkDeviceInfo::nativeCli(deviceName),
+        create_cli_host_manager(), cliDeviceInfo(deviceName),
     ).withSpaceSync(false);
     if let Some(services) = services { config = config.withNodeServices(services); }
     CoreApplication::start(config).await
@@ -253,7 +265,7 @@ pub(crate) async fn create_cli_core_application_configured(
     CoreApplication::start(
         CoreApplicationConfig::new(
             create_cli_host_manager(),
-            LinkDeviceInfo::nativeCli(deviceName),
+            cliDeviceInfo(deviceName),
         )
         .withLocalClientConfigurator(configurator),
     )
@@ -269,7 +281,7 @@ pub(crate) async fn create_cli_core_application_configured_with_toast_host(
     CoreApplication::start(
         CoreApplicationConfig::new(
             create_cli_host_manager_with_toast_host(toastHost),
-            LinkDeviceInfo::nativeCli(deviceName),
+            cliDeviceInfo(deviceName),
         )
         .withLocalClientConfigurator(configurator),
     )
