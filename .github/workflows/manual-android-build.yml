@@ -73,21 +73,19 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: operit2-android-runtime
+          # 上传两个目录，保留相对结构，便于下游解压到 src/main
           path: |
-            apps/flutter/app/android/app/src/main/jniLibs/arm64-v8a/libbash.so
-            apps/flutter/app/android/app/src/main/jniLibs/arm64-v8a/liboperit_busybox.so
-            apps/flutter/app/android/app/src/main/jniLibs/arm64-v8a/liboperit_loader.so
-            apps/flutter/app/android/app/src/main/jniLibs/arm64-v8a/liboperit_proot.so
-            apps/flutter/app/android/app/src/main/assets/android-runtime/arm64-v8a/rootfs.tar.gz.bin
-            apps/flutter/app/android/app/src/main/assets/android-runtime/arm64-v8a/rootfs.tar.gz.bin.sha256
+            apps/flutter/app/android/app/src/main/jniLibs/arm64-v8a
+            apps/flutter/app/android/app/src/main/assets/android-runtime/arm64-v8a
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 90
 
   # ── 2. 编译 APK ─────────────────────────────────────────────────────────
   build:
     needs: runtime
-    # runtime 被跳过（skip_runtime_build=true）时 needs 为 skipped，这里仍要跑
-    if: ${{ always() && (needs.runtime.result == 'success' || needs.runtime.result == 'skipped') }}
+    # runtime 被跳过时 needs 为 skipped，用 always() 保证 build 仍然执行，
+    # 真正的失败由 job 内的步骤自己报错
+    if: ${{ always() && needs.runtime.result != 'failure' && needs.runtime.result != 'cancelled' }}
     runs-on: windows-2025
     timeout-minutes: 120
     steps:
@@ -100,7 +98,7 @@ jobs:
           name: operit2-android-runtime
           path: apps/flutter/app/android/app/src/main
 
-      # skip_runtime_build=true 时，复用最近一次成功产出 runtime 的运行
+      # skip_runtime_build=true 时，复用任意 workflow 最近一次成功产出的 runtime
       - name: Fetch latest runtime artifact
         if: ${{ inputs.skip_runtime_build }}
         shell: pwsh
@@ -109,31 +107,50 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json' }
+          $api = "https://api.github.com/repos/${{ github.repository }}"
 
-          $runs = Invoke-RestMethod -Headers $headers `
-            -Uri "https://api.github.com/repos/${{ github.repository }}/actions/workflows/manual-android-build.yml/runs?per_page=30"
-          $candidate = $runs.workflow_runs | Where-Object {
-            $_.conclusion -eq 'success' -and $_.id -ne ${{ github.run_id }}
-          } | Select-Object -First 1
-          if (-not $candidate) { throw "No previous successful run found to reuse the runtime from" }
-          Write-Host "reusing runtime from run $($candidate.id) ($($candidate.head_sha.Substring(0,8)))"
-
-          $arts = Invoke-RestMethod -Headers $headers `
-            -Uri "https://api.github.com/repos/${{ github.repository }}/actions/runs/$($candidate.id)/artifacts"
-          $artifact = $arts.artifacts | Where-Object { $_.name -eq 'operit2-android-runtime' } | Select-Object -First 1
-          if (-not $artifact) { throw "That run has no operit2-android-runtime artifact (expired?)" }
+          # 跨所有 workflow 找最近一个带 operit2-android-runtime 的成功运行
+          $candidate = $null
+          $artifact = $null
+          $runs = Invoke-RestMethod -Headers $headers -Uri "$api/actions/runs?per_page=50&status=success"
+          foreach ($run in $runs.workflow_runs) {
+            if ($run.id -eq ${{ github.run_id }}) { continue }
+            $arts = Invoke-RestMethod -Headers $headers -Uri "$api/actions/runs/$($run.id)/artifacts"
+            $hit = $arts.artifacts | Where-Object { $_.name -eq 'operit2-android-runtime' } | Select-Object -First 1
+            if ($hit) { $candidate = $run; $artifact = $hit; break }
+          }
+          if (-not $candidate) {
+            throw "No previous run with an operit2-android-runtime artifact found. Re-run with skip_runtime_build=false."
+          }
+          Write-Host "reusing runtime from run $($candidate.id) ($($candidate.name), $($candidate.head_sha.Substring(0,8)))"
 
           $zip = Join-Path $env:RUNNER_TEMP 'runtime.zip'
-          Invoke-WebRequest -Headers $headers -OutFile $zip `
-            -Uri "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/$($artifact.id)/zip"
-          Expand-Archive -Path $zip -DestinationPath 'apps/flutter/app/android/app/src/main' -Force
+          Invoke-WebRequest -Headers $headers -OutFile $zip -Uri "$api/actions/artifacts/$($artifact.id)/zip"
+          $stage = Join-Path $env:RUNNER_TEMP 'runtime-stage'
+          if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
+          Expand-Archive -Path $zip -DestinationPath $stage -Force
 
-          # artifact 里的相对路径与本地构建产物一致
-          $probe = 'apps/flutter/app/android/app/src/main/jniLibs/arm64-v8a/libbash.so'
-          if (-not (Test-Path $probe)) {
-            Get-ChildItem -Recurse 'apps/flutter/app/android/app/src/main' | Select-Object -First 20 | ForEach-Object { Write-Host $_.FullName }
-            throw "runtime artifact layout unexpected: $probe missing"
+          # artifact 里的相对结构不确定（upload-artifact 会按最长公共前缀裁剪），
+          # 这里直接按文件名定位后拷到目标目录
+          $main = 'apps/flutter/app/android/app/src/main'
+          $jni = Join-Path $main 'jniLibs/arm64-v8a'
+          $assets = Join-Path $main 'assets/android-runtime/arm64-v8a'
+          New-Item -ItemType Directory -Force -Path $jni, $assets | Out-Null
+
+          $wantJni = @('libbash.so','liboperit_busybox.so','liboperit_loader.so','liboperit_proot.so')
+          $wantAssets = @('rootfs.tar.gz.bin','rootfs.tar.gz.bin.sha256')
+          foreach ($name in $wantJni) {
+            $src = Get-ChildItem -Recurse -Path $stage -Filter $name | Select-Object -First 1
+            if (-not $src) { throw "artifact missing $name" }
+            Copy-Item $src.FullName (Join-Path $jni $name) -Force
           }
+          foreach ($name in $wantAssets) {
+            $src = Get-ChildItem -Recurse -Path $stage -Filter $name | Select-Object -First 1
+            if (-not $src) { throw "artifact missing $name" }
+            Copy-Item $src.FullName (Join-Path $assets $name) -Force
+          }
+
+          Get-ChildItem $jni, $assets | ForEach-Object { Write-Host ("restored " + $_.Name + " (" + $_.Length + " B)") }
           Write-Host "runtime restored"
 
       - name: Install bootstrap Dart
