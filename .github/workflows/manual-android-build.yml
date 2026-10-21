@@ -1,0 +1,285 @@
+name: Manual Android Build
+
+# 手动编译：Actions 页面点 Run workflow，可选 debug / release / 两者。
+# 不依赖任何本地脚本，也不需要上游 workflow 里的 fvm 安装步骤之外的东西。
+on:
+  workflow_dispatch:
+    inputs:
+      build_mode:
+        description: '编译类型'
+        required: true
+        default: 'both'
+        type: choice
+        options:
+          - both
+          - release
+          - debug
+      split_per_abi:
+        description: 'release 按 ABI 分包（只编 arm64-v8a）'
+        required: true
+        default: true
+        type: boolean
+      skip_runtime_build:
+        description: '跳过原生运行时编译（已有 artifact 时勾选，可省 20 分钟）'
+        required: true
+        default: false
+        type: boolean
+      upload_retention_days:
+        description: '产物保留天数'
+        required: false
+        default: '14'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: manual-android-build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUSTFLAGS: -Awarnings
+  RUST_TOOLCHAIN_VERSION: 1.95.0
+  FVM_VERSION: 4.3.0
+
+jobs:
+  # ── 1. 原生运行时（busybox / proot / bash / loader + alpine rootfs）───────
+  runtime:
+    if: ${{ !inputs.skip_runtime_build }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bison build-essential bzip2 ca-certificates \
+            curl diffutils flex gawk gzip patch pkg-config tar unzip xz-utils
+
+      - name: Fetch Android runtime sources
+        shell: pwsh
+        run: pwsh -NoProfile -File tools/android-runtime/fetch_sources.ps1
+
+      - name: Fetch Android NDK
+        run: bash tools/android-runtime/fetch_ndk_wsl.sh
+
+      - name: Build terminal runtime
+        run: |
+          export ANDROID_NDK_HOME="$HOME/.cache/operit-android-runtime/android-ndk-r29-beta4"
+          bash tools/android-runtime/build_android_tools_wsl.sh
+          bash tools/android-runtime/build_alpine_rootfs_wsl.sh
+
+      - name: Upload runtime
+        uses: actions/upload-artifact@v4
+        with:
+          name: operit2-android-runtime
+          path: |
+            apps/flutter/app/android/app/src/main/jniLibs/arm64-v8a/libbash.so
+            apps/flutter/app/android/app/src/main/jniLibs/arm64-v8a/liboperit_busybox.so
+            apps/flutter/app/android/app/src/main/jniLibs/arm64-v8a/liboperit_loader.so
+            apps/flutter/app/android/app/src/main/jniLibs/arm64-v8a/liboperit_proot.so
+            apps/flutter/app/android/app/src/main/assets/android-runtime/arm64-v8a/rootfs.tar.gz.bin
+            apps/flutter/app/android/app/src/main/assets/android-runtime/arm64-v8a/rootfs.tar.gz.bin.sha256
+          if-no-files-found: error
+          retention-days: 1
+
+  # ── 2. 编译 APK ─────────────────────────────────────────────────────────
+  build:
+    needs: runtime
+    # runtime 被跳过（skip_runtime_build=true）时 needs 为 skipped，这里仍要跑
+    if: ${{ always() && (needs.runtime.result == 'success' || needs.runtime.result == 'skipped') }}
+    runs-on: windows-2025
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download runtime from this run
+        if: ${{ !inputs.skip_runtime_build }}
+        uses: actions/download-artifact@v4
+        with:
+          name: operit2-android-runtime
+          path: apps/flutter/app/android/app/src/main
+
+      # skip_runtime_build=true 时，复用最近一次成功产出 runtime 的运行
+      - name: Fetch latest runtime artifact
+        if: ${{ inputs.skip_runtime_build }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json' }
+
+          $runs = Invoke-RestMethod -Headers $headers `
+            -Uri "https://api.github.com/repos/${{ github.repository }}/actions/workflows/manual-android-build.yml/runs?per_page=30"
+          $candidate = $runs.workflow_runs | Where-Object {
+            $_.conclusion -eq 'success' -and $_.id -ne ${{ github.run_id }}
+          } | Select-Object -First 1
+          if (-not $candidate) { throw "No previous successful run found to reuse the runtime from" }
+          Write-Host "reusing runtime from run $($candidate.id) ($($candidate.head_sha.Substring(0,8)))"
+
+          $arts = Invoke-RestMethod -Headers $headers `
+            -Uri "https://api.github.com/repos/${{ github.repository }}/actions/runs/$($candidate.id)/artifacts"
+          $artifact = $arts.artifacts | Where-Object { $_.name -eq 'operit2-android-runtime' } | Select-Object -First 1
+          if (-not $artifact) { throw "That run has no operit2-android-runtime artifact (expired?)" }
+
+          $zip = Join-Path $env:RUNNER_TEMP 'runtime.zip'
+          Invoke-WebRequest -Headers $headers -OutFile $zip `
+            -Uri "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/$($artifact.id)/zip"
+          Expand-Archive -Path $zip -DestinationPath 'apps/flutter/app/android/app/src/main' -Force
+
+          # artifact 里的相对路径与本地构建产物一致
+          $probe = 'apps/flutter/app/android/app/src/main/jniLibs/arm64-v8a/libbash.so'
+          if (-not (Test-Path $probe)) {
+            Get-ChildItem -Recurse 'apps/flutter/app/android/app/src/main' | Select-Object -First 20 | ForEach-Object { Write-Host $_.FullName }
+            throw "runtime artifact layout unexpected: $probe missing"
+          }
+          Write-Host "runtime restored"
+
+      - name: Install bootstrap Dart
+        uses: dart-lang/setup-dart@v1
+        with:
+          sdk: 3.11.5
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install FVM and project Flutter SDK
+        shell: pwsh
+        working-directory: apps/flutter/app
+        run: |
+          dart pub global activate fvm $env:FVM_VERSION
+          "$env:APPDATA\Pub\Cache\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          fvm install --skip-pub-get
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+          targets: aarch64-linux-android
+
+      - name: Prepare Android bindgen libclang
+        shell: pwsh
+        run: |
+          $version = "21.1.8"
+          $packageName = "libclang.runtime.win-x64.$version"
+          $toolsDir = "target/operit-build-tools"
+          $packageDir = Join-Path $toolsDir $packageName
+          $archive = Join-Path $toolsDir "$packageName.nupkg"
+          New-Item -ItemType Directory -Force -Path $toolsDir | Out-Null
+          Invoke-WebRequest -Uri "https://www.nuget.org/api/v2/package/libclang.runtime.win-x64/$version" -OutFile $archive
+          Expand-Archive -Path $archive -DestinationPath $packageDir -Force
+          if (-not (Test-Path "$packageDir/runtimes/win-x64/native/libclang.dll")) {
+            throw "libclang was not prepared"
+          }
+
+      # 插件同步需要 tsc / esbuild / fflate / pnpm，hook 里硬编码 .venv/Scripts/python.exe
+      - name: Bootstrap plugin build tools
+        shell: pwsh
+        run: |
+          python -m venv .venv
+          .\.venv\Scripts\python.exe --version
+          corepack enable
+          corepack prepare pnpm@10.7.0 --activate
+          corepack pnpm --version
+          New-Item -ItemType Directory -Force -Path .ci-tools/typescript | Out-Null
+          npm install --no-audit --no-fund --prefix .ci-tools/typescript typescript@5.9.2
+          npm install --no-audit --no-fund --no-save --no-package-lock esbuild@0.25.10 fflate@0.8.2 typescript@5.9.2
+
+      - name: Restore release signing
+        shell: pwsh
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+        run: |
+          $missing = @()
+          foreach ($pair in @(
+            @{n='ANDROID_RELEASE_KEYSTORE_BASE64'; v=$env:KEYSTORE_B64},
+            @{n='ANDROID_RELEASE_STORE_PASSWORD'; v=$env:STORE_PASSWORD},
+            @{n='ANDROID_RELEASE_KEY_ALIAS'; v=$env:KEY_ALIAS},
+            @{n='ANDROID_RELEASE_KEY_PASSWORD'; v=$env:KEY_PASSWORD})) {
+            if ([string]::IsNullOrWhiteSpace($pair.v)) { $missing += $pair.n }
+          }
+          if ($missing.Count -gt 0) { throw "Missing secrets: $($missing -join ', ')" }
+
+          $dir = "tools/release/secrets"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          [IO.File]::WriteAllBytes("$dir/operit2-release.keystore", [Convert]::FromBase64String($env:KEYSTORE_B64))
+          @"
+          RELEASE_STORE_FILE=operit2-release.keystore
+          RELEASE_STORE_PASSWORD=$env:STORE_PASSWORD
+          RELEASE_KEY_ALIAS=$env:KEY_ALIAS
+          RELEASE_KEY_PASSWORD=$env:KEY_PASSWORD
+          "@ | Set-Content -Path "$dir/android-signing.properties" -Encoding utf8
+
+      - name: Resolve version
+        id: version
+        shell: pwsh
+        run: |
+          $m = Select-String -Path apps/flutter/app/pubspec.yaml -Pattern '^version:\s*(\d+\.\d+\.\d+)\+(\d+)\s*$'
+          if ($m.Matches.Count -ne 1) { throw "pubspec.yaml must contain exactly one version line" }
+          "name=$($m.Matches[0].Groups[1].Value)" >> $env:GITHUB_OUTPUT
+          "code=$($m.Matches[0].Groups[2].Value)" >> $env:GITHUB_OUTPUT
+
+      - name: Build release
+        if: ${{ inputs.build_mode == 'release' || inputs.build_mode == 'both' }}
+        shell: pwsh
+        working-directory: apps/flutter/app
+        run: |
+          $args = @('build','apk','--release','--target-platform','android-arm64',
+                    '--build-name','${{ steps.version.outputs.name }}',
+                    '--build-number','${{ steps.version.outputs.code }}')
+          if ('${{ inputs.split_per_abi }}' -eq 'true') { $args += '--split-per-abi' }
+          fvm flutter @args
+
+      - name: Build debug
+        if: ${{ inputs.build_mode == 'debug' || inputs.build_mode == 'both' }}
+        shell: pwsh
+        working-directory: apps/flutter/app
+        run: |
+          fvm flutter build apk --debug --target-platform android-arm64 `
+            --build-name ${{ steps.version.outputs.name }} `
+            --build-number ${{ steps.version.outputs.code }}
+
+      - name: Collect APKs
+        shell: pwsh
+        run: |
+          $out = "dist"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          Get-ChildItem -Path apps/flutter/app/build/app/outputs/flutter-apk -Filter *.apk |
+            ForEach-Object {
+              $target = Join-Path $out $_.Name
+              Copy-Item $_.FullName $target -Force
+              $hash = (Get-FileHash $target -Algorithm SHA256).Hash.ToLower()
+              "$hash  $($_.Name)" | Out-File -FilePath "$out/SHA256SUMS.txt" -Append -Encoding utf8
+              "built $($_.Name) ($([math]::Round($_.Length/1MB,1)) MiB)"
+            }
+
+      - name: Upload APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: operit2-apk-${{ github.sha }}
+          path: dist/**
+          if-no-files-found: error
+          retention-days: ${{ inputs.upload_retention_days }}
+
+      - name: Summary
+        shell: pwsh
+        run: |
+          @"
+          ### 编译完成
+          - 提交: ``${{ github.sha }}``
+          - 类型: ${{ inputs.build_mode }}
+          - 版本: ${{ steps.version.outputs.name }} (${{ steps.version.outputs.code }})
+          - 产物: `operit2-apk-${{ github.sha }}`（在本次运行页面底部 Artifacts 区下载）
+          "@ >> $env:GITHUB_STEP_SUMMARY
