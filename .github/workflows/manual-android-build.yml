@@ -282,12 +282,24 @@ jobs:
           $dir = "tools/release/secrets"
           New-Item -ItemType Directory -Force -Path $dir | Out-Null
           [IO.File]::WriteAllBytes("$dir/operit2-release.keystore", [Convert]::FromBase64String($env:KEYSTORE_B64))
-          @"
-          RELEASE_STORE_FILE=operit2-release.keystore
-          RELEASE_STORE_PASSWORD=$env:STORE_PASSWORD
-          RELEASE_KEY_ALIAS=$env:KEY_ALIAS
-          RELEASE_KEY_PASSWORD=$env:KEY_PASSWORD
-          "@ | Set-Content -Path "$dir/android-signing.properties" -Encoding utf8
+
+          # app/build.gradle.kts 通过 requiredLocalProperty() 从
+          # apps/flutter/app/android/local.properties 读取签名配置，
+          # RELEASE_STORE_FILE 会按相对该文件的路径解析，这里写绝对路径最稳。
+          $localProps = "apps/flutter/app/android/local.properties"
+          $existing = @()
+          if (Test-Path $localProps) { $existing = Get-Content $localProps }
+          $existing = $existing | Where-Object { $_ -notmatch '^\s*RELEASE_(STORE_FILE|STORE_PASSWORD|KEY_ALIAS|KEY_PASSWORD)=' }
+          $keystoreAbs = (Resolve-Path "$dir/operit2-release.keystore").Path.Replace('\', '/')
+          $existing += "RELEASE_STORE_FILE=$keystoreAbs"
+          $existing += "RELEASE_STORE_PASSWORD=$env:STORE_PASSWORD"
+          $existing += "RELEASE_KEY_ALIAS=$env:KEY_ALIAS"
+          $existing += "RELEASE_KEY_PASSWORD=$env:KEY_PASSWORD"
+          Set-Content -Path $localProps -Value $existing -Encoding utf8
+          Write-Host "wrote $localProps"
+          Get-Content $localProps | Where-Object { $_ -match '^RELEASE_' } | ForEach-Object {
+            Write-Host ("  " + ($_ -replace 'PASSWORD=.*', 'PASSWORD=***'))
+          }
 
       - name: Resolve version
         id: version
