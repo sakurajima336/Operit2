@@ -112,15 +112,22 @@ jobs:
           # 跨所有 workflow 找最近一个带 operit2-android-runtime 的成功运行
           $candidate = $null
           $artifact = $null
-          $runs = Invoke-RestMethod -Headers $headers -Uri "$api/actions/runs?per_page=50&status=success"
-          foreach ($run in $runs.workflow_runs) {
-            if ($run.id -eq ${{ github.run_id }}) { continue }
-            $arts = Invoke-RestMethod -Headers $headers -Uri "$api/actions/runs/$($run.id)/artifacts"
-            $hit = $arts.artifacts | Where-Object { $_.name -eq 'operit2-android-runtime' } | Select-Object -First 1
-            if ($hit) { $candidate = $run; $artifact = $hit; break }
+          # 用 compare 过滤器不够可靠，这里翻页扫描并按 conclusion 自己判断
+          $page = 1
+          while ($page -le 5 -and -not $candidate) {
+            $runs = Invoke-RestMethod -Headers $headers -Uri "$api/actions/runs?per_page=100&page=$page"
+            foreach ($run in $runs.workflow_runs) {
+              if ($run.id -eq ${{ github.run_id }}) { continue }
+              if ($run.conclusion -ne 'success') { continue }
+              $arts = Invoke-RestMethod -Headers $headers -Uri "$api/actions/runs/$($run.id)/artifacts"
+              $hit = $arts.artifacts | Where-Object { $_.name -eq 'operit2-android-runtime' } | Select-Object -First 1
+              if ($hit) { $candidate = $run; $artifact = $hit; break }
+            }
+            if ($runs.workflow_runs.Count -lt 100) { break }
+            $page++
           }
           if (-not $candidate) {
-            throw "No previous run with an operit2-android-runtime artifact found. Re-run with skip_runtime_build=false."
+            throw "No previous successful run with an operit2-android-runtime artifact. Re-run with skip_runtime_build=false."
           }
           Write-Host "reusing runtime from run $($candidate.id) ($($candidate.name), $($candidate.head_sha.Substring(0,8)))"
 
