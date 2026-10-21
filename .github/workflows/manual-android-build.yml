@@ -295,7 +295,10 @@ jobs:
           $existing += "RELEASE_STORE_PASSWORD=$env:STORE_PASSWORD"
           $existing += "RELEASE_KEY_ALIAS=$env:KEY_ALIAS"
           $existing += "RELEASE_KEY_PASSWORD=$env:KEY_PASSWORD"
-          Set-Content -Path $localProps -Value $existing -Encoding utf8
+          # Gradle uses java.util.Properties.load(); a BOM would break the first key.
+          $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+          $localPropsAbs = Join-Path (Resolve-Path -LiteralPath (Split-Path -Parent $localProps)).Path local.properties
+          [IO.File]::WriteAllLines($localPropsAbs, $existing, $utf8NoBom)
           Write-Host "wrote $localProps"
           Get-Content $localProps | Where-Object { $_ -match '^RELEASE_' } | ForEach-Object {
             Write-Host ("  " + ($_ -replace 'PASSWORD=.*', 'PASSWORD=***'))
