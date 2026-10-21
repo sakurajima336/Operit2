@@ -309,6 +309,23 @@ jobs:
             Write-Host ("  " + ($_ -replace 'PASSWORD=.*', 'PASSWORD=***'))
           }
 
+      # 生成 lib/core/proxy/generated/*.g.dart（Dart 侧代理类型）。
+      # 官方 build_flutter_android.py 也会先做这一步；缺了它 Flutter 编译会报
+      # NetworkControlRole / RuntimeDeviceSpaceTopology 等类型不存在。
+      - name: Generate Dart proxy artifacts
+        shell: pwsh
+        env:
+          CARGO_BUILD_JOBS: 2
+        run: |
+          cargo check --manifest-path core/crates/proxy/local/Cargo.toml --quiet
+          $files = @(
+            'apps/flutter/app/lib/core/proxy/generated/CoreProxyClients.g.dart',
+            'apps/flutter/app/lib/core/proxy/generated/CoreProxyModels.g.dart'
+          )
+          foreach ($f in $files) {
+            if (-not (Test-Path $f)) { throw "missing generated artifact: $f" }
+            Write-Host "generated $f ($((Get-Item $f).Length) B)"
+          }
       - name: Resolve version
         id: version
         shell: pwsh
