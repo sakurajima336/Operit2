@@ -287,18 +287,23 @@ jobs:
           # apps/flutter/app/android/local.properties 读取签名配置，
           # RELEASE_STORE_FILE 会按相对该文件的路径解析，这里写绝对路径最稳。
           $localProps = "apps/flutter/app/android/local.properties"
-          $existing = @()
-          if (Test-Path $localProps) { $existing = Get-Content $localProps }
-          $existing = $existing | Where-Object { $_ -notmatch '^\s*RELEASE_(STORE_FILE|STORE_PASSWORD|KEY_ALIAS|KEY_PASSWORD)=' }
+          $list = New-Object System.Collections.Generic.List[string]
+          if (Test-Path $localProps) {
+            foreach ($line in Get-Content $localProps) {
+              if ([string]::IsNullOrWhiteSpace($line)) { continue }
+              if ($line -match '^\s*RELEASE_(STORE_FILE|STORE_PASSWORD|KEY_ALIAS|KEY_PASSWORD)=') { continue }
+              $list.Add($line)
+            }
+          }
           $keystoreAbs = (Resolve-Path "$dir/operit2-release.keystore").Path.Replace('\', '/')
-          $existing += "RELEASE_STORE_FILE=$keystoreAbs"
-          $existing += "RELEASE_STORE_PASSWORD=$env:STORE_PASSWORD"
-          $existing += "RELEASE_KEY_ALIAS=$env:KEY_ALIAS"
-          $existing += "RELEASE_KEY_PASSWORD=$env:KEY_PASSWORD"
+          $list.Add("RELEASE_STORE_FILE=$keystoreAbs")
+          $list.Add("RELEASE_STORE_PASSWORD=$env:STORE_PASSWORD")
+          $list.Add("RELEASE_KEY_ALIAS=$env:KEY_ALIAS")
+          $list.Add("RELEASE_KEY_PASSWORD=$env:KEY_PASSWORD")
           # Gradle uses java.util.Properties.load(); a BOM would break the first key.
           $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-          $localPropsAbs = Join-Path (Resolve-Path -LiteralPath (Split-Path -Parent $localProps)).Path local.properties
-          [IO.File]::WriteAllLines($localPropsAbs, $existing, $utf8NoBom)
+          $localPropsAbs = Join-Path (Resolve-Path -LiteralPath (Split-Path -Parent $localProps)).Path 'local.properties'
+          [IO.File]::WriteAllLines($localPropsAbs, $list, $utf8NoBom)
           Write-Host "wrote $localProps"
           Get-Content $localProps | Where-Object { $_ -match '^RELEASE_' } | ForEach-Object {
             Write-Host ("  " + ($_ -replace 'PASSWORD=.*', 'PASSWORD=***'))
