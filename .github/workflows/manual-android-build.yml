@@ -109,27 +109,29 @@ jobs:
           $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json' }
           $api = "https://api.github.com/repos/${{ github.repository }}"
 
-          # 跨所有 workflow 找最近一个带 operit2-android-runtime 的成功运行
+          # 跨所有 workflow 找最近一个带 operit2-android-runtime 的运行。
+          # 注意：不能按 conclusion==success 过滤 —— runtime job 成功、build job
+          # 失败的运行同样有可用 artifact（这正是最常见的复用场景）。
           $candidate = $null
           $artifact = $null
-          # 用 compare 过滤器不够可靠，这里翻页扫描并按 conclusion 自己判断
           $page = 1
           while ($page -le 5 -and -not $candidate) {
             $runs = Invoke-RestMethod -Headers $headers -Uri "$api/actions/runs?per_page=100&page=$page"
             foreach ($run in $runs.workflow_runs) {
               if ($run.id -eq ${{ github.run_id }}) { continue }
-              if ($run.conclusion -ne 'success') { continue }
               $arts = Invoke-RestMethod -Headers $headers -Uri "$api/actions/runs/$($run.id)/artifacts"
-              $hit = $arts.artifacts | Where-Object { $_.name -eq 'operit2-android-runtime' } | Select-Object -First 1
+              $hit = $arts.artifacts |
+                Where-Object { $_.name -eq 'operit2-android-runtime' -and -not $_.expired } |
+                Select-Object -First 1
               if ($hit) { $candidate = $run; $artifact = $hit; break }
             }
             if ($runs.workflow_runs.Count -lt 100) { break }
             $page++
           }
           if (-not $candidate) {
-            throw "No previous successful run with an operit2-android-runtime artifact. Re-run with skip_runtime_build=false."
+            throw "No run with a live operit2-android-runtime artifact. Re-run with skip_runtime_build=false."
           }
-          Write-Host "reusing runtime from run $($candidate.id) ($($candidate.name), $($candidate.head_sha.Substring(0,8)))"
+          Write-Host "reusing runtime from run $($candidate.id) ($($candidate.name), $($candidate.conclusion), $($candidate.head_sha.Substring(0,8)))"
 
           $zip = Join-Path $env:RUNNER_TEMP 'runtime.zip'
           Invoke-WebRequest -Headers $headers -OutFile $zip -Uri "$api/actions/artifacts/$($artifact.id)/zip"
