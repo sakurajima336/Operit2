@@ -5,12 +5,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
-use std::thread;
+
 use std::time::Duration;
 
 use operit_host_api::{
     HostError, HostResult, ManagedRuntimeHost, ManagedRuntimeProcess, ManagedRuntimeProgram,
-    RuntimeCommandOutput, RuntimeProcessRequest,
+    RuntimeCommandOutput, RuntimeProcessRequest, RuntimePathAction,
 };
 
 const MANAGED_RUNTIME_STDIO_BUFFER_BYTES: usize = 64 * 1024;
@@ -107,6 +107,34 @@ impl ManagedRuntimeProcess for NativeManagedRuntimeProcess {
 }
 
 impl ManagedRuntimeHost for LinuxManagedRuntimeHost {
+    /// Launches explicit native path intents with argument vectors and no UI-layer platform checks.
+    fn openPath(&self, path: &str, action: RuntimePathAction) -> HostResult<()> {
+        let target = Path::new(path);
+        let directory = if target.is_dir() { target } else {
+            target.parent().ok_or_else(|| HostError::new("The target has no parent directory"))?
+        };
+        let mut command = match action {
+            RuntimePathAction::Reveal => {
+                let mut command = Command::new("xdg-open");
+                command.arg(directory);
+                command
+            }
+            RuntimePathAction::Terminal => {
+                let mut command = Command::new("x-terminal-emulator");
+                command.current_dir(directory);
+                command
+            }
+            RuntimePathAction::Application { program, args } => {
+                let executable = self.resolveRuntimeExecutable(ManagedRuntimeProgram::Command(program), None)?;
+                let mut command = Command::new(executable);
+                command.args(args).arg(path).current_dir(directory);
+                command
+            }
+        };
+        command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()?;
+        Ok(())
+    }
+
     /// Returns the persistent Linux managed runtime workspace directory.
     fn runtimeWorkspaceDir(&self) -> HostResult<String> {
         let home = env::var_os("HOME")
@@ -138,6 +166,7 @@ impl ManagedRuntimeHost for LinuxManagedRuntimeHost {
             ManagedRuntimeProgram::Python => vec!["python3"],
             ManagedRuntimeProgram::Uv => vec!["uv"],
             ManagedRuntimeProgram::Pnpm => vec!["pnpm"],
+            ManagedRuntimeProgram::Command(ref name) => vec![name.as_str()],
         };
         findExecutable(&names).ok_or_else(|| {
             HostError::new(format!(
@@ -179,7 +208,7 @@ impl ManagedRuntimeHost for LinuxManagedRuntimeHost {
             .ok_or_else(|| HostError::new("managed runtime process has no stderr"))?;
 
         let (stdoutTx, stdoutRx) = mpsc::channel();
-        thread::spawn(move || {
+        let stdoutTask: operit_host_api::HostRuntimeTask = Box::new(move || {
             for line in BufReader::with_capacity(MANAGED_RUNTIME_STDIO_BUFFER_BYTES, stdout)
                 .lines()
                 .flatten()
@@ -190,7 +219,7 @@ impl ManagedRuntimeHost for LinuxManagedRuntimeHost {
 
         let stderrLines = Arc::new(Mutex::new(VecDeque::new()));
         let stderrLinesForThread = stderrLines.clone();
-        thread::spawn(move || {
+        let stderrTask: operit_host_api::HostRuntimeTask = Box::new(move || {
             for line in BufReader::with_capacity(MANAGED_RUNTIME_STDIO_BUFFER_BYTES, stderr)
                 .lines()
                 .flatten()
@@ -204,6 +233,13 @@ impl ManagedRuntimeHost for LinuxManagedRuntimeHost {
             }
         });
 
+        if let Err(error) = operit_host_native_common::NativeHostRuntimeTaskSchedulerHost::new()
+            .scheduleServiceTasks("managed-runtime-pipes", vec![stdoutTask, stderrTask])
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
         Ok(Box::new(NativeManagedRuntimeProcess {
             child: Mutex::new(child),
             stdin: Mutex::new(stdin),

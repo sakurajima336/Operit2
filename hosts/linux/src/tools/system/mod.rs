@@ -34,16 +34,25 @@ impl SystemOperationHost for LinuxSystemOperationHost {
         } else {
             &request.title
         };
-        let status = Command::new("notify-send")
+        let output = Command::new("notify-send")
             .arg(title)
             .arg(&request.message)
-            .status()
+            .output()
             .map_err(|error| HostError::new(format!("Failed to send notification: {error}")))?;
-        if status.success() {
-            Ok(())
+        if output.status.success() {
+            return Ok(());
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr.trim();
+        if stderr.is_empty() {
+            Err(HostError::new(format!(
+                "Notification command exited with {status}",
+                status = output.status
+            )))
         } else {
             Err(HostError::new(format!(
-                "Notification command exited with {status}"
+                "Notification command exited with {status}: {stderr}",
+                status = output.status
             )))
         }
     }

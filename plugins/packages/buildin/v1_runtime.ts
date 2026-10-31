@@ -14,6 +14,7 @@
   "tools": [
     {
       "name": "create_session",
+      "display": {"label": {"zh": "创建终端会话", "en": "Create terminal session"}, "icon": "terminal", "targetParameter": "sessionName"},
       "description": {
         "en": "Create a v1 terminal session in the selected package environment."
       },
@@ -30,6 +31,7 @@
     },
     {
       "name": "execute",
+      "display": {"label": {"zh": "运行终端命令", "en": "Run terminal command"}, "icon": "terminal", "targetParameter": "command"},
       "description": {
         "en": "Execute a command in a v1 terminal session."
       },
@@ -62,6 +64,7 @@
     },
     {
       "name": "terminal",
+      "display": {"label": {"zh": "运行 Shell", "en": "Run Shell"}, "icon": "terminal", "targetParameter": "command"},
       "description": {
         "en": "Execute the legacy POSIX-shell tool in the selected host interpreter."
       },
@@ -94,6 +97,7 @@
     },
     {
       "name": "file",
+      "display": {"label": {"zh": "操作终端文件", "en": "Manage terminal files"}, "icon": "file", "targetParameter": "operation"},
       "description": {
         "en": "Execute a v1 Linux filesystem operation inside the same terminal runtime."
       },
@@ -118,6 +122,7 @@
     },
     {
       "name": "run_javascript_node",
+      "display": {"label": {"zh": "运行 Node.js", "en": "Run Node.js"}, "icon": "terminal"},
       "description": {
         "en": "Execute JavaScript with the actual Node runtime."
       },
@@ -142,6 +147,7 @@
     },
     {
       "name": "ffmpeg_execute",
+      "display": {"label": {"zh": "运行 FFmpeg", "en": "Run FFmpeg"}, "icon": "terminal", "targetParameter": "command"},
       "description": {
         "en": "Execute FFmpeg arguments with the installed runtime executable."
       },
@@ -166,6 +172,7 @@
     },
     {
       "name": "ffmpeg_info",
+      "display": {"label": {"zh": "查看 FFmpeg 版本", "en": "Read FFmpeg version"}, "icon": "terminal"},
       "description": {
         "en": "Read the actual installed FFmpeg version."
       },
@@ -322,10 +329,14 @@ async function v1CreateSession(params: V1RuntimeParams) {
     return session;
 }
 
-/** Runs an unchanged command in an explicitly created compatibility session. */
+/** Runs a command in its explicit session, or the legacy caller-scoped default session. */
 async function v1Execute(params: V1RuntimeParams) {
     v1RuntimeState();
-    return Tools.System.terminal.exec(v1RequiredText(params.sessionId, "sessionId"), v1RequiredText(params.command, "command"), v1Timeout(params.timeoutMs, 15000));
+    const command = v1RequiredText(params.command, "command");
+    const sessionId = params.sessionId === ""
+        ? (await v1CreateSession({ sessionName: "default_" + getChatId() })).sessionId
+        : v1RequiredText(params.sessionId, "sessionId");
+    return Tools.System.terminal.exec(sessionId, command, v1Timeout(params.timeoutMs, 15000));
 }
 
 /** Preserves the legacy terminal result and keeps foreground sessions isolated by caller and chat. */

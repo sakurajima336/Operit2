@@ -60,7 +60,7 @@ use operit_model::ModelConfigData::{
     ApiProviderType, ModelCapabilities, ModelConfigDefaults, ModelContextSpec, ModelProfile,
     ModelRequestSpec, ModelSummarySettings, ProviderProfile,
 };
-use operit_model::ModelParameter::{CustomParameterData, ModelParameter, ParameterCategory};
+use operit_model::ModelParameter::{ModelParameter, ParameterCategory};
 use operit_model::OperitChatArchive::{
     OperitArchivedChat, OperitArchivedMessage, OperitArchivedMessageVariant, OperitChatArchive,
     ARCHIVE_TYPE, CURRENT_FORMAT_VERSION,
@@ -655,9 +655,17 @@ impl Operit1SnapshotImportManager {
                 }
                 "payload/files/datastore/github_auth_preferences.preferences_pb" => {
                     use crate::data::preferences::GitHubAuthPreferences::GitHubAuthPreferences;
+                    migrateOperit1GitHubUserInfo(&mut adopted)?;
                     GitHubAuthPreferences::migratePreferences(1, &mut adopted)
                         .map_err(|error| error.to_string())?;
                     (*GitHubAuthPreferences::store(self.storageHost.clone())).clone()
+                }
+                "payload/files/datastore/current_chat_id.preferences_pb" => {
+                    use operit_store::PreferencesDataStore::CoreNodeStateStore;
+                    (*CoreNodeStateStore::newWithStorage(
+                        self.storageHost.clone(),
+                        operit_util::RuntimeStorageLayout::CURRENT_CHAT_ID_PREFERENCES_PATH,
+                    )).clone()
                 }
                 _ => PreferencesDataStore::new(filePath),
             };
@@ -668,6 +676,13 @@ impl Operit1SnapshotImportManager {
                 if !matches!(value, Operit1PreferenceValue::String(_)) {
                     let (key, value) = value.toTargetNativePreferenceEntry(key, fileImportPlan)?;
                     adopted.set(&stringPreferencesKey(&key), value);
+                }
+            }
+            if entryName == ENTRY_USER_PREFERENCES {
+                use crate::data::preferences::UserPreferencesManager::UserPreferencesManager;
+                for version in [2, 3] {
+                    UserPreferencesManager::migratePreferences(version, &mut adopted)
+                        .map_err(|error| error.to_string())?;
                 }
             }
             store
@@ -797,7 +812,7 @@ impl Operit1SnapshotImportManager {
     /// Imports the OP1 v21 token ledger and pricing identities without deriving usage from chats.
     fn importTokenStatistics(&self, parsed: &ParsedOperit1Snapshot) -> Result<(i32, i32), String> {
         self.withStagedOperit1ChatDatabase(parsed, |connection, bridge| {
-            if bridge != Operit1ToOperit2ChatArchiveBridge::Operit1RoomV21ToOperit2SqliteV28 {
+            if bridge != Operit1ToOperit2ChatArchiveBridge::Operit1RoomV21ToOperit2SqliteV29 {
                 return Ok((0, 0));
             }
             let usageRows = connection

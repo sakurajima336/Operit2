@@ -2,12 +2,17 @@
 
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:operit_ui/operit_ui.dart'
+    show
+        operitDesignBridgeEnabled,
+        OperitDesignSurface,
+        operitDesignDomCaptureScript,
+        operitDesignDomRuntimeRequestScript;
 import 'package:mime/mime.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:webview_all/webview_all.dart';
@@ -41,11 +46,13 @@ class ComposeDslWebViewHostContext {
     required this.executionContextKey,
     required this.dispatchAction,
     required this.runtimeOptionsProvider,
+    this.clients = const GeneratedCoreProxyClients(ProxyCoreRuntimeBridge()),
     this.onActionResultDelivered,
     this.readFileBytes,
   });
 
   /// Stable plugin package identity, not the transient execution/session key.
+  final GeneratedCoreProxyClients clients;
   final String packageName;
   final String routeInstanceId;
   final String executionContextKey;
@@ -61,6 +68,20 @@ class ComposeDslWebViewHostContext {
 
   /// Observes action results only after the WebView receives its bridge response.
   final ValueChanged<Object?>? onActionResultDelivered;
+
+  /// Binds blocking actions to an occurrence while preserving its host services and result observer.
+  ComposeDslWebViewHostContext withActionDispatcher(
+    ComposeDslWebViewActionDispatcher dispatcher,
+  ) => ComposeDslWebViewHostContext(
+    clients: clients,
+    packageName: packageName,
+    routeInstanceId: routeInstanceId,
+    executionContextKey: executionContextKey,
+    dispatchAction: dispatcher,
+    runtimeOptionsProvider: runtimeOptionsProvider,
+    readFileBytes: readFileBytes,
+    onActionResultDelivered: onActionResultDelivered,
+  );
 
   /// Executes an action while retaining errors for the requesting WebView.
   Future<ComposeDslWebViewBlockingActionResult> executeAction({
@@ -652,10 +673,36 @@ class _ComposeDslWebViewState extends State<ComposeDslWebView> {
       )
       ..setBackgroundColor(Colors.transparent)
       ..setNavigationDelegate(_navigationDelegate());
-    _webViewWidget = WebViewWidget(
+    final webView = WebViewWidget(
       controller: _controller,
       gestureRecognizers: _pageGestureRecognizers,
     );
+    _webViewWidget = operitDesignBridgeEnabled
+        ? OperitDesignSurface(
+            onRuntimeRequest: (request) async {
+              Object? result = await _controller.runJavaScriptReturningResult(
+                operitDesignDomRuntimeRequestScript(request),
+              );
+              for (var depth = 0; result is String && depth < 3; depth++) {
+                result = jsonDecode(result);
+              }
+              return result;
+            },
+            readScene: () async {
+              Object? result = await _controller.runJavaScriptReturningResult(
+                operitDesignDomCaptureScript,
+              );
+              for (var depth = 0; result is String && depth < 3; depth++) {
+                result = jsonDecode(result);
+              }
+              if (result is! Map) {
+                throw StateError('WebView did not return a design scene');
+              }
+              return Map<String, Object?>.from(result);
+            },
+            child: webView,
+          )
+        : webView;
     if (_supportsComposeDslPageHooks) {
       _bridgeChannelRegistration = _controller.addJavaScriptChannel(
         composeDslWebViewBridgeChannelName,

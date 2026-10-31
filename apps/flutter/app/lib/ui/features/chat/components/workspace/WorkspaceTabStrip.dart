@@ -39,57 +39,51 @@ class WorkspaceTabStrip extends StatelessWidget {
         tabTitle: (tab) => _tabTitle(l10n, tab),
       );
     }
-    final transparentSurface = OperitTheme.of(
-      context,
-    ).themePreferenceSnapshot.transparentSurfaceEnabled;
-    return OperitGlassSurface(
-      color: transparentSurface
-          ? theme.colorScheme.surface.withValues(alpha: 0.04)
-          : theme.colorScheme.surface,
-      layer: OperitGlassSurfaceLayer.panel,
-      transparentAlpha: 0.03,
-      borderRadius: BorderRadius.zero,
-      clip: false,
-      child: SizedBox(
-        height: 42,
-        child: Stack(
-          children: <Widget>[
-            PositionedDirectional(
-              start: 0,
-              end: 0,
-              bottom: 0,
-              child: Divider(
-                height: 1,
-                thickness: 1,
-                color: theme.colorScheme.outlineVariant.withValues(alpha: 0.45),
+    final isDark = theme.brightness == Brightness.dark;
+    final dividerColor = isDark
+        ? const Color(0xFF262626)
+        : theme.colorScheme.outlineVariant.withValues(alpha: 0.35);
+
+    return SizedBox(
+      height: 38,
+      child: Stack(
+        children: <Widget>[
+          PositionedDirectional(
+            start: 0,
+            end: 0,
+            bottom: 0,
+            child: Divider(height: 1, thickness: 1, color: dividerColor),
+          ),
+          Center(
+            child: SizedBox(
+              height: 28,
+              child: ListView.separated(
+                scrollDirection: Axis.horizontal,
+                padding: const EdgeInsetsDirectional.symmetric(horizontal: 10),
+                itemCount: tabs.length,
+                separatorBuilder: (context, index) => const SizedBox(width: 4),
+                itemBuilder: (context, index) {
+                  final tab = tabs[index];
+                  final selected = index == selectedIndex;
+                  final button = _WorkspaceTabButton(
+                    tab: tab,
+                    title: _tabTitle(l10n, tab),
+                    selected: selected,
+                    onTap: () {
+                      onSelected(index);
+                    },
+                    onClose: tab.closable
+                        ? () {
+                            onClosed(index);
+                          }
+                        : null,
+                  );
+                  return _buildTabDragSource(context, tab, button);
+                },
               ),
             ),
-            ListView.separated(
-              scrollDirection: Axis.horizontal,
-              padding: const EdgeInsetsDirectional.fromSTEB(10, 5, 10, 0),
-              itemCount: tabs.length,
-              separatorBuilder: (context, index) => const SizedBox(width: 4),
-              itemBuilder: (context, index) {
-                final tab = tabs[index];
-                final selected = index == selectedIndex;
-                final button = _WorkspaceTabButton(
-                  tab: tab,
-                  title: _tabTitle(l10n, tab),
-                  selected: selected,
-                  onTap: () {
-                    onSelected(index);
-                  },
-                  onClose: tab.closable
-                      ? () {
-                          onClosed(index);
-                        }
-                      : null,
-                );
-                return _buildTabDragSource(context, tab, button);
-              },
-            ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
@@ -316,55 +310,38 @@ class _WorkspaceTabButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final isDark = theme.brightness == Brightness.dark;
     final backgroundColor = selected
-        ? OperitTheme.of(
-                context,
-              ).themePreferenceSnapshot.transparentSurfaceEnabled
-              ? theme.colorScheme.surface.withValues(alpha: 0.18)
-              : theme.colorScheme.surface
+        ? (isDark ? const Color(0xFF282828) : const Color(0xFFE8E8E8))
         : Colors.transparent;
     final contentColor = selected
         ? theme.colorScheme.onSurface
-        : theme.colorScheme.onSurfaceVariant;
+        : theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.75);
+    final borderColor = selected
+        ? (isDark ? const Color(0xFF383838) : theme.colorScheme.outlineVariant)
+        : Colors.transparent;
+
     return Material(
       color: backgroundColor,
-      borderRadius: const BorderRadius.vertical(top: Radius.circular(8)),
+      borderRadius: BorderRadius.circular(5),
       child: InkWell(
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(8)),
+        borderRadius: BorderRadius.circular(5),
         onTap: onTap,
         child: Container(
-          height: 36,
-          padding: const EdgeInsetsDirectional.only(start: 10, end: 6),
-          decoration: selected
-              ? BoxDecoration(
-                  color: backgroundColor,
-                  borderRadius: const BorderRadius.vertical(
-                    top: Radius.circular(8),
-                  ),
-                  border: Border(
-                    top: BorderSide(
-                      color: theme.colorScheme.outlineVariant.withValues(
-                        alpha: 0.45,
-                      ),
-                    ),
-                    left: BorderSide(
-                      color: theme.colorScheme.outlineVariant.withValues(
-                        alpha: 0.45,
-                      ),
-                    ),
-                    right: BorderSide(
-                      color: theme.colorScheme.outlineVariant.withValues(
-                        alpha: 0.45,
-                      ),
-                    ),
-                  ),
-                )
-              : null,
+          height: 26,
+          padding: EdgeInsetsDirectional.only(
+            start: 8,
+            end: onClose == null ? 8 : 4,
+          ),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(5),
+            border: Border.all(color: borderColor, width: 0.8),
+          ),
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: <Widget>[
-              Icon(tab.icon, size: 17, color: contentColor),
-              const SizedBox(width: 6),
+              Icon(tab.icon, size: 14, color: contentColor),
+              const SizedBox(width: 5),
               Flexible(
                 child: Text(
                   title,
@@ -372,20 +349,20 @@ class _WorkspaceTabButton extends StatelessWidget {
                   overflow: TextOverflow.ellipsis,
                   style: theme.textTheme.labelMedium?.copyWith(
                     color: contentColor,
-                    fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+                    fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+                    fontSize: 11.5,
                   ),
                 ),
               ),
               if (onClose == null)
-                const SizedBox(width: 8)
+                const SizedBox(width: 2)
               else ...<Widget>[
-                const SizedBox(width: 4),
-                SizedBox(
-                  width: 22,
-                  height: 22,
+                const SizedBox(width: 3),
+                SizedBox.square(
+                  dimension: 18,
                   child: IconButton(
                     padding: EdgeInsets.zero,
-                    iconSize: 15,
+                    iconSize: 12,
                     tooltip: MaterialLocalizations.of(
                       context,
                     ).closeButtonTooltip,

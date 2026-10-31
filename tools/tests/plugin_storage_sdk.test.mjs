@@ -117,7 +117,7 @@ test("record watch sends exact collection and key, emits initial absence and can
   f.sandbox.__operitNativeWaitPluginStorageRecord=registry.binding((id,handle,collection,key,after)=>waits.push({id,handle,collection,key,after}));
   const opening=f.run("Tools.Storage.objects.open({path:'runtime/owned/live.sqlite'}).then(value=>{globalThis.db=value})");
   f.reply({handle:"parent",path:"runtime/owned/live.sqlite"});await opening;
-  assert.equal(f.run("typeof db.watch"),"undefined");assert.equal(f.run("typeof db.changes"),"undefined");
+  assert.equal(f.run("typeof db.watch"),"undefined");assert.equal(f.run("typeof db.changes"),"function");
   f.run("globalThis.stream=db.collection('goals').watch('chat-a')");const first=f.run("stream.next()");
   f.reply({handle:"watcher",path:"runtime/owned/live.sqlite"});await new Promise(resolve=>setImmediate(resolve));
   assert.deepEqual({...waits[0],id:null},{id:null,handle:"watcher",collection:"goals",key:"chat-a",after:null});
@@ -179,4 +179,38 @@ test("object getMany preserves ordered null records and rejects invalid batches"
   }
   const closing = f.run("db.close()"); f.reply(null); await closing;
   await assert.rejects(f.run("db.collection('memories').getMany([])"), /closed/);
+});
+
+/** Exercises read-only object SQL through the exact shared SQLite facade. */
+test("object SQL queries preserve typed parameters and rows", async () => {
+  const f = fixture();
+  const opening = f.run("Tools.Storage.objects.open({path:'runtime/owned/objects.db'}).then(value=>{globalThis.db=value;})");
+  f.reply({handle:"objects",path:"runtime/owned/objects.db"}); await opening;
+  const reading = f.run("db.query('SELECT key FROM plugin_objects WHERE collection=? LIMIT ?', ['memories',3])");
+  const request = f.request(); assert.equal(request.op,"query"); assert.equal(request.handle,"objects");
+  assert.deepEqual(request.statement.params,[{kind:"text",value:"memories"},{kind:"integer",value:"3"}]);
+  f.reply([{columns:["key"],values:[{kind:"text",value:"character:one/memory"}]}]);
+  assert.equal((await reading)[0].key,"character:one/memory");
+});
+
+/** Exercises related-record preconditions without rewriting the guarded owner. */
+test("object commits forward related-record version guards", async () => {
+  const f = fixture();
+  const opening = f.run("Tools.Storage.objects.open({path:'runtime/owned/objects.db'}).then(value=>{globalThis.db=value;})");
+  f.reply({handle:"objects",path:"runtime/owned/objects.db"}); await opening;
+  const writing = f.run("db.commit([{op:'put',collection:'memories',key:'owner/memory',value:{record:'source'},expectedVersion:null}],[{collection:'owners',key:'owner',expectedVersion:'v1'}])");
+  assert.deepEqual(f.request().guards,[{collection:"owners",key:"owner",expectedVersion:"v1"}]);
+  f.reply({version:"v2"}); assert.equal((await writing).version,"v2");
+});
+
+/** The generic SDK forwards opaque cursors and preserves deletion versus a stored null. */
+test("object change pages expose the host cursor and current envelopes", async () => {
+  const f = fixture();
+  const opening = f.run("Tools.Storage.objects.open({path:'runtime/owned/live.sqlite'}).then(value=>{globalThis.db=value;})");
+  f.reply({handle:"objects",path:"runtime/owned/live.sqlite"}); await opening;
+  const pending = f.run("db.changes('opaque#17',25)");
+  assert.deepEqual(f.request(), {op:"changes",handle:"objects",after:"opaque#17",limit:25});
+  const page = {cursor:"opaque#19",reset:false,hasMore:false,changes:[{collection:"memories",key:"one",entry:{version:"version",value:null}},{collection:"memories",key:"removed",entry:null}]};
+  f.reply(page);
+  assert.deepEqual(JSON.parse(JSON.stringify(await pending)), page);
 });

@@ -107,6 +107,37 @@ class AppLocalizationsEn extends AppLocalizations {
   String get chatQueueAdded => 'Added to queue';
 
   @override
+  String get chatSendOptions => 'Choose how to send';
+
+  @override
+  String get chatQueueAddMessageDescription =>
+      'Send after the current reply finishes (default)';
+
+  @override
+  String get chatGuideCurrentTurn => 'Guide current conversation';
+
+  @override
+  String get chatGuideCurrentTurnDescription =>
+      'Apply in a later model request without interrupting this turn';
+
+  @override
+  String get chatInterruptAndSend => 'Interrupt and send';
+
+  @override
+  String get chatInterruptAndSendDescription =>
+      'Stop the current reply and send this message now';
+
+  @override
+  String get chatGuidanceAccepted => 'Guidance added for a later model request';
+
+  @override
+  String get chatGuidanceTextOnly =>
+      'Guidance supports text only. Remove attachments and the reply target first.';
+
+  @override
+  String get chatQueueWithdrawToEditor => 'Withdraw to editor';
+
+  @override
   String get chatPleaseCreateNewChat => 'Please create a chat';
 
   @override
@@ -280,6 +311,35 @@ class AppLocalizationsEn extends AppLocalizations {
   }
 
   @override
+  String get messageLocatorSearchMessages => 'Search messages';
+
+  @override
+  String get messageLocatorViewFavorites => 'View favorites';
+
+  @override
+  String get messageLocatorAll => 'All';
+
+  @override
+  String get messageLocatorFavorites => 'Favorites';
+
+  @override
+  String get messageLocatorNoFavorites => 'No favorite messages yet';
+
+  @override
+  String get messageLocatorLoadFailed =>
+      'Could not load messages. Please try again.';
+
+  @override
+  String get messageLocatorFavoriteFailed =>
+      'Could not update favorite. Please try again.';
+
+  @override
+  String get messageLocatorAddFavorite => 'Favorite message';
+
+  @override
+  String get messageLocatorRemoveFavorite => 'Remove favorite';
+
+  @override
   String get messageLocatorNoMatches => 'No matching messages';
 
   @override
@@ -380,7 +440,7 @@ class AppLocalizationsEn extends AppLocalizations {
       'Choose the default workspace type to create';
 
   @override
-  String get workspaceUnbindTitle => 'Unbind workspace';
+  String get workspaceUnbindTitle => 'Remove project from this chat';
 
   @override
   String get workspaceUnbindDescription =>
@@ -915,7 +975,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get settingsCategoryLocalModelsSubtitle =>
-      'Downloads, engines, STT / TTS';
+      'LLMs, downloads, STT / TTS';
 
   @override
   String get settingsCategoryLocalModelsDescription =>
@@ -1411,9 +1471,6 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get settingsModelProviderTypeSiliconflow => 'SiliconFlow';
-
-  @override
-  String get settingsModelProviderTypeIflow => 'iFlow';
 
   @override
   String get settingsModelProviderTypeOpenrouter => 'OpenRouter';
@@ -2747,7 +2804,10 @@ class AppLocalizationsEn extends AppLocalizations {
   String get settingsAppearanceChatDisplaySection => 'Chat display';
 
   @override
-  String get settingsAppearanceMessageStyle => 'Message style';
+  String get settingsAppearanceUserMessageStyle => 'User message style';
+
+  @override
+  String get settingsAppearanceAiMessageStyle => 'AI message style';
 
   @override
   String get settingsAppearanceMessageStyleClean => 'Command';
@@ -3843,13 +3903,13 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get settingsPeerPortModeHelp =>
-      'Fixed mode keeps the entered IP and port for tunnels and port forwarding. A busy fixed port reports an error without changing the address.';
+      'By default, the system assigns an available port and LAN discovery advertises it. Fixed mode uses the entered listen address and port and reports an error if the port is busy.';
 
   @override
   String get settingsPeerPortMode => 'Port allocation';
 
   @override
-  String get settingsPeerPortModeFixed => 'Fixed address and port';
+  String get settingsPeerPortModeFixed => 'Fixed listen address and port';
 
   @override
   String get settingsPeerPortModeAutomatic => 'Automatic port';
@@ -3868,7 +3928,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get settingsPeerTransportHelp =>
-      'Listener transports (multiple selections). HTTP and WebSocket can share a port; TCP cannot share that port with them. Bluetooth requires platform support. Clear all selections and disable discovery to stop listening. Changing settings interrupts existing connections. Disabling discovery alone does not stop direct connections.';
+      'Listener transports (multiple selections). HTTP, WebSocket and TCP share one listening port and can be combined freely. Bluetooth requires platform support. Clear all selections and disable discovery to stop listening. Changing settings interrupts existing connections. Disabling discovery alone does not stop direct connections.';
 
   @override
   String get settingsPeerBindAddress => 'Listen IP address';
@@ -3886,15 +3946,11 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get settingsPeerBindPortAutomaticHelp =>
-      'Automatic mode selects a free port starting from this value.';
+      'The system assigns an available port. The actual port appears after startup.';
 
   @override
   String get settingsPeerDiscoveryNeedsTransport =>
       'Select at least one transport before enabling discovery.';
-
-  @override
-  String get settingsPeerPortConflict =>
-      'TCP cannot currently share a listen port with HTTP/WebSocket. Select TCP or HTTP/WebSocket.';
 
   @override
   String get settingsPeerAddressRequired => 'Enter a listen IP address.';
@@ -4043,6 +4099,19 @@ class AppLocalizationsEn extends AppLocalizations {
       'This device is already a Space member. Pairing it adds a direct link without joining again; pairing shows a six-digit code on the other device for you to enter.';
 
   @override
+  String get deviceSpaceUpdateEndpoint => 'Update direct address';
+
+  @override
+  String get deviceSpaceUpdateEndpointLabel => 'Direct address';
+
+  @override
+  String get deviceSpaceUpdateEndpointHint =>
+      'e.g. ws://host:port/link or host:port — use the peer\'s current listen port';
+
+  @override
+  String get deviceSpaceUpdateEndpointSaved => 'Direct address updated';
+
+  @override
   String deviceSpaceDirectLinkEstablished(String device) {
     return 'Direct link established: $device';
   }
@@ -4061,6 +4130,11 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get devicePickerNearby => 'Nearby devices';
+
+  @override
+  String devicePickerDiscoveryFailed(String error) {
+    return 'Nearby device discovery failed: $error';
+  }
 
   @override
   String get devicePickerEmpty => 'No nearby devices found';
@@ -4245,4 +4319,256 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get backgroundWorkStop => 'Stop';
+
+  @override
+  String get localModelsDeviceOnly => 'Stored on this device';
+
+  @override
+  String get localModelsDeviceOnlyDescription =>
+      'Weights, download progress and installation records stay on this device and are excluded from Space sync. Chats can route inference to the device with the model.';
+
+  @override
+  String get localModelsRunChat => 'Run and configure';
+
+  @override
+  String get localModelsUseForChat => 'Use for chat';
+
+  @override
+  String get localModelsChatActivated => 'Selected as the chat model';
+
+  @override
+  String get localModelsPrompt => 'Enter a prompt';
+
+  @override
+  String get localModelsGenerate => 'Generate';
+
+  @override
+  String get localModelsGenerating => 'Generating…';
+
+  @override
+  String get localModelsThreads => 'CPU threads';
+
+  @override
+  String get localModelsContextSize => 'Context size (tokens)';
+
+  @override
+  String get localModelsBatchSize => 'Batch size';
+
+  @override
+  String get localModelsUnload => 'Unload model';
+
+  @override
+  String get localModelsCpuBackend => 'On-device CPU inference';
+
+  @override
+  String get localModelsLlmDescription =>
+      'Download a GGUF model for llama.cpp or an MNN model bundle. After installation, try it here or select it for chat.';
+
+  @override
+  String get localModelsInvalidSettings =>
+      'Check the thread count, context size and batch size.';
+
+  @override
+  String get localModelsFilterAll => 'All models';
+
+  @override
+  String get localModelsFilterInstalled => 'Installed only';
+
+  @override
+  String get localModelsSearchCatalog => 'Search by name or inference engine';
+
+  @override
+  String get deviceSpaceSyncPeer => 'a space device';
+
+  @override
+  String deviceSpaceSyncActive(String device) {
+    return 'Syncing with $device';
+  }
+
+  @override
+  String deviceSpaceSyncCompleted(String device) {
+    return 'Synced with $device';
+  }
+
+  @override
+  String get deviceSpaceSyncChecking => 'Checking for changes';
+
+  @override
+  String get deviceSpaceSyncRecords => 'Exchanging records';
+
+  @override
+  String deviceSpaceSyncRecordProgress(int completed, int total, int percent) {
+    return '$completed / $total records · $percent%';
+  }
+
+  @override
+  String deviceSpaceSyncPendingCount(int count) {
+    return '$count records pending application';
+  }
+
+  @override
+  String deviceSpaceSyncCounting(int count) {
+    return 'Counting total · $count records processed';
+  }
+
+  @override
+  String get deviceSpaceSyncFiles => 'Transferring and verifying files';
+
+  @override
+  String get deviceSpaceSyncRetrying =>
+      'Sync interrupted. Retrying automatically.';
+
+  @override
+  String get deviceSpaceSyncPending =>
+      'Some data is still pending. Retrying automatically.';
+
+  @override
+  String deviceSpaceSyncCurrentFile(String done, String total) {
+    return 'Current file: $done / $total';
+  }
+
+  @override
+  String deviceSpaceSyncTransferred(int count, String bytes) {
+    return '$count records exchanged · $bytes transferred';
+  }
+
+  @override
+  String get deviceSpaceSyncBackground =>
+      'You can keep using the app while syncing continues.';
+
+  @override
+  String get runtimeActivityTitle => 'Background tasks';
+
+  @override
+  String get runtimeActivitySyncing => 'Syncing';
+
+  @override
+  String get runtimeActivitySyncCompleted => 'Sync complete';
+
+  @override
+  String get runtimeActivityWaiting => 'Waiting to retry';
+
+  @override
+  String get runtimeActivityExpand => 'Show background tasks';
+
+  @override
+  String get runtimeActivityLoadingPackages => 'Loading extensions';
+
+  @override
+  String get peerQrTitle => 'QR connection';
+
+  @override
+  String get peerQrScan => 'Scan code';
+
+  @override
+  String get peerQrShow => 'My code';
+
+  @override
+  String get peerQrShowHint =>
+      'Scan this code on another device to connect to this device.';
+
+  @override
+  String get peerQrScanHint =>
+      'Scan the Operit connection code on the other device.';
+
+  @override
+  String get peerQrTrustHint =>
+      'The code shares connection addresses only. Pairing still requires the code shown on the other device; joining a space still requires approval.';
+
+  @override
+  String get peerQrListenerRequired =>
+      'Enable receiving connections in connection settings and connect to a network first.';
+
+  @override
+  String get peerQrCopy => 'Copy connection info';
+
+  @override
+  String get peerQrCopied => 'Copied';
+
+  @override
+  String get peerQrImport => 'Import QR image';
+
+  @override
+  String get peerQrPaste => 'Or paste connection info';
+
+  @override
+  String get peerQrRead => 'Read connection info';
+
+  @override
+  String get peerQrWrongDevice =>
+      'This code belongs to a different device. Scan the code for the selected device.';
+
+  @override
+  String get peerQrImageInvalid =>
+      'No QR code could be read. Choose a clear QR image smaller than 16 MB.';
+
+  @override
+  String get peerQrCameraUnavailable =>
+      'Camera scanning is unavailable. Import a QR image or paste connection info instead.';
+
+  @override
+  String get peerQrCameraPermission =>
+      'Camera access is required. Allow it in system settings, or import a QR image.';
+
+  @override
+  String get peerQrDevice => 'Connect device';
+
+  @override
+  String get peerQrScanAgain => 'Scan another code';
+
+  @override
+  String get peerQrMethodsHint =>
+      'Can’t find the device? Connect with a QR code.';
+
+  @override
+  String get toolParametersLabel => 'Parameters';
+
+  @override
+  String get toolResultLabel => 'Result';
+
+  @override
+  String toolGroupThinkingCount(int count) {
+    return '$count thinking';
+  }
+
+  @override
+  String toolGroupCallCount(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count calls',
+      one: '$count call',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String toolGroupSearchCount(int count) {
+    return '$count search';
+  }
+
+  @override
+  String toolEditedFileCount(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'Edited $count files',
+      one: 'Edited $count file',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get toolViewChanges => 'View changes';
+
+  @override
+  String toolViewFileDiff(String fileName) {
+    return 'View diff for $fileName';
+  }
+
+  @override
+  String get toolGroupCompleted => 'Completed';
+
+  @override
+  String get toolGroupExecuting => 'Executing';
 }

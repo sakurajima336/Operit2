@@ -1,3 +1,5 @@
+import { OperitPdfPreview } from './OperitPdfPreview';
+import { OperitAudioPlayers } from './OperitAudioPlayers';
 import OperitKeepAlivePlugin from 'operit_keep_alive';
 
 import { FlutterAbility, FlutterEngine } from '@ohos/flutter_ohos';
@@ -11,6 +13,8 @@ import AbilityConstant from '@ohos.app.ability.AbilityConstant';
 import { OperitRuntimeChannel } from './OperitRuntimeChannel';
 
 export default class EntryAbility extends FlutterAbility {
+  private pdfPreview: OperitPdfPreview | null = null;
+  private audioPlayers: OperitAudioPlayers | null = null;
   private operitRuntimeChannel: OperitRuntimeChannel | null = null;
   private crashChannel: MethodChannel | null = null;
   private themeChannel: MethodChannel | null = null;
@@ -35,6 +39,7 @@ export default class EntryAbility extends FlutterAbility {
     super.configureFlutterEngine(flutterEngine)
     GeneratedPluginRegistrant.registerWith(flutterEngine)
     this.registerPackageInfoChannel(flutterEngine)
+    this.audioPlayers = new OperitAudioPlayers(flutterEngine, this.context)
     this.themeChannel = new MethodChannel(flutterEngine.getDartExecutor(), 'operit/webview_theme')
     // Updates ArkWeb preferences without overriding the application's system theme source.
     this.themeChannel.setMethodCallHandler({
@@ -53,7 +58,10 @@ export default class EntryAbility extends FlutterAbility {
       }
     })
     const channel = new MethodChannel(flutterEngine.getDartExecutor(), 'operit/runtime')
-    this.operitRuntimeChannel = OperitRuntimeChannel.register(channel, this.context, this.currentWindowStage)
+    const runtime = OperitRuntimeChannel.register(channel, this.context, this.currentWindowStage)
+    this.operitRuntimeChannel = runtime
+    this.pdfPreview = new OperitPdfPreview(flutterEngine, this.context,
+      (request: string): Promise<string> => runtime.renderPdf(request))
     this.crashChannel = new MethodChannel(flutterEngine.getDartExecutor(), 'operit/crash')
     this.crashChannel.setMethodCallHandler({
       onMethodCall: (call, result): void => {
@@ -127,6 +135,10 @@ export default class EntryAbility extends FlutterAbility {
     this.themeChannel = null
     this.crashChannel?.setMethodCallHandler(null)
     this.crashChannel = null
+    this.pdfPreview?.dispose()
+    this.pdfPreview = null
+    this.audioPlayers?.dispose().catch((error: Error): void => { console.error(error.message) })
+    this.audioPlayers = null
     this.operitRuntimeChannel?.destroy()
     this.operitRuntimeChannel = null
     super.onDestroy()

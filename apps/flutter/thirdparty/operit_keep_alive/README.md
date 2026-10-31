@@ -30,7 +30,7 @@
 
 当前策略是 **Core 整段运行期间保留保护**，包括没有可见聊天窗口的时段。Android 服务自身也持有原生 Core lease，Flutter Activity/引擎销毁不会释放服务的 CPU 锁；服务销毁会释放锁。此策略会增加电量消耗。
 
-Android 已有 `OperitCoreService`，其 `onCreate` 调用本包的 `KeepAliveServiceHost.attach`，`onDestroy` 调用 `detach`。服务保持现有 specialUse 声明和系统事件处理。插件只有在该服务实际完成通知和 CPU 锁接管后才确认 acquire。启动失败、超时、通知权限关闭均会在错误或报告中明确体现。应用通知授权沿用已有 onboarding 权限流程。
+Android 已有 `OperitCoreService`，其 `onCreate` 调用本包的 `KeepAliveServiceHost.attach`，`onDestroy` 调用 `detach`。服务保持现有 specialUse 声明和系统事件处理。插件只有在该服务实际完成通知和 CPU 锁接管后才确认 acquire。启动失败、超时、通知权限关闭均会在错误或报告中明确体现。Android 13 及以上在插件初始化并连接 Activity 后请求系统通知权限；每个引擎实例只发起一次请求，Activity 配置重建不会重复弹出。授权回调和应用回到前台后会重新发布当前工作通知，并更新真实保护报告。用户拒绝授权时服务仍按 Android 前台服务规则运行，报告明确说明通知不可见。
 
 OHOS EntryAbility 声明 `backgroundModes: ["taskKeeping"]` 和 `ohos.permission.KEEP_BACKGROUND_RUNNING`。通知返回当前实际 Ability。系统取消后台任务时发送 unavailable 事件，保留真实的工作 lease 计数。
 

@@ -17,7 +17,7 @@ use std::sync::Arc;
 use tokio::sync::oneshot;
 
 use crate::{
-    CoreNodeRouter::{CoreNodeLocalRuntime, CoreNodeRouter},
+    CoreNodeRouter::{BindingRouteStatus, CoreNodeLocalRuntime, CoreNodeRouter},
     GeneratedRouteLifecycle,
     NodeServices::NodeServices,
     PeerSync::PeerSyncMethod,
@@ -130,9 +130,9 @@ pub struct RuntimeRemoteLinkService {
 
 impl RuntimeRemoteLinkService {
     /// Creates the Space business facade. Connectivity is injected separately.
-    pub fn new(localRuntime: CoreNodeLocalRuntime) -> Self {
-        let nodeRouter = CoreNodeRouter::new(localRuntime.clone());
-        Self::newWithRouter(localRuntime, nodeRouter)
+    pub fn new(localRuntime: CoreNodeLocalRuntime) -> Result<Self, String> {
+        let nodeRouter = CoreNodeRouter::new(localRuntime.clone())?;
+        Ok(Self::newWithRouter(localRuntime, nodeRouter))
     }
 
     /// Creates the facade using the router owned by the application tree.
@@ -140,8 +140,7 @@ impl RuntimeRemoteLinkService {
     pub fn newWithRouter(localRuntime: CoreNodeLocalRuntime, nodeRouter: CoreNodeRouter) -> Self {
         let localRuntime = Arc::new(localRuntime);
         let spaceStore = CoreSpaceStore::new(localRuntime.runtimeStorageHost());
-        let networkControlStore = NetworkControlStore::new(localRuntime.runtimeStorageHost())
-            .expect("RuntimeRemoteLinkService requires network control storage");
+        let networkControlStore = NetworkControlStore::withLocalNodeId(localRuntime.runtimeStorageHost(), nodeRouter.localNodeId());
         let persistenceSync = SpacePersistenceSyncService::new(
             localRuntime.clone(),
             nodeRouter.clone(),
@@ -163,6 +162,60 @@ impl RuntimeRemoteLinkService {
     /// Exposes the Core's unpaired discovery candidates uniformly through generated application proxies.
     pub async fn discoverPeers(&self, timeoutMs: u64) -> Result<Vec<crate::NodeServices::DiscoveredPeer>, String> {
         self.nodeServices()?.peers().discoverPeers(timeoutMs).await.map_err(|error| error.to_string())
+    }
+    /// Exports public coordinates of this runtime's live listeners for app and CLI QR rendering.
+    pub async fn peerConnectionCode(&self) -> Result<String, String> {
+        let addresses = self.nodeServices()?.peers().pairingAddresses().await
+            .map_err(|error| error.to_string())?;
+        let info = crate::NodeServices::PeerConnectionInfo {
+            version: crate::PeerConnectionCode::VERSION,
+            nodeId: self.nodeRouter.localNodeId(),
+            displayName: self.spaceStore.deviceProfiles().ok()
+                .and_then(|profiles| profiles.get(&self.nodeRouter.localNodeId()).cloned())
+                .map(|profile| profile.displayName).unwrap_or_default(),
+            addresses,
+        };
+        crate::PeerConnectionCode::encode(&info).map_err(|error| error.to_string())
+    }
+
+    /// Parses untrusted input without opening a connection or changing local state.
+    pub fn inspectPeerConnectionCode(&self, code: String) -> Result<crate::NodeServices::PeerConnectionInfo, String> {
+        crate::PeerConnectionCode::decode(&code, &self.nodeRouter.localNodeId())
+            .map_err(|error| error.to_string())
+    }
+
+    /// Uses the usual identity-bound pairing handshake and tries the code's network addresses in order.
+    pub async fn startPairingFromCode(&self, code: String) -> Result<crate::NodeServices::PendingPairing, String> {
+        let info = self.inspectPeerConnectionCode(code)?;
+        let peers = self.nodeServices()?.peers();
+        let mut errors = Vec::new();
+        for address in &info.addresses {
+            let transport = crate::PeerConnectionCode::endpointTransport(address).map_err(|error| error.to_string())?;
+            let attempt = peers.startPairing(crate::NodeServices::PeerEndpoint {
+                nodeId: info.nodeId.clone(), address: address.clone(),
+            }, Some(transport));
+            let result = crate::fault_isolation::link("QR pairing address", async {
+                tokio::time::timeout(std::time::Duration::from_secs(4), attempt).await
+                    .map_err(|_| operit_link::CoreLinkError::new("PAIRING_TIMEOUT", "Connection timed out"))?
+            }).await;
+            match result {
+                Ok(pairing) => return Ok(pairing),
+                Err(error) => errors.push(format!("{address}: {error}")),
+            }
+        }
+        Err(format!("No address in the connection code could be paired:\n{}", errors.join("\n")))
+    }
+
+    /// Updates the local outbound pairing endpoint and probes the device through its sole channel.
+    #[allow(non_snake_case)]
+    pub async fn updatePairedDeviceEndpoint(
+        &self,
+        deviceId: String,
+        endpoint: String,
+        transport: Option<operit_peer_link::PeerTransport>,
+    ) -> Result<(), String> {
+        self.nodeServices()?.peers().updatePeerEndpoint(&deviceId, &endpoint, transport)
+            .await.map_err(|error| error.to_string())
     }
     /// Creates pending pairing for subsequent code confirmation.
     pub async fn startPairing(&self, nodeId: String, address: String,
@@ -251,6 +304,11 @@ impl RuntimeRemoteLinkService {
         Err("Device space changed while reading its overview".to_string())
     }
 
+    /// Observes local synchronization execution separately from topology changes.
+    pub fn spaceSyncProgressFlow(&self) -> StateFlow<Vec<crate::SpaceSyncProgress::SpaceSyncProgress>> {
+        self.persistenceSyncService().progressFlow()
+    }
+
     /// Observes persistent Space changes and live Peer Links through the shared Host scheduler.
     pub fn deviceSpaceSnapshotFlow(&self) -> Result<StateFlow<RuntimeDeviceSpaceSnapshot>, String> {
         let (changes, mut changed) = tokio::sync::mpsc::channel(1);
@@ -286,7 +344,7 @@ impl RuntimeRemoteLinkService {
                             }
                         },
                     }
-                    match service.deviceSpaceSnapshot() {
+                    match crate::fault_isolation::run("refresh Space overview", || service.deviceSpaceSnapshot()) {
                         Ok(snapshot) => state.set_value(snapshot),
                         Err(error) => { operit_util::AppLogger::AppLogger::w(
                             "RuntimeRemoteLinkService", &format!("Space overview refresh failed: {error}")); },
@@ -534,31 +592,44 @@ impl RuntimeRemoteLinkService {
     #[allow(non_snake_case)]
     pub fn deviceSpaceTopology(&self) -> Result<RuntimeDeviceSpaceTopology, String> {
         let space = self.spaceStore.initialize()?;
-        let controlState = self.networkControlStore.currentState()?;
+        let controlState = match self.networkControlStore.currentState() {
+            Ok(state) => Some(state),
+            Err(error) => {
+                operit_util::AppLogger::AppLogger::w("RuntimeRemoteLinkService", &format!("Space {} overview identity labels: {error}", space.spaceId));
+                None
+            }
+        };
         let profiles = self.spaceStore.deviceProfiles()?;
         let currentDeviceId = self.nodeRouter.localNodeId();
-        let activePeers = self
-            .nodeServices()?.peers()
-            .activePeerNodeIds()
-            .map_err(|error| error.to_string())?;
+        let activePeers = self.nodeServices().and_then(|services| services.peers().activePeerNodeIds().map_err(|error| error.to_string()))
+            .unwrap_or_else(|error| {
+                operit_util::AppLogger::AppLogger::w("RuntimeRemoteLinkService", &format!("Space {} overview active links: {error}", space.spaceId));
+                BTreeSet::new()
+            });
         let devices = space
             .members
             .iter().cloned()
             .map(|deviceId| {
-                let profile = profiles.get(&deviceId).ok_or_else(|| {
-                    format!("Device profile is missing in the current device space: {deviceId}")
-                })?;
+                let fallback = CoreSpaceDeviceProfile {
+                    nodeId: deviceId.clone(), displayName: deviceId.clone(), userName: String::new(),
+                    platform: String::new(), model: String::new(), coreVersion: None,
+                    pairingIncarnation: None, updatedAt: 1,
+                };
+                let profile = profiles.get(&deviceId).unwrap_or(&fallback);
                 let routePlan = if deviceId == currentDeviceId {
                     None
                 } else {
-                    self.nodeRouter.nodeRoutePlan(&deviceId)?
+                    self.nodeRouter.nodeRoutePlan(&deviceId).unwrap_or_else(|error| {
+                        operit_util::AppLogger::AppLogger::w("RuntimeRemoteLinkService", &format!("Space {} device {deviceId} route: {error}", space.spaceId));
+                        None
+                    })
                 };
                 let online = deviceId == currentDeviceId || routePlan.is_some();
                 Ok(runtimeDeviceSpaceDevice(
                     profile,
                     online,
                     routePlan.as_ref(),
-                    runtimeDeviceSpaceIdentity(&controlState, &deviceId),
+                    controlState.as_ref().and_then(|state| runtimeDeviceSpaceIdentity(state, &deviceId)),
                 ))
             })
             .collect::<Result<Vec<_>, String>>()?;
@@ -842,6 +913,28 @@ impl RuntimeRemoteLinkService {
         targetNodeId: String,
         resumeContext: CoreRouteResumeContext,
     ) -> Result<(), String> {
+        self.changeRoute(chatId, targetNodeId, Some(resumeContext)).await
+    }
+
+    /// Selects the Core for subsequent chat execution without starting a new turn.
+    #[allow(non_snake_case)]
+    pub async fn changeChatExecutionDevice(
+        &self,
+        chatId: String,
+        targetNodeId: String,
+    ) -> Result<BindingRouteStatus, String> {
+        self.changeRoute(chatId.clone(), targetNodeId, None).await?;
+        self.nodeRouter.bindingRouteStatus(chatId)
+    }
+
+    /// Shares route validation, synchronization and binding installation with turn handoff.
+    #[allow(non_snake_case)]
+    async fn changeRoute(
+        &self,
+        chatId: String,
+        targetNodeId: String,
+        resumeContext: Option<CoreRouteResumeContext>,
+    ) -> Result<(), String> {
         if chatId.trim().is_empty() {
             return Err("route change chat id must not be empty".to_string());
         }
@@ -868,8 +961,10 @@ impl RuntimeRemoteLinkService {
                 "route change target is not reachable in the current device space: {targetNodeId}"
             ));
         }
+        let bindingStore = CoreNodeBindingStore::new(self.localRuntime.runtimeStorageHost())?;
+        let currentBinding = bindingStore.binding(&chatId)?;
         self.callChatCoreLifecycle(
-            &localNodeId,
+            &currentBinding.nodeId,
             GeneratedRouteLifecycle::BeforeChangeRoute,
             chatId.clone(),
             None,
@@ -877,8 +972,6 @@ impl RuntimeRemoteLinkService {
         .await?;
 
         let routeChangeStartedAt = currentTimeMillis();
-        let bindingStore = CoreNodeBindingStore::new(self.localRuntime.runtimeStorageHost())?;
-        let currentBinding = bindingStore.binding(&chatId)?;
         operit_util::AppLogger::AppLogger::v_with_level(
             "CoreRouteTrace",
             &format!(
@@ -920,7 +1013,7 @@ impl RuntimeRemoteLinkService {
                 operit_util::AppLogger::VERBOSE_LEVEL_2,
             );
             self.persistenceSyncService()
-                .synchronizeReachablePeer(targetNodeId.clone(), 512)
+                .synchronizeReachablePeerForReason(targetNodeId.clone(), 512, &format!("route_change chatId={chatId}"))
                 .await?;
             operit_util::AppLogger::AppLogger::v_with_level(
                 "CoreRouteTrace",
@@ -958,6 +1051,10 @@ impl RuntimeRemoteLinkService {
 
         self.installRouteBindingOnTarget(&targetNodeId, commit.operation.clone())
             .await?;
+
+        let Some(resumeContext) = resumeContext else {
+            return Ok(());
+        };
 
         operit_util::AppLogger::AppLogger::v_with_level(
             "CoreRouteTrace",
@@ -1275,7 +1372,7 @@ impl crate::NodeSpaceService::NodeSpaceContext for RuntimeRemoteLinkService {
     async fn callNode(&self, node: String, request: CoreCallRequest) -> operit_link::CoreCallResponse {
         self.nodeRouter.callNode(node, request).await
     }
-    async fn afterJoined(&self, peer: String) -> Result<(), String> {
-        self.persistenceSyncService().synchronizeReachablePeer(peer, 512).await.map(|_| ())
+    async fn afterJoined(&self, _peer: String) -> Result<(), String> {
+        self.persistenceSyncService().scheduleSynchronization("space_joined")
     }
 }

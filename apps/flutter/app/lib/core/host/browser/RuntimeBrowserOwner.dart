@@ -82,7 +82,7 @@ class RuntimeBrowserOwner extends ChangeNotifier {
   final Map<String, RuntimeBrowserAutomationController> _automation =
       <String, RuntimeBrowserAutomationController>{};
   final Map<String, String> _defaultUserAgents = <String, String>{};
-  final Set<String> _workspaceSurfaceSessionIds = <String>{};
+  final Map<String, int> _workspaceSurfaceSessionClaims = <String, int>{};
   final RuntimeBrowserSessionRegistry _sessionRegistry =
       RuntimeBrowserSessionRegistry.instance;
 
@@ -119,20 +119,27 @@ class RuntimeBrowserOwner extends ChangeNotifier {
 
   /// Returns whether a session is currently mounted in the workspace tree.
   bool isWorkspaceSurfaceSession(String sessionId) {
-    return _workspaceSurfaceSessionIds.contains(sessionId);
+    return (_workspaceSurfaceSessionClaims[sessionId] ?? 0) > 0;
   }
 
   /// Marks one owner WebView as mounted by the workspace tree.
   void attachWorkspaceSurfaceSession(String sessionId) {
-    if (_workspaceSurfaceSessionIds.add(sessionId)) {
+    final current = _workspaceSurfaceSessionClaims[sessionId] ?? 0;
+    _workspaceSurfaceSessionClaims[sessionId] = current + 1;
+    if (current == 0) {
       notifyListeners();
     }
   }
 
   /// Marks one owner WebView as no longer mounted by the workspace tree.
   void detachWorkspaceSurfaceSession(String sessionId) {
-    if (_workspaceSurfaceSessionIds.remove(sessionId)) {
-      notifyListeners();
+    final current = _workspaceSurfaceSessionClaims[sessionId] ?? 0;
+    if (current <= 1) {
+      if (_workspaceSurfaceSessionClaims.remove(sessionId) != null) {
+        notifyListeners();
+      }
+    } else {
+      _workspaceSurfaceSessionClaims[sessionId] = current - 1;
     }
   }
 
@@ -377,6 +384,7 @@ class RuntimeBrowserOwner extends ChangeNotifier {
     _automation.remove(removed.id);
     _defaultUserAgents.remove(removed.id);
     _sessionRegistry.unregister(removed.id);
+    _workspaceSurfaceSessionClaims.remove(removed.id);
     removed.dispose();
     if (_tabs.isEmpty) {
       _selectedIndex = 0;

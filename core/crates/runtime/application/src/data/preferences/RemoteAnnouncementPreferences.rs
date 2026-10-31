@@ -1,7 +1,6 @@
 use std::sync::Arc;
 use operit_host_api::RuntimeStorageHost;
 use operit_store::PreferencesDataStore::{PreferencesDataStore, PreferencesDataStoreError, stringPreferencesKey};
-use operit_util::OperitPaths;
 
 /// Owns the versioned RemoteAnnouncementPreferences preference values.
 pub struct RemoteAnnouncementPreferences;
@@ -9,8 +8,13 @@ pub struct RemoteAnnouncementPreferences;
 impl RemoteAnnouncementPreferences {
     /// Opens this module's preference file and applies its declared migrations.
     pub(crate) fn store(storage: Arc<dyn RuntimeStorageHost>) -> PreferencesDataStore {
-        PreferencesDataStore::newWithStorage(storage, OperitPaths::customPreferenceStoragePath("remote_announcement_preferences").expect("declared preference path"))
-            .withSchema(2, |version, preferences| match version {
+        PreferencesDataStore::newWithStorage(storage, operit_util::RuntimeStorageLayout::REMOTE_ANNOUNCEMENT_PREFERENCES_PATH)
+.withSchema(2, Self::migratePreferences)
+    }
+
+    /// Applies the local storage migration owned by this preference module.
+    fn migratePreferences(version: u32, preferences: &mut operit_store::PreferencesDataStore::Preferences) -> Result<(), PreferencesDataStoreError> {
+        match version {
                 0 => Ok(()),
                 1 => {
                     let key = stringPreferencesKey("acknowledged_version");
@@ -20,6 +24,7 @@ impl RemoteAnnouncementPreferences {
                     Ok(())
                 }
                 from => Err(PreferencesDataStoreError::MissingMigration { from, to: from + 1 }),
-            })
+            }
     }
+
 }

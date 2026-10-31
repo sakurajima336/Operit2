@@ -37,7 +37,7 @@ export class FileSelectorApiImpl {
     this.binding = binding;
   }
 
-  openFileWithExtensions(initialDirectory: string, allowedTypes: FileTypes, result: Result<FileResponse>): void {
+  openFileWithExtensions(initialDirectory: string, allowedTypes: FileTypes, result: Result<FileResponse | null>): void {
     Log.d(TAG, 'openFile types:' + allowedTypes.extensions + ' dir:' + initialDirectory)
     filePicker(initialDirectory, allowedTypes, 1).then(async (filePickerResult: ESObject) => {
       if (filePickerResult != undefined) {
@@ -102,7 +102,7 @@ export class FileSelectorApiImpl {
     }
   }
 
-  openFile(initialDirectory: string, allowedTypes: FileTypes, result: Result<FileResponse>): void {
+  openFile(initialDirectory: string, allowedTypes: FileTypes, result: Result<FileResponse | null>): void {
     if (allowedTypes.getMimeTypes().length == 0) {
       allowedTypes.setMimeTypes(tryConvertExtensionsToMimetypes(allowedTypes.getExtensions()));
     }
@@ -262,7 +262,7 @@ export class FileSelectorApiImpl {
 
   /// Performs a native file copy with opened document handles and deterministic resource release.
   private async copyFileReference(call: MethodCall, result: MethodResult): Promise<void> {
-    const argumentsMap = call.arguments as Map<string, string>;
+    const argumentsMap = call.args as Map<string, string>;
     const sourcePath = argumentsMap.get('sourcePath');
     const destinationUri = argumentsMap.get('destinationUri');
     if (typeof sourcePath != 'string' || sourcePath.length == 0 ||
@@ -311,7 +311,7 @@ export class FileSelectorApiImpl {
   /// Publishes measured URI copy counters through the registered platform channel.
   private reportSaveProgress(completed: number, total: number): void {
     if (this.saveChannel == null) throw new Error('Document save channel is detached');
-    const progress = new Map<string, ESObject>();
+    const progress = new Map<string, Object>();
     progress.set('completed', completed);
     progress.set('total', total);
     this.saveChannel.invokeMethod('saveProgress', progress);
@@ -323,7 +323,7 @@ export class FileSelectorApiImpl {
       if (this.detached) {
         throw new Error('Document input has been detached');
       }
-      const args = call.arguments as Map<string, ESObject>;
+      const args = call.args as Map<string, Object>;
       if (call.method == 'open') {
         const path = args.get('path') as string;
         const start = args.get('start') as number;
@@ -402,7 +402,7 @@ export class FileSelectorApiImpl {
           const args: Array<ESObject> = msg as Array<ESObject>;
           const initialDirectoryArg = args[0] as string;
           const allowedTypesArg = args[1] as FileTypes;
-          const resultCallback: Result<FileResponse> = new ResultBuilder((result: FileResponse): void => {
+          const resultCallback: Result<FileResponse | null> = new ResultBuilder((result: FileResponse | null): void => {
             wrapped.push(result);
             reply.reply(wrapped);
           },(error: Error): void => {

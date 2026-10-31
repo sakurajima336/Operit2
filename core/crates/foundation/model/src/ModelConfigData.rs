@@ -79,7 +79,6 @@ pub enum ApiProviderType {
     DEEPSEEK,
     MISTRAL,
     SILICONFLOW,
-    IFLOW,
     OPENROUTER,
     OPENCODE,
     FOUR_ROUTER,
@@ -123,7 +122,6 @@ impl ApiProviderType {
             "DEEPSEEK" => Some(Self::DEEPSEEK),
             "MISTRAL" => Some(Self::MISTRAL),
             "SILICONFLOW" => Some(Self::SILICONFLOW),
-            "IFLOW" => Some(Self::IFLOW),
             "OPENROUTER" => Some(Self::OPENROUTER),
             "OPENCODE" => Some(Self::OPENCODE),
             "FOUR_ROUTER" => Some(Self::FOUR_ROUTER),
@@ -167,7 +165,6 @@ impl ApiProviderType {
             Self::DEEPSEEK => "DEEPSEEK",
             Self::MISTRAL => "MISTRAL",
             Self::SILICONFLOW => "SILICONFLOW",
-            Self::IFLOW => "IFLOW",
             Self::OPENROUTER => "OPENROUTER",
             Self::OPENCODE => "OPENCODE",
             Self::FOUR_ROUTER => "FOUR_ROUTER",
@@ -198,7 +195,7 @@ pub struct ModelConfigDefaults;
 
 impl ModelConfigDefaults {
     pub const DEFAULT_MAX_CONTEXT_LENGTH: f32 = 200.0;
-    pub const DEFAULT_SUMMARY_TOKEN_THRESHOLD: f32 = 0.70;
+    pub const DEFAULT_SUMMARY_TOKEN_THRESHOLD: f32 = 0.85;
     pub const DEFAULT_ENABLE_SUMMARY: bool = true;
     pub const DEFAULT_ENABLE_SUMMARY_BY_MESSAGE_COUNT: bool = true;
     pub const DEFAULT_SUMMARY_MESSAGE_COUNT_THRESHOLD: i32 = 16;
@@ -384,6 +381,9 @@ impl ModelSummarySettings {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[allow(non_snake_case)]
 pub struct LocalModelRuntimeSettings {
+    /// Opaque Binding selecting the device that owns the installed model weights.
+    #[serde(default)]
+    pub inferenceBindingKey: String,
     pub mnnForwardType: i32,
     pub mnnThreadCount: i32,
     pub llamaThreadCount: i32,
@@ -400,6 +400,7 @@ pub struct LocalModelRuntimeSettings {
 impl Default for LocalModelRuntimeSettings {
     fn default() -> Self {
         Self {
+            inferenceBindingKey: String::new(),
             mnnForwardType: 0,
             mnnThreadCount: 4,
             llamaThreadCount: 4,

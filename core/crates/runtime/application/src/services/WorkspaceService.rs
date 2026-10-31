@@ -211,6 +211,12 @@ impl WorkspaceService {
         Ok(directoryEntries)
     }
 
+    /// Lists every persisted workspace independently from chat history.
+    #[allow(non_snake_case)]
+    pub fn listWorkspaces(&self) -> Result<Vec<Workspace>, String> {
+        self.workspaceStore.getAll().map_err(|error| error.to_string())
+    }
+
     /// Reads a text file from a chat-bound workspace.
     #[allow(non_snake_case)]
     pub fn readWorkspaceTextFile(
@@ -392,11 +398,20 @@ impl WorkspaceService {
     }
 
     fn trackWorkspaceChange<T>(&self, path: &str, change: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
-        if PathMapper::relativePath(PathMapper::workspaceCollectionPath(), path)?.is_some() {
-            operit_store::WorkspaceFileSyncStore::WorkspaceFileSyncStore::new(
-                self.runtimeStorageHost.clone(), operit_util::RuntimeStorageLayout::RUNTIME_SYNC_DIR_PATH,
-            ).track(change)
-        } else { change() }
+        let relative = PathMapper::relativePath(PathMapper::workspaceCollectionPath(), path)?;
+        let workspacePath = relative
+            .filter(|relative| !relative.is_empty())
+            .map(|relative| format!("workspaces/{relative}"));
+        match workspacePath {
+            // Re-hash the touched file so same-size rewrites publish immediately
+            // instead of waiting for the periodic full-hash round.
+            Some(workspacePath) => {
+                operit_store::WorkspaceFileSyncStore::WorkspaceFileSyncStore::new(
+                    self.runtimeStorageHost.clone(), operit_util::RuntimeStorageLayout::RUNTIME_SYNC_DIR_PATH,
+                ).trackPaths(&[workspacePath.as_str()], change)
+            }
+            None => change(),
+        }
     }
 
     /// Creates a VFS instance scoped to the configured workspace roots.

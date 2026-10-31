@@ -104,6 +104,33 @@ class AppLocalizationsZh extends AppLocalizations {
   String get chatQueueAdded => '已加入发送队列';
 
   @override
+  String get chatSendOptions => '选择发送方式';
+
+  @override
+  String get chatQueueAddMessageDescription => '当前回复结束后自动发送（默认）';
+
+  @override
+  String get chatGuideCurrentTurn => '引导当前对话';
+
+  @override
+  String get chatGuideCurrentTurnDescription => '不打断当前任务，在后续模型请求中生效';
+
+  @override
+  String get chatInterruptAndSend => '打断并发送';
+
+  @override
+  String get chatInterruptAndSendDescription => '停止当前回复，立即发送这条消息';
+
+  @override
+  String get chatGuidanceAccepted => '已添加引导，将在后续模型请求中生效';
+
+  @override
+  String get chatGuidanceTextOnly => '引导仅支持文本，请先移除附件和回复目标。';
+
+  @override
+  String get chatQueueWithdrawToEditor => '撤回到编辑框';
+
+  @override
   String get chatPleaseCreateNewChat => '请新建对话';
 
   @override
@@ -274,6 +301,33 @@ class AppLocalizationsZh extends AppLocalizations {
   }
 
   @override
+  String get messageLocatorSearchMessages => '搜索消息';
+
+  @override
+  String get messageLocatorViewFavorites => '查看收藏';
+
+  @override
+  String get messageLocatorAll => '全部';
+
+  @override
+  String get messageLocatorFavorites => '收藏';
+
+  @override
+  String get messageLocatorNoFavorites => '还没有收藏的消息';
+
+  @override
+  String get messageLocatorLoadFailed => '暂时无法加载消息，请重试';
+
+  @override
+  String get messageLocatorFavoriteFailed => '收藏更新失败，请重试';
+
+  @override
+  String get messageLocatorAddFavorite => '收藏消息';
+
+  @override
+  String get messageLocatorRemoveFavorite => '取消收藏';
+
+  @override
   String get messageLocatorNoMatches => '没有匹配的消息';
 
   @override
@@ -370,7 +424,7 @@ class AppLocalizationsZh extends AppLocalizations {
   String get workspaceProjectTypeDialogDescription => '请选择要创建的默认工作区类型';
 
   @override
-  String get workspaceUnbindTitle => '解除绑定';
+  String get workspaceUnbindTitle => '从当前对话移除项目';
 
   @override
   String get workspaceUnbindDescription => '解除当前会话的关联，保留工作区文件';
@@ -520,7 +574,7 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String desktopWidgetsCount(int count) {
-    return '桌面组件 $count';
+    return '桌面小部件 $count';
   }
 
   @override
@@ -891,7 +945,7 @@ class AppLocalizationsZh extends AppLocalizations {
   String get settingsCategoryLocalModelsTitle => '本地模型';
 
   @override
-  String get settingsCategoryLocalModelsSubtitle => '下载、引擎、STT / TTS';
+  String get settingsCategoryLocalModelsSubtitle => 'LLM、下载、STT / TTS';
 
   @override
   String get settingsCategoryLocalModelsDescription => '管理按需安装的本地模型和推理引擎。';
@@ -1362,9 +1416,6 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get settingsModelProviderTypeSiliconflow => '硅基流动';
-
-  @override
-  String get settingsModelProviderTypeIflow => '心流';
 
   @override
   String get settingsModelProviderTypeOpenrouter => 'OpenRouter';
@@ -2643,7 +2694,10 @@ class AppLocalizationsZh extends AppLocalizations {
   String get settingsAppearanceChatDisplaySection => '聊天显示';
 
   @override
-  String get settingsAppearanceMessageStyle => '消息样式';
+  String get settingsAppearanceUserMessageStyle => '用户消息样式';
+
+  @override
+  String get settingsAppearanceAiMessageStyle => 'AI 消息样式';
 
   @override
   String get settingsAppearanceMessageStyleClean => '命令式';
@@ -3693,13 +3747,13 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get settingsPeerPortModeHelp =>
-      '固定模式使用填写的 IP 和端口，适用于内网穿透和端口映射。固定端口被占用时会报错，不会改变监听地址。';
+      '默认由系统分配可用端口，并通过局域网发现公布。固定模式使用填写的监听地址和端口，端口被占用时会报错。';
 
   @override
   String get settingsPeerPortMode => '端口分配方式';
 
   @override
-  String get settingsPeerPortModeFixed => '固定 IP 和端口';
+  String get settingsPeerPortModeFixed => '固定监听地址和端口';
 
   @override
   String get settingsPeerPortModeAutomatic => '自动分配端口';
@@ -3718,7 +3772,7 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get settingsPeerTransportHelp =>
-      '暴露方式（可多选）。HTTP 和 WebSocket 可共用端口；TCP 暂不能与它们共用端口。蓝牙需要平台支持。关闭发现并取消全部选择可停止监听。修改设置会中断现有连接；仅关闭发现不会关闭直接连接。';
+      '暴露方式（可多选）。HTTP、WebSocket 和 TCP 共用同一个监听端口，可自由组合。蓝牙需要平台支持。关闭发现并取消全部选择可停止监听。修改设置会中断现有连接；仅关闭发现不会关闭直接连接。';
 
   @override
   String get settingsPeerBindAddress => '监听 IP 地址';
@@ -3733,14 +3787,10 @@ class AppLocalizationsZh extends AppLocalizations {
   String get settingsPeerBindPortHelp => '固定模式使用此端口监听。';
 
   @override
-  String get settingsPeerBindPortAutomaticHelp => '自动模式会从此端口开始选择空闲端口。';
+  String get settingsPeerBindPortAutomaticHelp => '由系统分配可用端口；启动后显示实际端口。';
 
   @override
   String get settingsPeerDiscoveryNeedsTransport => '开启允许被搜索前，请至少选择一种暴露方式。';
-
-  @override
-  String get settingsPeerPortConflict =>
-      '当前 TCP 不能与 HTTP/WebSocket 共用监听端口，请选择 TCP 或 HTTP/WebSocket。';
 
   @override
   String get settingsPeerAddressRequired => '请输入监听 IP 地址。';
@@ -3882,6 +3932,19 @@ class AppLocalizationsZh extends AppLocalizations {
       '该设备已是本空间成员。与它配对成功即建立直连，无需重新加入空间；配对需要对方显示、由你输入六位确认码。';
 
   @override
+  String get deviceSpaceUpdateEndpoint => '更新直连地址';
+
+  @override
+  String get deviceSpaceUpdateEndpointLabel => '直连地址';
+
+  @override
+  String get deviceSpaceUpdateEndpointHint =>
+      '例如 ws://主机:端口/link 或 主机:端口 —— 填对方当前的监听端口';
+
+  @override
+  String get deviceSpaceUpdateEndpointSaved => '直连地址已更新';
+
+  @override
   String deviceSpaceDirectLinkEstablished(String device) {
     return '已建立直连：$device';
   }
@@ -3900,6 +3963,11 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get devicePickerNearby => '附近设备';
+
+  @override
+  String devicePickerDiscoveryFailed(String error) {
+    return '附近设备发现失败：$error';
+  }
 
   @override
   String get devicePickerEmpty => '暂未发现附近设备';
@@ -4075,4 +4143,231 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get backgroundWorkStop => '停止';
+
+  @override
+  String get localModelsDeviceOnly => '保存在此设备';
+
+  @override
+  String get localModelsDeviceOnlyDescription =>
+      '模型权重、下载进度和安装记录仅保存在当前设备，不参与设备空间同步。聊天可通过路由使用安装了模型的设备。';
+
+  @override
+  String get localModelsRunChat => '推理与设置';
+
+  @override
+  String get localModelsUseForChat => '用于聊天';
+
+  @override
+  String get localModelsChatActivated => '已设为聊天模型';
+
+  @override
+  String get localModelsPrompt => '输入提示词';
+
+  @override
+  String get localModelsGenerate => '开始推理';
+
+  @override
+  String get localModelsGenerating => '正在推理…';
+
+  @override
+  String get localModelsThreads => 'CPU 线程数';
+
+  @override
+  String get localModelsContextSize => '上下文长度（token）';
+
+  @override
+  String get localModelsBatchSize => '批次大小';
+
+  @override
+  String get localModelsUnload => '释放模型内存';
+
+  @override
+  String get localModelsCpuBackend => '本机 CPU 推理';
+
+  @override
+  String get localModelsLlmDescription =>
+      '下载 GGUF 模型使用 llama.cpp，或下载 MNN 模型包。安装后可在这里试运行，或设为聊天模型。';
+
+  @override
+  String get localModelsInvalidSettings => '请检查线程数、上下文长度和批次大小。';
+
+  @override
+  String get localModelsFilterAll => '全部模型';
+
+  @override
+  String get localModelsFilterInstalled => '仅已安装';
+
+  @override
+  String get localModelsSearchCatalog => '搜索名称或推理引擎';
+
+  @override
+  String get deviceSpaceSyncPeer => '空间设备';
+
+  @override
+  String deviceSpaceSyncActive(String device) {
+    return '正在与 $device 同步';
+  }
+
+  @override
+  String deviceSpaceSyncCompleted(String device) {
+    return '与 $device 同步完成';
+  }
+
+  @override
+  String get deviceSpaceSyncChecking => '正在检查数据差异';
+
+  @override
+  String get deviceSpaceSyncRecords => '正在交换数据记录';
+
+  @override
+  String deviceSpaceSyncRecordProgress(int completed, int total, int percent) {
+    return '$completed / $total 条 · $percent%';
+  }
+
+  @override
+  String deviceSpaceSyncPendingCount(int count) {
+    return '待应用 $count 条';
+  }
+
+  @override
+  String deviceSpaceSyncCounting(int count) {
+    return '正在统计总量 · 已处理 $count 条';
+  }
+
+  @override
+  String get deviceSpaceSyncFiles => '正在传输并校验文件';
+
+  @override
+  String get deviceSpaceSyncRetrying => '同步暂时中断，稍后自动重试';
+
+  @override
+  String get deviceSpaceSyncPending => '部分数据尚未处理完成，稍后自动重试';
+
+  @override
+  String deviceSpaceSyncCurrentFile(String done, String total) {
+    return '当前文件：$done / $total';
+  }
+
+  @override
+  String deviceSpaceSyncTransferred(int count, String bytes) {
+    return '已交换 $count 条记录 · 已传输 $bytes';
+  }
+
+  @override
+  String get deviceSpaceSyncBackground => '可以继续使用，同步会在后台完成';
+
+  @override
+  String get runtimeActivityTitle => '后台任务';
+
+  @override
+  String get runtimeActivitySyncing => '正在同步';
+
+  @override
+  String get runtimeActivitySyncCompleted => '同步完成';
+
+  @override
+  String get runtimeActivityWaiting => '等待重试';
+
+  @override
+  String get runtimeActivityExpand => '查看后台任务';
+
+  @override
+  String get runtimeActivityLoadingPackages => '加载扩展';
+
+  @override
+  String get peerQrTitle => '二维码连接';
+
+  @override
+  String get peerQrScan => '扫码连接';
+
+  @override
+  String get peerQrShow => '出示连接码';
+
+  @override
+  String get peerQrShowHint => '让另一台设备扫描此码，连接到这台设备。';
+
+  @override
+  String get peerQrScanHint => '扫描另一台设备的 Operit 连接码。';
+
+  @override
+  String get peerQrTrustHint => '二维码只提供连接地址。连接仍需对方显示的配对码，加入空间仍需审批。';
+
+  @override
+  String get peerQrListenerRequired => '请先在连接设置中开启接收连接，并连接到可用的网络。';
+
+  @override
+  String get peerQrCopy => '复制连接信息';
+
+  @override
+  String get peerQrCopied => '已复制';
+
+  @override
+  String get peerQrImport => '从图片识别';
+
+  @override
+  String get peerQrPaste => '或粘贴连接信息';
+
+  @override
+  String get peerQrRead => '识别连接信息';
+
+  @override
+  String get peerQrWrongDevice => '此连接码属于其他设备，请扫描当前所选设备的连接码。';
+
+  @override
+  String get peerQrImageInvalid => '未能从图片中识别二维码。请选择清晰的二维码图片（不超过 16 MB）。';
+
+  @override
+  String get peerQrCameraUnavailable => '此设备暂时无法使用相机扫码，你可以导入二维码图片或粘贴连接信息。';
+
+  @override
+  String get peerQrCameraPermission => '需要相机权限才能扫码。请在系统设置中允许相机访问，也可导入图片。';
+
+  @override
+  String get peerQrDevice => '连接设备';
+
+  @override
+  String get peerQrScanAgain => '重新扫码';
+
+  @override
+  String get peerQrMethodsHint => '发现不到设备？也可以使用连接码。';
+
+  @override
+  String get toolParametersLabel => '参数';
+
+  @override
+  String get toolResultLabel => '执行结果';
+
+  @override
+  String toolGroupThinkingCount(int count) {
+    return '$count 次思考';
+  }
+
+  @override
+  String toolGroupCallCount(int count) {
+    return '$count 次调用';
+  }
+
+  @override
+  String toolGroupSearchCount(int count) {
+    return '$count 次搜索';
+  }
+
+  @override
+  String toolEditedFileCount(int count) {
+    return '已编辑 $count 个文件';
+  }
+
+  @override
+  String get toolViewChanges => '查看变更';
+
+  @override
+  String toolViewFileDiff(String fileName) {
+    return '查看 $fileName 的变更';
+  }
+
+  @override
+  String get toolGroupCompleted => '已完成';
+
+  @override
+  String get toolGroupExecuting => '正在执行';
 }

@@ -2,6 +2,59 @@
 
 import 'dart:typed_data';
 
+/// Generated SDK model for Rust type `operit_plugin_sdk::js_sdk::tool_display::ToolDisplayDeclaration`.
+class ToolDisplayDeclaration {
+  const ToolDisplayDeclaration({
+    required this.label,
+    required this.icon,
+    required this.target_parameter,
+    required this.result_renderer,
+  });
+
+  /// Decodes `operit_plugin_sdk::js_sdk::tool_display::ToolDisplayDeclaration` from a MessagePack value map.
+  factory ToolDisplayDeclaration.fromMessagePackValue(Map<String, Object?> value) => ToolDisplayDeclaration(
+    label: (value['label'] as Map).map((key, item) => MapEntry(key as String, item as String)),
+    icon: value['icon'] as String,
+    target_parameter: value['targetParameter'] == null ? null : value['targetParameter'] as String,
+    result_renderer: ToolResultRenderer.fromMessagePackValue(value['resultRenderer'] as Map<String, Object?>),
+  );
+
+  /// Encodes this model into a MessagePack-compatible value map.
+  Map<String, Object?> toMessagePackValue() => <String, Object?>{
+    'label': label.map((key, item) => MapEntry(key, item)),
+    'icon': icon,
+    'targetParameter': target_parameter == null ? null : target_parameter!,
+    'resultRenderer': result_renderer.toMessagePackValue(),
+  };
+
+  final Map<String, String> label;
+  final String icon;
+  final String? target_parameter;
+  final ToolResultRenderer result_renderer;
+}
+
+enum ToolResultRenderer {
+  Directory,
+  FileDiff,
+  Text,
+  ;
+
+  /// Decodes `operit_plugin_sdk::js_sdk::tool_display::ToolResultRenderer` from its MessagePack scalar value.
+  factory ToolResultRenderer.fromMessagePackValue(Object? value) => switch (value) {
+    'directory' => ToolResultRenderer.Directory,
+    'fileDiff' => ToolResultRenderer.FileDiff,
+    'text' => ToolResultRenderer.Text,
+    _ => throw ArgumentError('Unknown ToolResultRenderer: $value'),
+  };
+
+  /// Encodes this enum into a MessagePack scalar value.
+  String toMessagePackValue() => switch (this) {
+    ToolResultRenderer.Directory => 'directory',
+    ToolResultRenderer.FileDiff => 'fileDiff',
+    ToolResultRenderer.Text => 'text',
+  };
+}
+
 /// Generated SDK model for Rust type `operit_plugin_sdk::package::EnvVar`.
 class EnvVar {
   const EnvVar({
@@ -55,6 +108,7 @@ class LocalizedText {
 /// Generated SDK model for Rust type `operit_plugin_sdk::package::PackageTool`.
 class PackageTool {
   const PackageTool({
+    required this.display,
     required this.name,
     required this.description,
     required this.parameters,
@@ -64,6 +118,7 @@ class PackageTool {
 
   /// Decodes `operit_plugin_sdk::package::PackageTool` from a MessagePack value map.
   factory PackageTool.fromMessagePackValue(Map<String, Object?> value) => PackageTool(
+    display: value['display'] == null ? null : ToolDisplayDeclaration.fromMessagePackValue(value['display'] as Map<String, Object?>),
     name: value['name'] as String,
     description: LocalizedText.fromMessagePackValue(value['description'] as Map<String, Object?>),
     parameters: (value['parameters'] as List<Object?>).map((item) => PackageToolParameter.fromMessagePackValue(item as Map<String, Object?>)).toList(growable: false),
@@ -73,6 +128,7 @@ class PackageTool {
 
   /// Encodes this model into a MessagePack-compatible value map.
   Map<String, Object?> toMessagePackValue() => <String, Object?>{
+    'display': display == null ? null : display!.toMessagePackValue(),
     'name': name,
     'description': description.toMessagePackValue(),
     'parameters': parameters.map((item) => item.toMessagePackValue()).toList(growable: false),
@@ -80,6 +136,7 @@ class PackageTool {
     'advice': advice,
   };
 
+  final ToolDisplayDeclaration? display;
   final String name;
   final LocalizedText description;
   final List<PackageToolParameter> parameters;
@@ -558,6 +615,7 @@ class ToolPkgChatComposerSlotRuntime {
     required this.id,
     required this.slot,
     required this.screen,
+    required this.screenExport,
     required this.order,
     required this.keepAlive,
   });
@@ -567,6 +625,7 @@ class ToolPkgChatComposerSlotRuntime {
     id: value['id'] as String,
     slot: value['slot'] as String,
     screen: value['screen'] as String,
+    screenExport: value['screenExport'] == null ? null : value['screenExport'] as String,
     order: (value['order'] as num).toInt(),
     keepAlive: value['keepAlive'] as bool,
   );
@@ -576,6 +635,7 @@ class ToolPkgChatComposerSlotRuntime {
     'id': id,
     'slot': slot,
     'screen': screen,
+    'screenExport': screenExport == null ? null : screenExport!,
     'order': order,
     'keepAlive': keepAlive,
   };
@@ -583,6 +643,7 @@ class ToolPkgChatComposerSlotRuntime {
   final String id;
   final String slot;
   final String screen;
+  final String? screenExport;
   final int order;
   final bool keepAlive;
 }
@@ -591,22 +652,26 @@ class ToolPkgChatComposerSlotRuntime {
 class ToolPkgChatMessageMenuDialogRuntime {
   const ToolPkgChatMessageMenuDialogRuntime({
     required this.screen,
+    required this.screenExport,
     required this.title,
   });
 
   /// Decodes `operit_plugin_sdk::toolpkg::ToolPkgParser::ToolPkgChatMessageMenuDialogRuntime` from a MessagePack value map.
   factory ToolPkgChatMessageMenuDialogRuntime.fromMessagePackValue(Map<String, Object?> value) => ToolPkgChatMessageMenuDialogRuntime(
     screen: value['screen'] as String,
+    screenExport: value['screenExport'] == null ? null : value['screenExport'] as String,
     title: LocalizedText.fromMessagePackValue(value['title'] as Map<String, Object?>),
   );
 
   /// Encodes this model into a MessagePack-compatible value map.
   Map<String, Object?> toMessagePackValue() => <String, Object?>{
     'screen': screen,
+    'screenExport': screenExport == null ? null : screenExport!,
     'title': title.toMessagePackValue(),
   };
 
   final String screen;
+  final String? screenExport;
   final LocalizedText title;
 }
 
@@ -696,6 +761,7 @@ class ToolPkgContainerRuntime {
     required this.chatLifecycleHooks,
     required this.chatMessageMenuItems,
     required this.chatRuntimeHooks,
+    required this.chatResponseHooks,
     required this.hostEventHooks,
     required this.toolLifecycleHooks,
     required this.promptInputHooks,
@@ -751,6 +817,7 @@ class ToolPkgContainerRuntime {
     chatLifecycleHooks: (value['chatLifecycleHooks'] as List<Object?>).map((item) => ToolPkgFunctionHookRuntime.fromMessagePackValue(item as Map<String, Object?>)).toList(growable: false),
     chatMessageMenuItems: (value['chatMessageMenuItems'] as List<Object?>).map((item) => ToolPkgChatMessageMenuItemRuntime.fromMessagePackValue(item as Map<String, Object?>)).toList(growable: false),
     chatRuntimeHooks: (value['chatRuntimeHooks'] as List<Object?>).map((item) => ToolPkgFunctionHookRuntime.fromMessagePackValue(item as Map<String, Object?>)).toList(growable: false),
+    chatResponseHooks: (value['chatResponseHooks'] as List<Object?>).map((item) => ToolPkgFunctionHookRuntime.fromMessagePackValue(item as Map<String, Object?>)).toList(growable: false),
     hostEventHooks: (value['hostEventHooks'] as List<Object?>).map((item) => ToolPkgHostEventHookRuntime.fromMessagePackValue(item as Map<String, Object?>)).toList(growable: false),
     toolLifecycleHooks: (value['toolLifecycleHooks'] as List<Object?>).map((item) => ToolPkgFunctionHookRuntime.fromMessagePackValue(item as Map<String, Object?>)).toList(growable: false),
     promptInputHooks: (value['promptInputHooks'] as List<Object?>).map((item) => ToolPkgFunctionHookRuntime.fromMessagePackValue(item as Map<String, Object?>)).toList(growable: false),
@@ -806,6 +873,7 @@ class ToolPkgContainerRuntime {
     'chatLifecycleHooks': chatLifecycleHooks.map((item) => item.toMessagePackValue()).toList(growable: false),
     'chatMessageMenuItems': chatMessageMenuItems.map((item) => item.toMessagePackValue()).toList(growable: false),
     'chatRuntimeHooks': chatRuntimeHooks.map((item) => item.toMessagePackValue()).toList(growable: false),
+    'chatResponseHooks': chatResponseHooks.map((item) => item.toMessagePackValue()).toList(growable: false),
     'hostEventHooks': hostEventHooks.map((item) => item.toMessagePackValue()).toList(growable: false),
     'toolLifecycleHooks': toolLifecycleHooks.map((item) => item.toMessagePackValue()).toList(growable: false),
     'promptInputHooks': promptInputHooks.map((item) => item.toMessagePackValue()).toList(growable: false),
@@ -859,6 +927,7 @@ class ToolPkgContainerRuntime {
   final List<ToolPkgFunctionHookRuntime> chatLifecycleHooks;
   final List<ToolPkgChatMessageMenuItemRuntime> chatMessageMenuItems;
   final List<ToolPkgFunctionHookRuntime> chatRuntimeHooks;
+  final List<ToolPkgFunctionHookRuntime> chatResponseHooks;
   final List<ToolPkgHostEventHookRuntime> hostEventHooks;
   final List<ToolPkgFunctionHookRuntime> toolLifecycleHooks;
   final List<ToolPkgFunctionHookRuntime> promptInputHooks;

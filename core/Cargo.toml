@@ -28,9 +28,6 @@ members = [
     "crates/proxy/bridge",
     "crates/proxy/local",
     "crates/application/core",
-    "crates/node/edge-contract",
-    "crates/node/edge",
-    "crates/proxy/edge",
     "crates/command/core"
 ]
 resolver = "2"
@@ -53,7 +50,6 @@ base64 = "0.22"
 regex = "1"
 json5 = "0.4"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
-rquickjs = "0.12.0"
 rusqlite = { version = "0.31", features = ["bundled"] }
 thiserror = "1"
 tokio = { version = "1", default-features = false }

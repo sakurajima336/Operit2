@@ -78,6 +78,16 @@ def check_command(name: str, version_args: list[str] | None = None) -> CheckResu
     return ok(name, f"{path} :: {version_text[0] if version_text else 'version reported'}")
 
 
+def check_node24() -> CheckResult:
+    result = check_command("node", ["--version"])
+    if not result.ok:
+        return result
+    version = result.detail.rsplit(" :: ", 1)[-1]
+    if not version.startswith("v24."):
+        return missing("Node.js 24", f"found {version}; install Node.js 24")
+    return ok("Node.js 24", result.detail)
+
+
 # Checks whether one required file exists.
 def check_file(name: str, path: Path) -> CheckResult:
     if path.is_file():
@@ -145,7 +155,7 @@ def check_common_tools(products: str) -> list[CheckResult]:
             check_command("git", ["--version"]),
             check_command("cargo", ["--version"]),
             check_command("rustup", ["--version"]),
-            check_command("node", ["--version"]),
+            check_node24(),
             check_command("npm", ["--version"]),
         ]
     results = [
@@ -154,7 +164,7 @@ def check_common_tools(products: str) -> list[CheckResult]:
         check_command("rustup", ["--version"]),
         check_command("fvm", ["--version"]),
         check_command("dart", ["--version"]),
-        check_command("node", ["--version"]),
+        check_node24(),
         check_command("npm", ["--version"]),
         check_command("corepack", ["--version"]),
         check_file("Flutter FVM pin", FLUTTER_APP_DIR / ".fvmrc"),
@@ -169,8 +179,8 @@ def check_common_tools(products: str) -> list[CheckResult]:
 def check_esp32_tools() -> list[CheckResult]:
     emsdk = os.environ.get("EMSDK", "").strip()
     results = [
-        check_directory("ESP32 app directory", REPO_ROOT / "apps" / "esp32"),
-        check_directory("ESP32 editor directory", REPO_ROOT / "tools" / "esp32-editor"),
+        check_directory("ESP32 app directory", REPO_ROOT / "edge" / "boards" / "esp32"),
+        check_directory("ESP32 editor directory", REPO_ROOT / "edge" / "boards" / "esp32" / "editor"),
         check_command("espflash", ["--version"]),
         check_command("ldproxy"),
     ]

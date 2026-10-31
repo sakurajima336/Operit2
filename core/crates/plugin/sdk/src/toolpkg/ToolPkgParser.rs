@@ -82,6 +82,8 @@ pub struct ToolPkgChatComposerSlotRuntime {
     pub id: String,
     pub slot: String,
     pub screen: String,
+    #[serde(rename = "screenExport", default, skip_serializing_if = "Option::is_none")]
+    pub screenExport: Option<String>,
     pub order: i32,
     #[serde(rename = "keepAlive")]
     pub keepAlive: bool,
@@ -154,6 +156,8 @@ pub struct ToolPkgCoreCommandRuntime {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ToolPkgChatMessageMenuDialogRuntime {
     pub screen: String,
+    #[serde(rename = "screenExport", default, skip_serializing_if = "Option::is_none")]
+    pub screenExport: Option<String>,
     pub title: LocalizedText,
 }
 
@@ -272,6 +276,8 @@ pub struct ToolPkgRegisteredChatComposerSlot {
     pub id: String,
     pub slot: String,
     pub screen: String,
+    #[serde(rename = "screenExport", default, skip_serializing_if = "Option::is_none")]
+    pub screenExport: Option<String>,
     #[serde(default)]
     pub order: i32,
     #[serde(rename = "keepAlive")]
@@ -352,6 +358,8 @@ pub struct ToolPkgRegisteredCoreCommand {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ToolPkgRegisteredChatMessageMenuDialog {
     pub screen: String,
+    #[serde(rename = "screenExport", default, skip_serializing_if = "Option::is_none")]
+    pub screenExport: Option<String>,
     #[serde(default)]
     pub title: LocalizedText,
 }
@@ -469,6 +477,8 @@ pub struct ToolPkgMainRegistration {
     pub chatMessageMenuItems: Vec<ToolPkgRegisteredChatMessageMenuItem>,
     #[serde(rename = "chatRuntimeHooks", default)]
     pub chatRuntimeHooks: Vec<ToolPkgRegisteredFunctionHook>,
+    #[serde(rename = "chatResponseHooks", default)]
+    pub chatResponseHooks: Vec<ToolPkgRegisteredFunctionHook>,
     #[serde(rename = "hostEventHooks", default)]
     pub hostEventHooks: Vec<ToolPkgRegisteredHostEventHook>,
     #[serde(rename = "toolLifecycleHooks", default)]
@@ -581,6 +591,8 @@ pub struct ToolPkgContainerRuntime {
     pub chatMessageMenuItems: Vec<ToolPkgChatMessageMenuItemRuntime>,
     #[serde(rename = "chatRuntimeHooks")]
     pub chatRuntimeHooks: Vec<ToolPkgFunctionHookRuntime>,
+    #[serde(rename = "chatResponseHooks", default)]
+    pub chatResponseHooks: Vec<ToolPkgFunctionHookRuntime>,
     #[serde(rename = "hostEventHooks")]
     pub hostEventHooks: Vec<ToolPkgHostEventHookRuntime>,
     #[serde(rename = "toolLifecycleHooks")]
@@ -831,7 +843,7 @@ impl ToolPkgArchiveParser {
         FReadEntryText: FnMut(&str) -> Option<String>,
         FReadEntryProtectionHeader: FnMut(&str) -> Option<Vec<u8>>,
         FParseJsPackage: FnMut(&str, &mut dyn FnMut(String, String)) -> Option<ToolPackage>,
-        FParseMainRegistration: FnMut(&str, &str, &str, &str) -> ToolPkgMainRegistrationParseResult,
+        FParseMainRegistration: FnMut(&str, &str, &str, &str, &[String]) -> ToolPkgMainRegistrationParseResult,
         FReportPackageLoadError: FnMut(String, String),
     {
         let manifestEntryName = findManifestEntry(&entryIndex.entryNames)
@@ -1078,7 +1090,7 @@ impl ToolPkgArchiveParser {
             if abi.is_empty() {
                 return Err(format!("wasm_modules[{index}].abi is required"));
             }
-            if abi != "scalar" {
+            if abi != "scalar" && abi != "memory" {
                 return Err(format!("wasm_modules[{index}].abi is unsupported: {abi}"));
             }
             let mut exportNames = BTreeSet::new();
@@ -1160,7 +1172,14 @@ impl ToolPkgArchiveParser {
                 ToolPkgMainRegistration { marketOrigin, ..Default::default() }
             },
             Some(source) => match parseMainRegistration(
-                &source, &manifest.toolpkgId, &normalizedMainEntry, &apiVersionText,
+                &source,
+                &manifest.toolpkgId,
+                &normalizedMainEntry,
+                &apiVersionText,
+                &subpackagePackages
+                    .iter()
+                    .flat_map(|package| package.env.iter().map(|variable| variable.name.clone()))
+                    .collect::<Vec<_>>(),
             ) {
                 ToolPkgMainRegistrationParseResult::Success { registration } => registration,
                 ToolPkgMainRegistrationParseResult::Failure { message } => {
@@ -1313,6 +1332,7 @@ impl ToolPkgArchiveParser {
                 id,
                 slot,
                 screen,
+                screenExport: contribution.screenExport.clone(),
                 order: contribution.order,
                 keepAlive: contribution.keepAlive,
             });
@@ -1327,7 +1347,7 @@ impl ToolPkgArchiveParser {
             requireToolPkgNavigationSurface(&surface).map_err(|error| {
                 format!("{TOOLPKG_REGISTRATION_NAVIGATION_ENTRY}[{index}].surface {error}")
             })?;
-            if surface == TOOLPKG_NAV_SURFACE_CHAT_ATTACHMENTS || surface == TOOLPKG_NAV_SURFACE_CHAT_SIDEBAR_TABS || surface == TOOLPKG_NAV_SURFACE_CHAT_INPUT_MENU || surface == TOOLPKG_NAV_SURFACE_CHAT_INPUT_MENU_SECTIONS {
+            if surface == TOOLPKG_NAV_SURFACE_CHAT_ATTACHMENTS || isToolPkgEmbeddedUiSurface(&surface) {
                 if entry.action.is_some() {
                     return Err(format!("{TOOLPKG_REGISTRATION_NAVIGATION_ENTRY}[{index}].action is unsupported for {surface}"));
                 }
@@ -1335,7 +1355,7 @@ impl ToolPkgArchiveParser {
                     return Err(format!("{TOOLPKG_REGISTRATION_NAVIGATION_ENTRY}[{index}].route is required for {surface}"));
                 }
             }
-            if surface == TOOLPKG_NAV_SURFACE_CHAT_SIDEBAR_TABS || surface == TOOLPKG_NAV_SURFACE_CHAT_INPUT_MENU || surface == TOOLPKG_NAV_SURFACE_CHAT_INPUT_MENU_SECTIONS {
+            if isToolPkgEmbeddedUiSurface(&surface) {
                 if !routeId.starts_with(&format!("toolpkg:{}:ui:", manifest.toolpkgId)) {
                     return Err(format!("{TOOLPKG_REGISTRATION_NAVIGATION_ENTRY}[{index}].route must belong to this package for {surface}: {routeId}"));
                 }
@@ -1425,6 +1445,10 @@ impl ToolPkgArchiveParser {
         let chatRuntimeHooks = validateFunctionHooks(
             &mainRegistration.chatRuntimeHooks,
             TOOLPKG_REGISTRATION_CHAT_RUNTIME_HOOK,
+        )?;
+        let chatResponseHooks = validateFunctionHooks(
+            &mainRegistration.chatResponseHooks,
+            TOOLPKG_REGISTRATION_CHAT_RESPONSE_HOOK,
         )?;
         let hostEventHooks = validateHostEventHooks(
             &mainRegistration.hostEventHooks,
@@ -1524,6 +1548,7 @@ impl ToolPkgArchiveParser {
             chatLifecycleHooks,
             chatMessageMenuItems,
             chatRuntimeHooks,
+            chatResponseHooks,
             hostEventHooks,
             toolLifecycleHooks,
             promptInputHooks,
@@ -2109,6 +2134,7 @@ fn validateChatMessageMenuItems(
                 }
                 Some(ToolPkgChatMessageMenuDialogRuntime {
                     screen: normalizedScreenPath,
+                    screenExport: dialog.screenExport.clone(),
                     title: dialog.title.clone(),
                 })
             }
@@ -2626,6 +2652,43 @@ mod logo_tests {
 }
 
 #[cfg(test)]
+mod module_export_tests {
+    use super::*;
+
+    /// Named dialog and composer exports must survive archive loading and persisted runtime metadata.
+    #[test]
+    fn preserves_named_exports_for_embedded_screens() {
+        let entries = BTreeMap::from([
+            ("manifest.json".to_string(), r#"{"schema_version":1,"toolpkg_id":"exports_fixture","api_version":"2.0.0","main":"main.js"}"#.to_string()),
+            ("main.js".to_string(), "exports.registerToolPkg = function() {};".to_string()),
+            ("screen.ui.js".to_string(), "exports.Composer = function() {}; exports.Dialog = function() {};".to_string()),
+        ]);
+        let index = ToolPkgEntryIndex {
+            entryNames: entries.keys().cloned().collect(),
+            entryNamesByNormalizedLowercase: entries.keys().map(|name| (name.clone(), name.clone())).collect(),
+        };
+        let loaded = ToolPkgArchiveParser::parseToolPkgFromIndexedEntries(
+            &index, |name| entries.get(name).cloned(), |_| None,
+            ToolPkgSourceType::EXTERNAL, "exports_fixture.toolpkg", false,
+            |_, _| panic!("fixture does not contain subpackages"),
+            |_, _, _, _, _| ToolPkgMainRegistrationParseResult::Success {
+                registration: serde_json::from_value(serde_json::json!({
+                    "chatComposerSlots": [{"id": "composer", "slot": "above_input", "screen": "screen.ui.js", "screenExport": "Composer"}],
+                    "chatMessageMenuItems": [{"id": "menu", "function": "menu", "dialog": {"screen": "screen.ui.js", "screenExport": "Dialog"}}]
+                })).unwrap(),
+            },
+            |name, message| panic!("unexpected package error {name}: {message}"),
+        ).unwrap();
+        let runtime = loaded.containerRuntime;
+        assert_eq!(runtime.chatComposerSlots[0].screenExport.as_deref(), Some("Composer"));
+        assert_eq!(runtime.chatMessageMenuItems[0].dialog.as_ref().unwrap().screenExport.as_deref(), Some("Dialog"));
+        let restored: ToolPkgContainerRuntime = serde_json::from_slice(&serde_json::to_vec(&runtime).unwrap()).unwrap();
+        assert_eq!(restored.chatComposerSlots[0].screenExport.as_deref(), Some("Composer"));
+        assert_eq!(restored.chatMessageMenuItems[0].dialog.as_ref().unwrap().screenExport.as_deref(), Some("Dialog"));
+    }
+}
+
+#[cfg(test)]
 mod api_compatibility_tests {
     use super::*;
 
@@ -2663,7 +2726,7 @@ mod api_compatibility_tests {
                 "compat_fixture.toolpkg",
                 false,
                 |_, _| panic!("fixture does not contain subpackages"),
-                |_, id, path, declared| {
+                |_, id, path, declared, _environment| {
                     assert_eq!(id, "compat_fixture");
                     assert_eq!(path, "main.js");
                     assert_eq!(declared, version);
@@ -2767,7 +2830,7 @@ mod api_compatibility_tests {
                 &index, |name| entries.get(name).cloned(), |_| None,
                 ToolPkgSourceType::EXTERNAL, "theme_fixture.toolpkg", false,
                 |_, _| panic!("declarative theme has no scripts"),
-                |_, _, _, _| panic!("declarative theme must not execute registration"),
+                |_, _, _, _, _| panic!("declarative theme must not execute registration"),
                 |_, _| panic!("declarative theme has no subpackages"),
             );
             match missing {
@@ -2800,7 +2863,7 @@ mod api_compatibility_tests {
         let loaded = ToolPkgArchiveParser::parseToolPkgFromIndexedEntries(
             &index, |name| entries.get(name).cloned(), |_| None,
             ToolPkgSourceType::EXTERNAL, "resource_fixture.toolpkg", false,
-            |_, _| panic!("no executable declarations"), |_, _, _, _| panic!("no main entry"),
+            |_, _| panic!("no executable declarations"), |_, _, _, _, _| panic!("no main entry"),
             |_, _| panic!("resource declarations must load"),
         ).unwrap();
         assert!(loaded.containerRuntime.mainEntry.is_empty());
@@ -2892,7 +2955,7 @@ mod public_api_tests {
             &index, |name| entries.get(name).cloned(), |_| None,
             ToolPkgSourceType::EXTERNAL, "public_fixture.toolpkg", false,
             |_, _| panic!("fixture has no subpackages"),
-            |_, _, _, _| ToolPkgMainRegistrationParseResult::Success {
+            |_, _, _, _, _| ToolPkgMainRegistrationParseResult::Success {
                 registration: ToolPkgMainRegistration {
                     publicApis: (0..methods).map(|_| ToolPkgRegisteredFunctionHook {
                         id: "run".to_string(), function: "runExport".to_string(), ..Default::default()
@@ -2958,7 +3021,7 @@ mod navigation_registration_tests {
             &index, |name| sources.get(name).cloned(), |_| None,
             ToolPkgSourceType::EXTERNAL, "arbitrary_package.toolpkg", false,
             |_, _| panic!("navigation unit input has no subpackages"),
-            |_, _, _, _| ToolPkgMainRegistrationParseResult::Success { registration: registration.clone() },
+            |_, _, _, _, _| ToolPkgMainRegistrationParseResult::Success { registration: registration.clone() },
             |name, message| panic!("unexpected package error {name}: {message}"),
         )
     }
@@ -3022,7 +3085,7 @@ mod navigation_registration_tests {
             &index, |name| sources.get(name).cloned(), |_| None,
             ToolPkgSourceType::EXTERNAL, "arbitrary_package.toolpkg", false,
             |_, _| panic!("sidebar archive input declares no subpackages"),
-            |_, _, _, _| ToolPkgMainRegistrationParseResult::Success { registration: registration.clone() },
+            |_, _, _, _, _| ToolPkgMainRegistrationParseResult::Success { registration: registration.clone() },
             |name, message| panic!("unexpected package error {name}: {message}"),
         )
     }

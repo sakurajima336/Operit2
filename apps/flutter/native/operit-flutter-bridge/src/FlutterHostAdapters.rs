@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use operit_runtime::services::RuntimeHostInteractionService::{
-    requestOwnerBrowserAutomation, requestOwnerBrowserSession, requestOwnerComposeFilePicker,
+    requestOwnerBrowserAutomation, requestOwnerBrowserSessionAsync, requestOwnerComposeFilePicker,
     requestOwnerComposeFileSave, requestOwnerComposeWebViewController, requestOwnerWebVisit,
     RuntimeHostInteractionBrowserAutomationPayload, RuntimeHostInteractionBrowserSessionPayload,
     RuntimeHostInteractionComposeFilePickerPayload,
@@ -15,9 +15,12 @@ use operit_runtime::services::RuntimeHostInteractionService::{
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
+use async_trait::async_trait;
 use operit_host_api::{
     BrowserAutomationRequest, BrowserAutomationResponse, FileSystemHost, HostError, HostResult,
 };
+
+use operit_tools::files::{PathMapper::PathMapper, VisualFileSystem::VisualFileSystem};
 
 use crate::current_time_millis_u64;
 
@@ -182,8 +185,9 @@ impl FlutterBrowserSessionBridge {
         Self {}
     }
 
-    /// Sends one browser session command to the owner app.
-    fn requestCommand(
+    /// Sends one browser session command to the owner app and waits without
+    /// blocking the calling runtime worker.
+    async fn requestCommand(
         &self,
         command: operit_host_api::BrowserSessionCommand,
     ) -> operit_host_api::HostResult<operit_host_api::BrowserSessionCommandResult> {
@@ -192,10 +196,11 @@ impl FlutterBrowserSessionBridge {
                 "browser session command encode failed: {error}"
             ))
         })?;
-        let response = requestOwnerBrowserSession(
+        let response = requestOwnerBrowserSessionAsync(
             RuntimeHostInteractionBrowserSessionPayload { commandJson },
             Duration::from_secs(60),
         )
+        .await
         .map_err(operit_host_api::HostError::new)?;
         serde_json::from_str(&response.resultJson).map_err(|error| {
             operit_host_api::HostError::new(format!(
@@ -230,17 +235,18 @@ impl FlutterBrowserSessionBridge {
     }
 }
 
+#[async_trait(?Send)]
 impl operit_host_api::BrowserSessionHost for FlutterBrowserSessionBridge {
     /// Lists interactive browser sessions owned by the Flutter app.
-    fn listBrowserSessions(
+    async fn listBrowserSessions(
         &self,
     ) -> operit_host_api::HostResult<Vec<operit_host_api::BrowserSessionInfo>> {
-        let result = self.requestCommand(Self::command("list"))?;
+        let result = self.requestCommand(Self::command("list")).await?;
         Ok(result.sessions)
     }
 
     /// Creates an interactive browser session in the Flutter app.
-    fn createBrowserSession(
+    async fn createBrowserSession(
         &self,
         initialUrl: &str,
         userAgent: Option<&str>,
@@ -250,11 +256,11 @@ impl operit_host_api::BrowserSessionHost for FlutterBrowserSessionBridge {
         command.url = Some(initialUrl.to_string());
         command.userAgent = userAgent.map(str::to_string);
         command.headers = headers;
-        Self::requireSession(self.requestCommand(command)?, "create")
+        Self::requireSession(self.requestCommand(command).await?, "create")
     }
 
     /// Updates a browser session owned by the Flutter app.
-    fn updateBrowserSession(
+    async fn updateBrowserSession(
         &self,
         sessionId: &str,
         userAgent: Option<&str>,
@@ -264,25 +270,25 @@ impl operit_host_api::BrowserSessionHost for FlutterBrowserSessionBridge {
         command.sessionId = Some(sessionId.to_string());
         command.userAgent = userAgent.map(str::to_string);
         command.headers = headers;
-        Self::requireSession(self.requestCommand(command)?, "update")
+        Self::requireSession(self.requestCommand(command).await?, "update")
     }
 
     /// Submits a semantic browser command to the Flutter app.
-    fn submitBrowserCommand(
+    async fn submitBrowserCommand(
         &self,
         command: operit_host_api::BrowserSessionCommand,
     ) -> operit_host_api::HostResult<operit_host_api::BrowserSessionCommandResult> {
-        self.requestCommand(command)
+        self.requestCommand(command).await
     }
 
     /// Reads a browser session snapshot from the Flutter app.
-    fn getBrowserSessionSnapshot(
+    async fn getBrowserSessionSnapshot(
         &self,
         sessionId: &str,
     ) -> operit_host_api::HostResult<operit_host_api::BrowserSessionSnapshot> {
         let mut command = Self::command("snapshot");
         command.sessionId = Some(sessionId.to_string());
-        let result = self.requestCommand(command)?;
+        let result = self.requestCommand(command).await?;
         let session = Self::requireSession(result.clone(), "snapshot")?;
         Ok(operit_host_api::BrowserSessionSnapshot {
             session,
@@ -291,13 +297,13 @@ impl operit_host_api::BrowserSessionHost for FlutterBrowserSessionBridge {
     }
 
     /// Closes a browser session owned by the Flutter app.
-    fn closeBrowserSession(
+    async fn closeBrowserSession(
         &self,
         sessionId: &str,
     ) -> operit_host_api::HostResult<operit_host_api::BrowserSessionCommandResult> {
         let mut command = Self::command("close");
         command.sessionId = Some(sessionId.to_string());
-        self.requestCommand(command)
+        self.requestCommand(command).await
     }
 }
 
@@ -381,12 +387,81 @@ impl operit_host_api::WebVisitHost for FlutterWebVisitBridge {
 
 /// Forwards Compose DSL view commands from the runtime to the Flutter owner.
 #[derive(Clone)]
-pub(crate) struct FlutterComposeDslWebViewBridge {}
+pub(crate) struct FlutterComposeDslWebViewBridge {
+    vfs: VisualFileSystem,
+}
 
 impl FlutterComposeDslWebViewBridge {
-    /// Creates the Compose DSL view owner bridge.
-    pub(crate) fn new() -> Self {
-        Self {}
+    /// Binds Compose host responses to the owning runtime's VFS capabilities.
+    pub(crate) fn new(host: &operit_host_api::HostManager::HostManager) -> HostResult<Self> {
+        let storage = host.runtimeStorageHost.clone().ok_or_else(|| {
+            HostError::new("RuntimeStorageHost is not registered for file selection")
+        })?;
+        let files = host
+            .fileSystemHost
+            .clone()
+            .ok_or_else(|| HostError::new("FileSystemHost is not registered for file selection"))?;
+        let root = storage
+            .runtimeRootDir()
+            .ok_or_else(|| HostError::new("File selection requires a runtime storage root"))?;
+        let workspaces = storage
+            .workspaceRootDir()
+            .ok_or_else(|| HostError::new("File selection requires a workspace storage root"))?;
+        Ok(Self {
+            vfs: VisualFileSystem::new(files, PathMapper::new(root, workspaces, storage)),
+        })
+    }
+
+    /// Requires each returned locator to address an existing resource through the VFS.
+    fn validateFilePickerResult(
+        &self,
+        result: serde_json::Value,
+        directory: bool,
+    ) -> HostResult<serde_json::Value> {
+        let cancelled = result
+            .get("cancelled")
+            .and_then(serde_json::Value::as_bool)
+            .ok_or_else(|| HostError::new("File-picker response requires a cancellation flag"))?;
+        let files = result
+            .get("files")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| HostError::new("File-picker response requires a files array"))?;
+        if cancelled != files.is_empty() {
+            return Err(HostError::new(
+                "File-picker cancellation does not match its selection",
+            ));
+        }
+        for file in files {
+            let path = file
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| HostError::new("Selected resource requires a VFS path"))?;
+            if file.get("uri").and_then(serde_json::Value::as_str) != Some(path) {
+                return Err(HostError::new(
+                    "Selected resource URI must identify its VFS path",
+                ));
+            }
+            let resolved = self.vfs.resolvePath(path).map_err(HostError::new)?;
+            if resolved.vfsPath != path {
+                return Err(HostError::new(
+                    "Selected resource requires a canonical VFS path",
+                ));
+            }
+            let entry = self.vfs.fileExists(path).map_err(HostError::new)?;
+            if !entry.exists || entry.isDirectory != directory {
+                return Err(HostError::new(
+                    "Selected resource is not accessible through its VFS path",
+                ));
+            }
+            if !directory
+                && file.get("size").and_then(serde_json::Value::as_i64) != Some(entry.size)
+            {
+                return Err(HostError::new(
+                    "Selected file size does not match its VFS resource",
+                ));
+            }
+        }
+        Ok(result)
     }
 }
 
@@ -425,11 +500,13 @@ impl operit_host_api::ComposeDslWebViewHost for FlutterComposeDslWebViewBridge {
             Duration::from_secs(600),
         )
         .map_err(operit_host_api::HostError::new)?;
-        serde_json::from_str(&response.resultJson).map_err(|error| {
-            operit_host_api::HostError::new(format!(
-                "Invalid Compose file-picker owner response: {error}"
-            ))
-        })
+        let result = serde_json::from_str(&response.resultJson).map_err(|error| {
+            HostError::new(format!("Invalid Compose file-picker owner response: {error}"))
+        })?;
+        self.validateFilePickerResult(
+            result,
+            request.picker == operit_host_api::ComposeDslFilePickerMode::Directory,
+        )
     }
     /// Saves UTF-8 content through the same Flutter owner as file selection.
     fn saveFile(

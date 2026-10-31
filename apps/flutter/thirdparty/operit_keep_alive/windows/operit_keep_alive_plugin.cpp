@@ -83,9 +83,10 @@ class KeepAlivePlugin final : public flutter::Plugin {
         });
   }
 
-  /// Deletes the shell resource before its associated engine messenger disappears.
+  /// Releases native resources during plugin registrar destruction.
   ~KeepAlivePlugin() override {
-    channel_->SetMethodCallHandler(nullptr);
+    // Flutter has already detached the engine from its messenger at this point.
+    // The registrar owns the messenger and releases its handlers after plugins.
     registrar_->UnregisterTopLevelWindowProcDelegate(delegate_);
     if (tray_added_) Shell_NotifyIconW(NIM_DELETE, &tray_);
   }
@@ -116,32 +117,51 @@ class KeepAlivePlugin final : public flutter::Plugin {
     tray_added_ = true;
   }
 
-  /// Claims only the initialized engine's root window and creates its tray before hiding is allowed.
+  /// Binds each Dart lifetime to the retained engine window and its single tray icon.
   void Initialize(const Map& arguments) {
-    if (initialized_) throw std::logic_error("Keep-alive is already initialized");
     auto* view = registrar_->GetView();
     if (view == nullptr) throw std::runtime_error("Keep-alive requires the main Flutter view");
-    window_ = GetAncestor(view->GetNativeWindow(), GA_ROOT);
-    if (window_ == nullptr) throw std::runtime_error("Main window is unavailable");
-    title_ = Wide(String(arguments, "applicationName"));
-    open_ = Wide(String(arguments, "openLabel"));
-    exit_ = Wide(String(arguments, "exitLabel"));
-    quit_message_ = Wide(String(arguments, "quitMessage"));
-    taskbar_created_ = RegisterWindowMessageW(L"TaskbarCreated");
-    if (taskbar_created_ == 0) throw std::runtime_error("Unable to register shell lifecycle message");
-    tray_ = {};
-    tray_.cbSize = sizeof(tray_);
-    tray_.hWnd = window_;
-    tray_.uID = kTrayId;
-    tray_.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
-    tray_.uCallbackMessage = kTrayMessage;
-    tray_.hIcon = reinterpret_cast<HICON>(GetClassLongPtr(window_, GCLP_HICON));
-    if (tray_.hIcon == nullptr) throw std::runtime_error("Main window has no application icon");
-    if (title_.size() >= sizeof(tray_.szTip) / sizeof(wchar_t)) {
+    const auto window = GetAncestor(view->GetNativeWindow(), GA_ROOT);
+    if (window == nullptr) throw std::runtime_error("Main window is unavailable");
+    if (initialized_ && window != window_) throw std::logic_error("Keep-alive window ownership changed");
+    const auto title = Wide(String(arguments, "applicationName"));
+    const auto open = Wide(String(arguments, "openLabel"));
+    const auto exit = Wide(String(arguments, "exitLabel"));
+    const auto quit_message = Wide(String(arguments, "quitMessage"));
+    const auto taskbar_created = RegisterWindowMessageW(L"TaskbarCreated");
+    if (taskbar_created == 0) throw std::runtime_error("Unable to register shell lifecycle message");
+    NOTIFYICONDATAW tray{};
+    tray.cbSize = sizeof(tray);
+    tray.hWnd = window;
+    tray.uID = kTrayId;
+    tray.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
+    tray.uCallbackMessage = kTrayMessage;
+    tray.hIcon = reinterpret_cast<HICON>(GetClassLongPtr(window, GCLP_HICON));
+    if (tray.hIcon == nullptr) throw std::runtime_error("Main window has no application icon");
+    if (title.size() >= sizeof(tray.szTip) / sizeof(wchar_t)) {
       throw std::invalid_argument("Application tray title is too long");
     }
-    wcscpy_s(tray_.szTip, title_.c_str());
-    AddTray();
+    wcscpy_s(tray.szTip, title.c_str());
+    if (initialized_) {
+      if (!Shell_NotifyIconW(NIM_MODIFY, &tray)) throw std::runtime_error("Unable to update the system tray icon");
+      tray.uVersion = NOTIFYICON_VERSION_4;
+      tray_added_ = true;
+    }
+    window_ = window;
+    title_ = title;
+    open_ = open;
+    exit_ = exit;
+    quit_message_ = quit_message;
+    taskbar_created_ = taskbar_created;
+    tray_ = tray;
+    if (!initialized_) AddTray();
+
+    // Hot restart replaces Dart without destroying this plugin or releasing its leases.
+    leases_.clear();
+    work_items_.clear();
+    work_summary_.clear();
+    work_revision_ = -1;
+    closing_ = false;
     initialized_ = true;
   }
 

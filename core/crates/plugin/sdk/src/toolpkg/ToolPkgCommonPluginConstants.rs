@@ -57,6 +57,8 @@ pub const TOOLPKG_REGISTRATION_CHAT_MESSAGE_HOOK: &str = "ToolPkg.registerChatMe
 /// Names capture of the single registered conversation creation handler.
 pub const TOOLPKG_REGISTRATION_CHAT_LIFECYCLE_HOOK: &str = "ToolPkg.registerChatLifecycleHook";
 pub const TOOLPKG_REGISTRATION_CHAT_MESSAGE_MENU_ITEM: &str = "ToolPkg.registerChatMessageMenuItem";
+pub const TOOLPKG_REGISTRATION_CHAT_RESPONSE_HOOK: &str = "ToolPkg.registerChatResponseHook";
+pub const TOOLPKG_EVENT_CHAT_RESPONSE: &str = "chat_response";
 pub const TOOLPKG_REGISTRATION_CHAT_RUNTIME_HOOK: &str = "ToolPkg.registerChatRuntimeHook";
 pub const TOOLPKG_REGISTRATION_HOST_EVENT_HOOK: &str = "ToolPkg.registerHostEventHook";
 pub const TOOLPKG_REGISTRATION_TOOL_LIFECYCLE_HOOK: &str = "ToolPkg.registerToolLifecycleHook";
@@ -88,6 +90,25 @@ pub const TOOLPKG_NAV_SURFACE_CHAT_INPUT_MENU: &str = "chat_input_menu";
 
 /// Names plugin-owned Compose DSL sections below chat statistics and above native controls.
 pub const TOOLPKG_NAV_SURFACE_CHAT_INPUT_MENU_SECTIONS: &str = "chat_input_menu_sections";
+/// Embeds plugin-owned content after an individual versioned chat message.
+pub const TOOLPKG_NAV_SURFACE_CHAT_MESSAGE_AFTER: &str = "chat_message_after";
+/// Opens plugin-owned pages inside the workspace without sidebar docking ownership.
+pub const TOOLPKG_NAV_SURFACE_WORKSPACE: &str = "workspace";
+/// Embeds plugin-owned content on the workspace overview page.
+pub const TOOLPKG_NAV_SURFACE_WORKSPACE_HOME: &str = "workspace_home";
+
+/// Identifies surfaces that require one package-owned Compose DSL route.
+#[allow(non_snake_case)]
+pub(crate) fn isToolPkgEmbeddedUiSurface(surface: &str) -> bool {
+    matches!(surface,
+        TOOLPKG_NAV_SURFACE_CHAT_SIDEBAR_TABS
+        | TOOLPKG_NAV_SURFACE_CHAT_INPUT_MENU
+        | TOOLPKG_NAV_SURFACE_CHAT_INPUT_MENU_SECTIONS
+        | TOOLPKG_NAV_SURFACE_CHAT_MESSAGE_AFTER
+        | TOOLPKG_NAV_SURFACE_WORKSPACE
+        | TOOLPKG_NAV_SURFACE_WORKSPACE_HOME
+    )
+}
 
 /// Requires an exact supported navigation surface without case folding or whitespace repair.
 #[allow(non_snake_case)]
@@ -99,7 +120,10 @@ pub(crate) fn requireToolPkgNavigationSurface(surface: &str) -> Result<(), Strin
         | TOOLPKG_NAV_SURFACE_CHAT_ATTACHMENTS
         | TOOLPKG_NAV_SURFACE_CHAT_SIDEBAR_TABS
         | TOOLPKG_NAV_SURFACE_CHAT_INPUT_MENU
-        | TOOLPKG_NAV_SURFACE_CHAT_INPUT_MENU_SECTIONS => Ok(()),
+        | TOOLPKG_NAV_SURFACE_CHAT_INPUT_MENU_SECTIONS
+        | TOOLPKG_NAV_SURFACE_CHAT_MESSAGE_AFTER
+        | TOOLPKG_NAV_SURFACE_WORKSPACE
+        | TOOLPKG_NAV_SURFACE_WORKSPACE_HOME => Ok(()),
         _ => Err(format!("is unsupported: {surface}")),
     }
 }

@@ -45,6 +45,9 @@ async function controlsPage(t, width = 390, view = "memory") {
   await context.exposeFunction("exportRealMemoryFile", async (path, content) => {
     await harness.tools.Files.write(path, content, false); return { cancelled: false, path };
   });
+  await context.exposeFunction("readRealMemoryFile", async path => {
+    return { cancelled: false, content: (await harness.tools.Files.read(path)).content };
+  });
   await context.addInitScript(({ theme, view }) => {
     window.rejectMemoryAction = null;
     window.CharacterMemoryHost = {
@@ -58,6 +61,11 @@ async function controlsPage(t, width = 390, view = "memory") {
       },
       async avatarImage() { return null; },
       async openEntity() { throw new Error("No avatar picker configured for memory-controls test"); },
+      /** Supplies only the host selection; the service imports actual file contents. */
+      async readImportFile() {
+        if (window.importSource === undefined) return { cancelled: true };
+        return window.readRealMemoryFile(window.importSource);
+      },
       /** Separates the host user's destination and cancellation from plugin preview state. */
       async exportFile(name, content) {
         if (window.rejectExport === true) throw new Error("Host save denied");
@@ -227,7 +235,7 @@ test("real main IPC and local HTTP provider: saved embedding configuration sends
     let body = ""; for await (const chunk of request) body += chunk;
     received.push({ path: request.url, method: request.method, authorization: request.headers.authorization, body: JSON.parse(body) });
     response.writeHead(fail ? 503 : 200, { "Content-Type": "application/json" });
-    response.end(fail ? JSON.stringify({ error: "Explicit local provider failure" }) : JSON.stringify({ data: [{ embedding: [1, 0.5, 0.25] }] }));
+    response.end(fail ? JSON.stringify({ error: "Explicit local provider failure" }) : JSON.stringify({ data: JSON.parse(body).input.map((input, index) => ({ index, embedding: [1, 0.5, 0.25] })) }));
   });
   await new Promise(resolve => provider.listen(0, "127.0.0.1", resolve));
   t.after(() => new Promise(resolve => provider.close(resolve)));
@@ -247,25 +255,29 @@ test("real main IPC and local HTTP provider: saved embedding configuration sends
   await dialog.getByRole("button", { name: "重建 Embedding", exact: true }).click();
   assert.equal(received.length, 1); assert.equal(received[0].path, "/embeddings"); assert.equal(received[0].method, "POST");
   assert.equal(received[0].authorization, "Bearer explicit-provider-key");
-  assert.deepEqual(received[0].body, { input: "Real embedding input", model: "actual-local-model", encoding_format: "float" });
+  assert.deepEqual(received[0].body, { input: ["Real embedding input"], model: "actual-local-model", encoding_format: "float" });
   const owner = await storedOwner(ui.harness);
-  assert.equal(owner.settings.cloudEmbeddingEndpoint, endpoint); assert.equal(owner.embeddings.length, 1);
-  assert.deepEqual(owner.embeddings[0].vector, [1, 0.5, 0.25]);
+  assert.equal(owner.settings.cloudEmbeddingEndpoint, endpoint); assert.equal(owner.embeddings.length, 0);
+  /** Reads persisted source envelopes independently of the production search implementation. */
+  function sourceVectors() { return ui.harness.disk.storage.inspect(sql => sql.prepare("SELECT value FROM records WHERE collection='memories' ORDER BY key").all().map(row => JSON.parse(row.value).embedding)); }
+  assert.equal(sourceVectors().length, 1); assert.equal(sourceVectors()[0].text, "Real embedding input");
   await dialog.getByLabel("向量权重", { exact: true }).fill("1");
   await dialog.getByLabel("检索查询", { exact: true }).fill("Real provider query");
   await dialog.getByRole("button", { name: "使用当前权重检索", exact: true }).click();
-  assert.equal(received.length, 2); assert.deepEqual(received[1].body, { input: "Real provider query", model: "actual-local-model", encoding_format: "float" });
+  assert.equal(received.length, 2);
+  assert.deepEqual(received[1].body, { input: ["Real provider query"], model: "actual-local-model", encoding_format: "float" });
   const debug = plain(await ui.runtime.web({ action: "searchMemoryDebug", ownerKey: CONTROLLED_OWNER, query: "Real provider query", config: { scoreMode: "BALANCED", keywordWeight: 0, tagWeight: 0, vectorWeight: 1, edgeWeight: 0 }, relevanceThreshold: 0 }));
-  assert.ok(debug.candidates[0].vectorScore > 0.999); assert.ok(debug.candidates[0].passedThreshold);
+  assert.ok(Math.abs(debug.candidates[0].vectorScore - 1) < 1e-12);
+  assert.equal(received.length, 3, "Repeated retrieval generates one query vector and does not persist it"); assert.ok(debug.candidates[0].passedThreshold);
   assert.equal((await ui.runtime.web({ action: "readMemorySearchConfig", ownerKey: CONTROLLED_OWNER })).vectorWeight, 0);
-  const cached = (await storedOwner(ui.harness)).embeddings;
+  const cached = sourceVectors();
   fail = true; await dialog.getByRole("button", { name: "重建 Embedding", exact: true }).click();
   assert.match(await dialog.getByRole("alert").innerText(), /503.*Explicit local provider failure/);
-  assert.deepEqual((await storedOwner(ui.harness)).embeddings, cached);
+  assert.deepEqual(sourceVectors(), cached);
   await dialog.getByLabel("检索查询", { exact: true }).fill("Actual failed provider query");
   await dialog.getByRole("button", { name: "使用当前权重检索", exact: true }).click();
   assert.match(await dialog.getByRole("alert").innerText(), /503.*Explicit local provider failure/);
-  assert.deepEqual((await storedOwner(ui.harness)).embeddings, cached);
+  assert.deepEqual(sourceVectors(), cached);
   assert.deepEqual(ui.errors, []);
 });
 
@@ -294,10 +306,13 @@ test("real persisted-message and interval hooks: saved extraction rules control 
   await dialog.getByRole("switch", { name: "锁定 USER.md", exact: true }).check();
   await dialog.getByRole("button", { name: "保存", exact: true }).click();
   ui.harness.queueAnalysis({ main: null, new: [], update: [], merge: [], links: [], profile_markdown: "Must not overwrite locked profile" });
-  await assert.rejects(ui.runtime.interval(), /profile update forbidden by the owner settings/); ui.harness.assertOutputsConsumed();
+  await ui.runtime.interval(); ui.harness.assertOutputsConsumed();
   assert.equal(ui.harness.modelCalls.length, calls + 1);
   assert.equal((await ui.runtime.web({ action: "readUser", ownerKey: CONTROLLED_OWNER })).content, "# Queued user profile\n");
   assert.equal((await storedOwner(ui.harness)).candidates.filter(candidate => candidate.status === "failed").length, 5);
+  await dialog.getByRole("button", { name: "关闭", exact: true }).last().click();
+  const failedDialog = await ui.open();
+  assert.match(await failedDialog.locator("[data-memory-queue] .error-banner").innerText(), /profile update forbidden by the owner settings/);
   assert.deepEqual(ui.errors, []);
 });
 
@@ -442,8 +457,15 @@ test("graph canonical relationship editing and full memory backup import/export 
   await imported.getByLabel("相同 UUID 记忆处理", { exact: true }).selectOption("UPDATE");
   backup.space.memories[0].content = "Restored through actual UI import";
   backup.userMarkdown = "# Restored profile";
-  await imported.getByLabel("粘贴记忆 JSON", { exact: true }).fill(JSON.stringify(backup));
-  await imported.getByRole("button", { name: "导入", exact: true }).click();
+  assert.equal(await imported.locator("textarea").count(), 0);
+  await ui.page.evaluate(path => { window.importSource = path; }, path);
+  await ui.harness.tools.Files.write(path, "{", false);
+  await imported.getByRole("button", { name: "选择 JSON 文件并导入", exact: true }).click();
+  await imported.getByRole("alert").waitFor();
+  assert.equal(await imported.count(), 1);
+  assert.notEqual((await storedOwner(ui.harness)).memories[0].content, "Restored through actual UI import");
+  await ui.harness.tools.Files.write(path, JSON.stringify(backup), false);
+  await imported.getByRole("button", { name: "选择 JSON 文件并导入", exact: true }).click();
   await imported.waitFor({ state: "hidden" });
   assert.equal((await storedOwner(ui.harness)).memories[0].content, "Restored through actual UI import");
   assert.equal((await ui.runtime.web({ action: "readUser", ownerKey: CONTROLLED_OWNER })).content, "# Restored profile");
@@ -487,4 +509,60 @@ test("runtime rejects missing or corrupt memory preferences without writing defa
   ui.harness.disk.storage.inspectPreferences("meta", values => { values.state.memoryPreferences = { userDescriptionEnabled: true, autoUpdateEnabled: "false" }; });
   await assert.rejects(ui.runtime.web({ action: "snapshot" }), /auto update enabled/);
   assert.equal(ui.harness.disk.storage.inspectPreferences("meta", values => values.state.memoryPreferences.autoUpdateEnabled), "false");
+});
+
+/** Keeps durable source failures visible while the production scheduler extracts the remaining valid candidates. */
+test("real queue failures stay visible after partial extraction and reopening the settings dialog", async t => {
+  const ui = await controlsPage(t), sources = await ui.runtime.enqueueReplies();
+  ui.harness.deleteMessage(sources[0].timestamp); await ui.runtime.makeDue();
+  ui.harness.queueAnalysis({}); await ui.runtime.interval(); ui.harness.assertOutputsConsumed();
+  const dialog = await ui.open(), queue = dialog.locator("[data-memory-queue]");
+  assert.match(await queue.innerText(), /待处理 0 条.*处理中 0.*失败 1/);
+  assert.match(await queue.locator(".error-banner").innerText(), /提取失败：源消息已删除或所选版本已变化，已跳过该候选/);
+  assert.equal(ui.harness.modelCalls.length, 1);
+  await dialog.getByRole("button", { name: "关闭", exact: true }).last().click();
+  const reopened = await ui.open();
+  assert.match(await reopened.locator("[data-memory-queue] .error-banner").innerText(), /源消息已删除或所选版本已变化/);
+  assert.deepEqual(ui.errors, []);
+});
+
+/** Distinguishes a completed rebuild with skipped windows from an entirely successful rebuild. */
+test("real rebuild reports partial failure after continuing through the remaining windows", async t => {
+  const ui = await controlsPage(t); await ui.runtime.startRebuild();
+  const planned = await storedOwner(ui.harness), failure = new Error("Controlled visible skipped-window failure");
+  ui.harness.queueExecutionError(failure); await ui.runtime.interval();
+  for (let index = 1; index < planned.rebuildProgress.totalWindows; index += 1) {
+    ui.harness.queueAnalysis({}); await ui.runtime.interval();
+  }
+  ui.harness.assertOutputsConsumed();
+  const dialog = await ui.open(); await dialog.getByRole("tab", { name: "历史重建", exact: true }).click();
+  const progress = dialog.locator("[data-memory-rebuild]");
+  assert.match(await progress.innerText(), /已完成（部分失败）/);
+  assert.match(await progress.innerText(), /失败 1/);
+  assert.equal(await progress.locator(".error-banner").innerText(), failure.message);
+  assert.equal(await dialog.getByRole("button", { name: "取消重建", exact: true }).isDisabled(), true);
+  await dialog.locator('[data-memory-chat="' + CONTROLLED_CHAT_ID + '"]').check();
+  assert.equal(await dialog.getByRole("button", { name: "开始重建", exact: true }).isEnabled(), true);
+  assert.deepEqual(ui.errors, []);
+});
+
+test("missing character library stays nonblocking and offers explicit creation in memory settings", async t => {
+  const ui = await controlsPage(t);
+  const state = await ui.harness.readState(); state.owners = []; ui.harness.disk.replaceState(state);
+  ui.harness.disk.clearCalls();
+  await ui.page.reload();
+  await ui.card.getByText("当前角色无记忆库", { exact: true }).waitFor();
+  assert.equal(await ui.card.getByRole("button", { name: "记忆设置", exact: true }).count(), 0);
+  assert.equal((await ui.harness.readState()).owners.length, 0);
+  const resolved = await ui.runtime.api("chat.configuration.resolve", { purpose: "execution", chatId: CONTROLLED_CHAT_ID, chatExtension: { version: 1, selection: "card:default" }, participantId: null, promptFunctionType: "CHAT", defaultModelBinding: { providerId: "dashscope", modelId: "qwen-plus" }, defaultTtsConfigId: "tts-one" });
+  assert.equal(resolved.profile.userPreferencesText, "");
+  await ui.runtime.enqueueReplies(); await ui.runtime.interval();
+  assert.equal((await ui.harness.readState()).owners.length, 0);
+  assert.equal(ui.harness.disk.calls.some(call => call.method === "storage.commit"), false);
+  await ui.card.getByRole("button", { name: "新建角色卡记忆库", exact: true }).click();
+  await ui.card.getByRole("button", { name: "记忆设置", exact: true }).waitFor();
+  assert.equal(await ui.card.getByText("当前角色无记忆库", { exact: true }).count(), 0);
+  assert.equal((await ui.harness.readState()).owners.length, 1);
+  await ui.open();
+  assert.deepEqual(ui.errors, []);
 });

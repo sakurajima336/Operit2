@@ -5,7 +5,6 @@ use serde::ser::{SerializeMap, SerializeSeq};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tokio::sync::mpsc;
 
-
 #[derive(Clone, Debug)]
 pub enum CoreValue {
     Null,
@@ -29,8 +28,9 @@ impl PartialEq for CoreValue {
             (Self::Unsigned(a), Self::Unsigned(b)) => a == b,
             (Self::Float(a), Self::Float(b)) => a == b,
             (Self::String(a), Self::String(b)) => a == b,
-            (Self::Bytes(a), Self::Bytes(b)) =>
-                (a.len() == b.len() && a.as_ptr() == b.as_ptr()) || a == b,
+            (Self::Bytes(a), Self::Bytes(b)) => {
+                (a.len() == b.len() && a.as_ptr() == b.as_ptr()) || a == b
+            }
             (Self::List(a), Self::List(b)) => a == b,
             (Self::Map(a), Self::Map(b)) => a == b,
             _ => false,
@@ -416,11 +416,17 @@ impl<'de> Visitor<'de> for CoreValueVisitor {
 
     /// Decodes a borrowed binary value.
     fn visit_bytes<E>(self, value: &[u8]) -> Result<Self::Value, E> {
-        Ok(CoreValue::Bytes(crate::CoreBytes::copy_from_slice(value)))
+        Ok(CoreValue::Bytes(
+            crate::codec::retain_decoded_slice(value)
+                .unwrap_or_else(|| crate::CoreBytes::copy_from_slice(value)),
+        ))
     }
 
     /// Resolves a native shared-buffer extension only inside its explicit decode scope.
-    fn visit_newtype_struct<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
+    fn visit_newtype_struct<D: Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<Self::Value, D::Error> {
         let (tag, payload): (i8, serde_bytes::ByteBuf) = Deserialize::deserialize(deserializer)?;
         crate::codec::resolve_shared_bytes(tag, &payload)
             .map(CoreValue::Bytes)
@@ -484,9 +490,84 @@ pub struct CoreEventStream {
     onClose: Option<Box<dyn FnOnce() + Send + 'static>>,
 }
 
-enum EventReceiver { Unbounded(mpsc::UnboundedReceiver<CoreEvent>), Bounded(mpsc::Receiver<CoreEvent>) }
+enum EventReceiver {
+    Unbounded(mpsc::UnboundedReceiver<CoreEvent>),
+    Bounded(mpsc::Receiver<CoreEvent>),
+    Mapped(Box<dyn EventSource>),
+}
+
+/// Polls a typed Host source directly from its Link consumer without a forwarding task.
+trait EventSource: Send {
+    /// Polls one mapped event using the consumer's waker.
+    fn poll_recv(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Option<CoreEvent>>;
+    /// Reads an already queued mapped event.
+    fn try_recv(&mut self) -> Result<CoreEvent, mpsc::error::TryRecvError>;
+    /// Reports the queued prefix for bounded batching.
+    fn pendingCount(&self) -> usize;
+}
+
+struct MappedEventSource<T, F> {
+    receiver: mpsc::UnboundedReceiver<T>,
+    map: F,
+    ended: bool,
+}
+
+impl<T: Send, F: FnMut(T) -> Option<CoreEvent> + Send> EventSource for MappedEventSource<T, F> {
+    /// Converts the next source value while preserving readiness and cancellation.
+    fn poll_recv(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Option<CoreEvent>> {
+        if self.ended {
+            return std::task::Poll::Ready(None);
+        }
+        self.receiver.poll_recv(cx).map(|item| {
+            let event = item.and_then(&mut self.map);
+            if event.is_none() {
+                self.ended = true;
+                self.receiver.close();
+            }
+            event
+        })
+    }
+    /// Converts one ready value without creating an intermediate queue.
+    fn try_recv(&mut self) -> Result<CoreEvent, mpsc::error::TryRecvError> {
+        if self.ended {
+            return Err(mpsc::error::TryRecvError::Disconnected);
+        }
+        let item = self.receiver.try_recv()?;
+        match (self.map)(item) {
+            Some(event) => Ok(event),
+            None => {
+                self.ended = true;
+                self.receiver.close();
+                Err(mpsc::error::TryRecvError::Disconnected)
+            }
+        }
+    }
+    /// Reports zero after the source has terminated.
+    fn pendingCount(&self) -> usize {
+        if self.ended {
+            0
+        } else {
+            self.receiver.len()
+        }
+    }
+}
 
 impl CoreEventStream {
+    /// Maps a typed source during consumer polling, allocating no forwarding worker or task.
+    pub fn fromMappedReceiver<T: Send + 'static>(
+        receiver: mpsc::UnboundedReceiver<T>,
+        map: impl FnMut(T) -> Option<CoreEvent> + Send + 'static,
+    ) -> Self {
+        Self {
+            receiver: EventReceiver::Mapped(Box::new(MappedEventSource {
+                receiver,
+                map,
+                ended: false,
+            })),
+            onClose: None,
+        }
+    }
+
     /// Creates a stream together with its sender for an in-process Link source.
     pub fn channel() -> (mpsc::UnboundedSender<CoreEvent>, Self) {
         let (sender, receiver) = mpsc::unbounded_channel();
@@ -504,7 +585,13 @@ impl CoreEventStream {
     /// Bounded transport stream. A stalled consumer must not exhaust Edge RAM.
     pub fn boundedChannel(capacity: usize) -> (mpsc::Sender<CoreEvent>, Self) {
         let (sender, receiver) = mpsc::channel(capacity);
-        (sender, Self { receiver: EventReceiver::Bounded(receiver), onClose: None })
+        (
+            sender,
+            Self {
+                receiver: EventReceiver::Bounded(receiver),
+                onClose: None,
+            },
+        )
     }
 
     /// Registers a callback that runs when the stream is dropped.
@@ -522,17 +609,41 @@ impl CoreEventStream {
 
     /// Waits for the next event from the stream.
     pub async fn recv(&mut self) -> Option<CoreEvent> {
-        match &mut self.receiver { EventReceiver::Unbounded(r) => r.recv().await, EventReceiver::Bounded(r) => r.recv().await }
+        match &mut self.receiver {
+            EventReceiver::Unbounded(r) => r.recv().await,
+            EventReceiver::Bounded(r) => r.recv().await,
+            EventReceiver::Mapped(r) => std::future::poll_fn(|cx| r.poll_recv(cx)).await,
+        }
     }
 
     /// Polls with the caller's waker, without adding a task or a timer.
-    pub(crate) fn poll_recv(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Option<CoreEvent>> {
-        match &mut self.receiver { EventReceiver::Unbounded(r) => r.poll_recv(cx), EventReceiver::Bounded(r) => r.poll_recv(cx) }
+    pub(crate) fn poll_recv(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<CoreEvent>> {
+        match &mut self.receiver {
+            EventReceiver::Unbounded(r) => r.poll_recv(cx),
+            EventReceiver::Bounded(r) => r.poll_recv(cx),
+            EventReceiver::Mapped(r) => r.poll_recv(cx),
+        }
+    }
+
+    /// Snapshots the queued prefix so a producer cannot indefinitely extend a batch.
+    pub(crate) fn pendingCount(&self) -> usize {
+        match &self.receiver {
+            EventReceiver::Unbounded(r) => r.len(),
+            EventReceiver::Bounded(r) => r.len(),
+            EventReceiver::Mapped(r) => r.pendingCount(),
+        }
     }
 
     /// Polls the stream for an already available event.
     pub fn try_recv(&mut self) -> Result<CoreEvent, mpsc::error::TryRecvError> {
-        match &mut self.receiver { EventReceiver::Unbounded(r) => r.try_recv(), EventReceiver::Bounded(r) => r.try_recv() }
+        match &mut self.receiver {
+            EventReceiver::Unbounded(r) => r.try_recv(),
+            EventReceiver::Bounded(r) => r.try_recv(),
+            EventReceiver::Mapped(r) => r.try_recv(),
+        }
     }
 }
 
@@ -704,8 +815,7 @@ impl LinkDeviceInfo {
         let Some((role, architecture)) = model.split_once("(cli)-") else {
             return false;
         };
-        matches!(role, "client" | "server" | "session")
-            && architecture == std::env::consts::ARCH
+        matches!(role, "client" | "server" | "session") && architecture == std::env::consts::ARCH
     }
 
     pub fn native() -> Self {
@@ -998,15 +1108,9 @@ impl CoreLinkError {
     }
 
     #[track_caller]
-    /// Creates an internal link error annotated with caller location and backtrace.
+    /// Creates a bounded internal link error with its exact caller location.
     pub fn internal(message: impl Into<String>) -> Self {
         let caller = std::panic::Location::caller();
-        // ESP-IDF's Xtensa unwind wrapper aborts instead of returning a
-        // backtrace. Reporting a recoverable error must never reset the board.
-        #[cfg(not(target_os = "espidf"))]
-        let backtrace = Some(format!("{:#}", std::backtrace::Backtrace::force_capture()));
-        #[cfg(target_os = "espidf")]
-        let backtrace = None;
         Self {
             code: "INTERNAL_ERROR".to_string(),
             message: message.into(),
@@ -1016,8 +1120,7 @@ impl CoreLinkError {
                 line: caller.line(),
                 column: caller.column(),
             }),
-            // Full formatting retains instruction addresses even without debug symbols.
-            backtrace,
+            backtrace: None,
         }
     }
 }
@@ -1096,9 +1199,6 @@ mod protocol_tests {
         let location = error.location.as_ref().unwrap();
         assert_eq!(location.line, line);
         assert_eq!(location.file, file!());
-        #[cfg(not(target_os = "espidf"))]
-        assert!(error.backtrace.is_some());
-        #[cfg(target_os = "espidf")]
         assert!(error.backtrace.is_none());
     }
 }

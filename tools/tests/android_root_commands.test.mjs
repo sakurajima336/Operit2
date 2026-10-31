@@ -19,7 +19,7 @@ test('Root authorization combines explicit consent with a fresh identity check',
   const authorization = source(android + 'AndroidPrivilegeAuthorization.kt');
   const check = section(authorization, 'fun isRootAuthorized(', 'fun rootExecutionSettings(');
   assert.match(check, /getBoolean\(ROOT_AUTHORIZED_KEY, false\)/);
-  assert.match(check, /if \(!approved\) return false/);
+  assert.match(check, /if \(!hasRootConsent\(context\)\) return false/);
   assert.match(check, /AndroidRootShell\.checkAccess\(rootExecutionSettings\(context\), 10_000L\)\.granted/);
   const config = section(authorization, 'fun configureRootExecution(', '/** Consent');
   assert.match(config, /settings\.suArguments\(\)/);
@@ -89,7 +89,8 @@ test('Root identity probing requires exit zero and exact UID zero, not root hint
 test('process collection drains both pipes and destroys processes on failed waits', () => {
   const process = source(system + 'AndroidCommandProcessRunner.kt');
   assert.match(process, /process\.outputStream\.close\(\)/);
-  assert.match(process, /newFixedThreadPool\(3\)/);
+  assert.match(process, /HostTaskScheduler\.executeServices\(arrayOf\(output, errors, exit\)\)/);
+  assert.doesNotMatch(process, /Executors|\bThread\(/);
   assert.match(process, /stdout\.use \{ it\.readBytes\(\) \}/);
   assert.match(process, /stderr\.use \{ it\.readBytes\(\) \}/);
   assert.match(process, /catch \(error: Exception\) \{\s*runCatching \{ destroy\(\) \}/);

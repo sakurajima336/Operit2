@@ -2,13 +2,15 @@ import { createStorageHost } from "./storage-host.mjs";
 import { loadModule } from "./runtime.mjs";
 import { mkdtemp, mkdir, readFile, writeFile, rename, stat, rm, readdir, copyFile } from "node:fs/promises";
 import path from "node:path";
-import { writeFileSync } from "node:fs";
+import vm from "node:vm";
+import { readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 
 /** Creates real disk IO for the existing Files API; it implements no plugin records or persistence policy. */
 export async function createDiskHarness(testContext, { legacyIdentity = null } = {}) {
   const temporaryRoot = path.resolve(tmpdir());
   const directory = path.resolve(await mkdtemp(path.join(temporaryRoot, "character-cards-disk-")));
+  await mkdir(path.join(directory, "local"));
   const calls = [], faults = new Map();
 
   /** Resolves one exact IO path and rejects every escape from the explicitly created plugin directory. */
@@ -85,12 +87,21 @@ export async function createDiskHarness(testContext, { legacyIdentity = null } =
         toString() { return this.content; },
       };
     },
+    /** Writes exact binary bytes through the same confined generic file boundary. */
+    async writeBinary(file, contentBase64) {
+      const target = confined(file); attempted("writeBinary", [file, contentBase64]);
+      await writeFile(target, Buffer.from(contentBase64, "base64"));
+      return operationResult("writeBinary", file);
+    },
     /** Writes the supplied content exactly once and does not create missing parent directories. */
     async write(file, content, append = false) {
       const target = confined(file); attempted("write", [file, content, append]);
       if (typeof content !== "string") throw new Error("Disk harness requires string file content");
       await writeFile(target, content, { encoding: "utf8", flag: append ? "a" : "w" });
-      return operationResult("write", file);
+      return { operation: operationResult("write", file), aiDiffInstructions: "", diffContent: "",
+        /** Formats the nested operation without changing the write result envelope. */
+        toString() { return this.operation.details; },
+      };
     },
     /** Publishes the actual source file with native rename after validating both absolute paths. */
     async move(source, destination) {
@@ -148,13 +159,27 @@ export async function createDiskHarness(testContext, { legacyIdentity = null } =
     await writeFile(profile, "");
     calls.length = 0;
   }
+  const wasmContext = vm.createContext({ Uint8Array, WebAssembly, console,
+    __operitNativeLoadToolPkgWasm(_target, moduleId) {
+      attempted("wasm.load", [moduleId]);
+      const manifest = JSON.parse(readFileSync(new URL("../manifest.json", import.meta.url), "utf8"));
+      const module = manifest.wasm_modules.find(module => module.id === moduleId);
+      if (!module) throw new Error("Undeclared WASM module");
+      return { bytes: new Uint8Array(readFileSync(new URL("../" + module.path, import.meta.url))), metadata: { exports: module.exports } };
+    },
+  });
+  vm.runInContext(readFileSync(new URL("../../../../../core/crates/plugin/sdk/src/toolpkg/ToolPkgWasmApi.js", import.meta.url), "utf8"), wasmContext);
+  const wasm = wasmContext.__operitCreateToolPkgWasmApi(() => "com.operit.character_cards", false);
   return {
     directory, calls, files, storage,
     globals: {
       Tools: tools,
       ToolPkg: {
+        wasm,
         /** Returns the test plugin's persistent Space data namespace. */
         getSpaceDataDir() { return directory.replaceAll("\\", "/"); },
+        /** Keeps local migration state separate from synchronized plugin preferences. */
+        getLocalDataDir() { return directory.replaceAll("\\", "/") + "/local"; },
         /** Implements only the existing authenticated config-directory IO binding, not provider or storage services. */
         getConfigDir(pluginId) {
           if (pluginId !== undefined && pluginId !== "com.operit.character_cards") throw new Error("Disk harness cannot expose another plugin directory");
@@ -164,7 +189,7 @@ export async function createDiskHarness(testContext, { legacyIdentity = null } =
     },
     /** Injects one negative IO event on the Nth call of a method; no successful domain operation is implemented by the harness. */
     failNext(method, failure, occurrence = 1) {
-      if (!Object.hasOwn(methods, method) && !["storage.commit", "storage.open", "storage.list", "storage.get", "storage.transaction", "storage.query", "storage.execute", "storage.getMany", "storage.preferences.open", "storage.preferences.edit", "storage.preferences.data"].includes(method)) throw new Error("Cannot fail an unsupported disk method: " + method);
+      if (!Object.hasOwn(methods, method) && !["storage.changes", "storage.commit", "storage.open", "storage.list", "storage.get", "storage.transaction", "storage.query", "storage.execute", "storage.getMany", "storage.preferences.open", "storage.preferences.edit", "storage.preferences.data"].includes(method)) throw new Error("Cannot fail an unsupported disk method: " + method);
       if (faults.has(method)) throw new Error("A disk failure is already scheduled for " + method);
       if (!Number.isInteger(occurrence) || occurrence < 1) throw new Error("Disk failure occurrence must be a positive integer");
       faults.set(method, { failure, remaining: occurrence });
@@ -182,7 +207,7 @@ export async function createDiskHarness(testContext, { legacyIdentity = null } =
         for (const row of sql.prepare("SELECT collection,key,value,version FROM records ORDER BY collection,key").all())
           if (schema.collections.includes(row.collection)) rows.push({ ...row, value: JSON.parse(row.value) });
       });
-      return schema.stateFromRecords(metadata, rows);
+      return schema.decodeStateFromRecords(metadata, rows);
     },
     /** Returns deterministic assertion bytes for the current authoritative records. */
     stateBytes() { return Buffer.from(JSON.stringify(this.readState())); },
@@ -190,7 +215,7 @@ export async function createDiskHarness(testContext, { legacyIdentity = null } =
     replaceState(state) {
       const schema = loadModule("src/storage/records.ts"), rows = schema.records(state), names = ["cards", "groups", "tags", "stores", "conversationGroups"];
       for (const name of names) writeFileSync(path.join(directory, name + ".preferences.json"), JSON.stringify(Object.fromEntries(rows.filter(row => row.collection === name).map(row => ["record_" + row.key, row.value]))), "utf8");
-      writeFileSync(path.join(directory, "meta.preferences.json"), JSON.stringify({ __operit_preferences_schema_version: 1, state: { version: state.version, active: state.active, memoryPreferences: state.memoryPreferences } }), "utf8");
+      writeFileSync(path.join(directory, "meta.preferences.json"), JSON.stringify({ __operit_preferences_schema_version: 1, state: { version: state.version, active: state.active, memoryPreferences: state.memoryPreferences, memoryRecall: state.memoryRecall } }), "utf8");
       storage.inspect(sql => {
         sql.exec("BEGIN");
         try {

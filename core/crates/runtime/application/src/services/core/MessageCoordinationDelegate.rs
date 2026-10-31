@@ -14,10 +14,13 @@ use crate::services::core::MessageProcessingDelegate::{
     SendUserMessageProcessingRequest,
 };
 use crate::services::core::TokenStatisticsDelegate::TokenStatisticsDelegate;
+use crate::services::ProviderRuntimeSupportService::{ChatConfigurationApi, MODEL_CONFIGURATION_OWNER};
 use operit_host_api::HostManager::defaultHostRuntimeTaskSchedulerHost;
 use operit_host_api::HostRuntimeTaskSchedulerHost;
+use operit_host_api::TimeUtils::currentTimeMillis;
 use operit_model::AttachmentInfo::AttachmentInfo;
 use operit_model::ChatMessage::ChatMessage;
+use operit_model::ChatMessageTimestampAllocator::ChatMessageTimestampAllocator;
 use operit_model::ChatMessageDisplayMode::ChatMessageDisplayMode;
 use operit_model::ChatTurnOptions::ChatTurnOptions;
 use operit_model::FunctionType::FunctionType;
@@ -108,60 +111,97 @@ impl MessageCoordinationDelegate {
         self.nonFatalErrorCollectorJob = Some("nonFatalErrorCollectorJob".to_string());
     }
 
+    /// Reads a revision's persisted author and propagates storage or missing-identity errors.
+    pub(crate) async fn messageAuthorParticipantId(
+        &self,
+        service: &EnhancedAIService,
+        chatId: &str,
+        messageTimestamp: i64,
+        variantIndex: i32,
+    ) -> Result<String, String> {
+        let api = ChatConfigurationApi::ready(&service.tool_handler).await;
+        if api.extensionOwner() == MODEL_CONFIGURATION_OWNER {
+            return Ok("model:chat".into());
+        }
+        let extensions = self
+            .chatHistoryDelegate
+            .chatHistoryManager
+            .readPluginExtensions(&operit_model::PluginExtensionTarget::PluginExtensionTarget::Message {
+                chatId: chatId.to_string(),
+                messageTimestamp,
+                variantIndex,
+            })
+            .map_err(|error| error.to_string())?;
+        extensions
+            .get(MODEL_CONFIGURATION_OWNER)
+            .or_else(|| extensions.get(api.extensionOwner()))
+            .and_then(|identity| identity.get("participantId"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.trim().is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| format!(
+                "Message revision has no recorded execution participant: {chatId}/{messageTimestamp}/{variantIndex}"
+            ))
+    }
+
     /// Recalculates the stable context window size for a chat and prompt mode.
     pub async fn recalculateStableWindowSize(
         &mut self,
         service: &mut EnhancedAIService,
-        chatId: Option<String>,
+        chatId: String,
         participantId: Option<String>,
         promptFunctionType: PromptFunctionType,
         chatProviderIdOverride: Option<String>,
-        chatModelIdOverride: Option<String>) -> Result<i64, String> {
-        let currentChat = chatId.as_ref().and_then(|chatId| {
-            self.chatHistoryDelegate
-                .chatHistoriesFlow()
-                .value()
-                .into_iter()
-                .find(|history| history.id == *chatId)
-        });
+        chatModelIdOverride: Option<String>,
+    ) -> Result<i64, String> {
+        let currentChat = self
+            .chatHistoryDelegate
+            .chatHistoriesFlow()
+            .value()
+            .into_iter()
+            .find(|history| history.id == chatId)
+            .ok_or_else(|| format!("Chat not found for context estimation: {chatId}"))?;
         let runtimeOptions = SendMessageOptions {
-            chatId: chatId.clone(),
+            chatId: Some(chatId.clone()),
             executionParticipantId: participantId.clone(),
             promptFunctionType: promptFunctionType.clone(),
             chatProviderIdOverride: chatProviderIdOverride.clone(),
             chatModelIdOverride: chatModelIdOverride.clone(),
             ..SendMessageOptions::new()
         };
-        let configuration = service
-            .resolveChatConfigurationForOptions(&runtimeOptions)
+        let request = service
+            .chatConfigurationRequestForOptions(&runtimeOptions)
+            .map_err(|error| error.to_string())?;
+        let configurations = ChatConfigurationApi::ready(&service.tool_handler)
+            .await
+            .resolveContextParticipants(request)
+            .await?;
+        let mut windows = Vec::with_capacity(configurations.len());
+        for configuration in configurations {
+            let runtime = service
+                .createSendMessageRuntime(&runtimeOptions, configuration)
+                .map_err(|error| error.to_string())?;
+            let window = AIMessageManager::calculateStableContextWindow(StableContextWindowRequest {
+                enhancedAiService: service,
+                chatId: Some(chatId.clone()),
+                messageContent: String::new(),
+                chatHistory: self.chatHistoryDelegate.getRuntimeChatHistory(chatId.clone()),
+                workspacePath: self.chatHistoryDelegate.primaryWorkspacePathForChat(&currentChat),
+                workspaceFolders: self.chatHistoryDelegate.workspaceFolderPathsForChat(&currentChat),
+                promptFunctionType: promptFunctionType.clone(),
+                proxySenderName: None,
+                chatProviderIdOverride: chatProviderIdOverride.clone(),
+                chatModelIdOverride: chatModelIdOverride.clone(),
+                publishEstimate: false,
+                runtime,
+            })
             .await
             .map_err(|error| error.to_string())?;
-        let runtime = service
-            .createSendMessageRuntime(&runtimeOptions, configuration)
-            .map_err(|error| error.to_string())?;
-        AIMessageManager::calculateStableContextWindow(StableContextWindowRequest {
-            enhancedAiService: service,
-            chatId: chatId.clone(),
-            messageContent: String::new(),
-            chatHistory: chatId
-                .map(|id| self.chatHistoryDelegate.getRuntimeChatHistory(id))
-                .unwrap_or_default(),
-            workspacePath: currentChat
-                .as_ref()
-                .and_then(|chat| self.chatHistoryDelegate.primaryWorkspacePathForChat(chat)),
-            workspaceFolders: currentChat
-                .iter()
-                .flat_map(|chat| self.chatHistoryDelegate.workspaceFolderPathsForChat(chat))
-                .collect(),
-            promptFunctionType,
-            proxySenderName: None,
-            chatProviderIdOverride,
-            chatModelIdOverride,
-            publishEstimate: false,
-            runtime,
+            windows.push(window);
+        }
+        windows.into_iter().max().ok_or_else(|| {
+            "Conversation context requires a current bound participant".to_string()
         })
-        .await
-        .map_err(|error| error.to_string())
     }
 
     /// Recalculates and persists the stable context window for a chat.
@@ -175,7 +215,6 @@ impl MessageCoordinationDelegate {
         chatModelIdOverride: Option<String>,
     ) -> Option<i64> {
         let targetChatId = chatId.or_else(|| self.chatHistoryDelegate.currentChatIdFlow.value())?;
-        let executionParticipantId = participantId;
         let effectivePromptFunctionType =
             promptFunctionType.unwrap_or_else(|| self.currentPromptFunctionType.clone());
         let effectiveChatModelIdOverride =
@@ -185,8 +224,8 @@ impl MessageCoordinationDelegate {
         let newWindowSize = match self
             .recalculateStableWindowSize(
                 service,
-                Some(targetChatId.clone()),
-                executionParticipantId,
+                targetChatId.clone(),
+                participantId,
                 effectivePromptFunctionType,
                 effectiveChatProviderIdOverride,
                 effectiveChatModelIdOverride,
@@ -311,6 +350,15 @@ impl MessageCoordinationDelegate {
             .resolveChatConfigurationForOptions(&SendMessageOptions {
                 chatId: Some(chatId.clone()),
                 promptFunctionType: self.currentPromptFunctionType.clone(),
+                executionParticipantId: Some(
+                    self.messageAuthorParticipantId(
+                        enhancedAiService,
+                        &chatId,
+                        targetMessage.timestamp,
+                        targetMessage.selectedVariantIndex,
+                    )
+                    .await?,
+                ),
                 ..SendMessageOptions::new()
             })
             .await
@@ -448,8 +496,9 @@ impl MessageCoordinationDelegate {
         context: operit_tools::runtime_support::CoreRouteResumeContext,
     ) -> Result<(), String> {
         configuration.validate()?;
-        if configuration.extensionOwner != context.extensionOwner
-            || configuration.profile.id != context.participantId
+        if configuration.extensionOwner != MODEL_CONFIGURATION_OWNER
+            && (configuration.extensionOwner != context.extensionOwner
+                || configuration.profile.id != context.participantId)
         {
             return Err(
                 "Routed configuration does not match its execution snapshot identity".to_string(),
@@ -537,7 +586,7 @@ impl MessageCoordinationDelegate {
                 Some(chatId) => chatId,
                 None => match self
                     .chatHistoryDelegate
-                    .createNewChat(enhancedAiService, true, None, None)
+                    .createNewChat(enhancedAiService, true, None, None, None, None)
                     .await
                 {
                     Ok(chatId) => chatId,
@@ -661,7 +710,7 @@ impl MessageCoordinationDelegate {
             &chatId,
             participantId.clone(),
             promptFunctionType.clone(),
-            turnOptions.persistTurn && !isBackgroundSend,
+            turnOptions.persistTurn && !isBackgroundSend && !turnOptions.deferSummary,
             !isContinuation && !isAutoContinuation && !isResume,
         )?;
         let runtimeChatHistory = match chatHistoryOverride {
@@ -830,6 +879,40 @@ impl MessageCoordinationDelegate {
         Ok((maxTokens, threshold))
     }
 
+    /// Checks the completed conversation against every current participant's configured summary threshold.
+    pub(crate) async fn checkSummaryAfterReply(
+        &mut self, service: &mut EnhancedAIService, chatId: String, participantId: String,
+    ) -> Result<(), String> {
+        if let Some(task) = self.messageProcessingDelegate.summaryTaskForChat(&chatId) {
+            task.completion.await?;
+        }
+        let configuration = service.resolveChatConfigurationForOptions(&SendMessageOptions {
+            chatId: Some(chatId.clone()), executionParticipantId: Some(participantId),
+            ..SendMessageOptions::new()
+        }).await.map_err(|error| error.to_string())?;
+        let window = self.recalculateStableWindowSize(
+            service, chatId.clone(), None, PromptFunctionType::CHAT, None, None,
+        ).await?;
+        let messages = self.chatHistoryDelegate.getRuntimeChatHistory(chatId.clone());
+        for participant in &configuration.participants {
+            let settings = self.messageProcessingDelegate.modelConfigManager.getResolvedModelConfig(
+                &participant.modelBinding.providerId, &participant.modelBinding.modelId,
+            ).map_err(|error| error.to_string())?;
+            if AIMessageManager::shouldGenerateSummary(
+                messages.clone(), window, settings.context.maxContextTokens(),
+                settings.summary.tokenThresholdRatio(), settings.summary.enableSummary,
+                settings.summary.enableSummaryByMessageCount, settings.summary.summaryMessageCountThreshold,
+            ) {
+                return self.launchSummary(service, messages, ConversationSummaryRequest {
+                    chatId, participantId: None, promptFunctionType: PromptFunctionType::CHAT,
+                    chatProviderIdOverride: None, chatModelIdOverride: None,
+                    autoContinue: false, requireCurrentChat: false,
+                })?.await;
+            }
+        }
+        Ok(())
+    }
+
     /// Schedules one cancellable summary through the host and shares its actual completion.
     fn launchSummary(
         &self,
@@ -979,20 +1062,19 @@ impl MessageCoordinationDelegate {
         Ok(())
     }
 
-    /// Starts a user-requested summary and waits for its host-owned task to finish.
-    pub async fn manuallySummarizeConversation(
+    /// Starts a user-requested summary for one explicit chat and waits for its host-owned task.
+    #[allow(non_snake_case)]
+    pub async fn manuallySummarizeConversationForChat(
         &mut self,
         enhancedAiService: &mut EnhancedAIService,
-    ) {
-        let Some(chatId) = self.chatHistoryDelegate.currentChatIdFlow.value() else {
-            return;
-        };
+        chatId: String,
+    ) -> bool {
         if self
             .messageProcessingDelegate
             .summaryTaskForChat(&chatId)
             .is_some()
         {
-            return;
+            return false;
         }
         let messages = self
             .chatHistoryDelegate
@@ -1013,11 +1095,27 @@ impl MessageCoordinationDelegate {
             Ok(completion) => completion.await,
             Err(error) => Err(error),
         };
-        if let Err(error) = result {
-            self.messageProcessingDelegate
-                .nonFatalErrorEventFlow
-                .set_value(Some(error));
+        match result {
+            Ok(()) => true,
+            Err(error) => {
+                self.messageProcessingDelegate
+                    .nonFatalErrorEventFlow
+                    .set_value(Some(error));
+                false
+            }
         }
+    }
+
+    /// Starts a user-requested summary and waits for its host-owned task to finish.
+    pub async fn manuallySummarizeConversation(
+        &mut self,
+        enhancedAiService: &mut EnhancedAIService,
+    ) {
+        let Some(chatId) = self.chatHistoryDelegate.currentChatIdFlow.value() else {
+            return;
+        };
+        self.manuallySummarizeConversationForChat(enhancedAiService, chatId)
+            .await;
     }
 
     /// Compacts a persisted tool round and resumes the same committed user turn after compaction.

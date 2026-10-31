@@ -4,6 +4,10 @@ use serde::{Deserialize, Serialize};
 
 pub(crate) const NODE_SYNC_TARGET: &str = "$node.sync";
 
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SyncRequest { pub limit: usize, pub force: bool }
+
 /// The complete remote call surface. Unknown methods fail deserialization.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -11,6 +15,13 @@ pub(crate) enum PeerSyncMethod {
     CoreVersion,
     DeviceSpace,
     SyncClock,
+    SyncClockDigest,
+    SyncRequest,
+    SyncProgress,
+    SyncConsistency,
+    SyncReadSnapshot,
+    SyncReadCoverage,
+    SyncRepairSnapshot,
     SyncOperationsSince,
     SyncApplyOperations,
     SyncBlobExists,
@@ -22,8 +33,9 @@ impl PeerSyncMethod {
     /// Device-space inspection and immediate execution binding are control-plane
     /// calls, not an invitation to replicate persistent business data.
     pub(crate) fn requiresStorageProvider(self) -> bool {
-        matches!(self, Self::SyncClock | Self::SyncOperationsSince
-            | Self::SyncApplyOperations | Self::SyncBlobExists | Self::SyncReadBlobChunk)
+        matches!(self, Self::SyncClock | Self::SyncClockDigest | Self::SyncOperationsSince
+            | Self::SyncApplyOperations | Self::SyncBlobExists | Self::SyncReadBlobChunk
+            | Self::SyncConsistency | Self::SyncReadSnapshot | Self::SyncReadCoverage | Self::SyncRepairSnapshot | Self::SyncRequest | Self::SyncProgress)
     }
 
     pub(crate) fn request(self, requestId: String, args: CoreValue) -> CoreCallRequest {
@@ -37,6 +49,7 @@ impl PeerSyncMethod {
         )
     }
 
+    /// Validates the exact peer method and its typed operation envelope.
     pub(crate) fn fromRequest(request: &CoreCallRequest) -> Result<Self, CoreLinkError> {
         let method: Self = serde_json::from_value(serde_json::Value::String(
             request.methodName.clone(),
@@ -56,7 +69,11 @@ impl PeerSyncMethod {
                     )
                 })?;
             let _operations = args.operations;
-            let _complete = args.complete;
+        }
+        match method {
+            Self::SyncReadSnapshot | Self::SyncReadCoverage => { let _: ReadSnapshot = operit_link::fromCoreValue(request.args.clone()).map_err(|e| CoreLinkError::new("PEER_SYNC_INVALID_SNAPSHOT", e.to_string()))?; },
+            Self::SyncRepairSnapshot => { let _: RepairSnapshot = operit_link::fromCoreValue(request.args.clone()).map_err(|e| CoreLinkError::new("PEER_SYNC_INVALID_SNAPSHOT", e.to_string()))?; },
+            _ => {},
         }
         Ok(method)
     }
@@ -64,9 +81,19 @@ impl PeerSyncMethod {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct ReadSnapshot { owner: operit_store::Transaction::Owner, token: String }
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct RepairSnapshot { owner: operit_store::Transaction::Owner, expected: String,
+    reference: operit_store::RuntimeFileSyncStore::FileCorrectionReference }
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ApplyOperations {
     operations: Vec<operit_store::SyncOperationStore::SyncOperation>,
-    complete: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,12 +122,15 @@ mod tests {
     use operit_link::toCoreValue;
     use serde_json::json;
 
+    /// Accepts the operation-only envelope without transport completion semantics.
     #[test]
     fn peer_sync_methods_round_trip_through_standard_link_requests() {
         for method in [
             PeerSyncMethod::CoreVersion,
             PeerSyncMethod::DeviceSpace,
             PeerSyncMethod::SyncClock,
+            PeerSyncMethod::SyncClockDigest,
+            PeerSyncMethod::SyncProgress,
             PeerSyncMethod::SyncOperationsSince,
             PeerSyncMethod::SyncApplyOperations,
             PeerSyncMethod::SyncBlobExists,
@@ -109,7 +139,7 @@ mod tests {
         ] {
             let request = method.request(
                 "test".into(),
-                toCoreValue(json!({"operations":[],"complete":true})).unwrap(),
+                toCoreValue(json!({"operations":[]})).unwrap(),
             );
             assert_eq!(request.target, NODE_SYNC_TARGET);
             assert_eq!(PeerSyncMethod::fromRequest(&request).unwrap(), method);
@@ -117,17 +147,32 @@ mod tests {
     }
 
     #[test]
+    fn coverage_reads_use_the_snapshot_token_and_storage_permission() {
+        let owner = json!({"backend":"DataStore","path":"runtime/config/test.preferences.json","format":1,"layout":1});
+        for method in [PeerSyncMethod::SyncReadSnapshot, PeerSyncMethod::SyncReadCoverage] {
+            assert!(method.requiresStorageProvider());
+            let request = method.request("test".into(), toCoreValue(json!({"owner":owner,"token":"captured"})).unwrap());
+            assert_eq!(PeerSyncMethod::fromRequest(&request).unwrap(), method);
+            for args in [json!({"owner":owner}), json!({"owner":owner,"token":"captured","values":{}})] {
+                let request = method.request("test".into(), toCoreValue(args).unwrap());
+                assert!(PeerSyncMethod::fromRequest(&request).is_err());
+            }
+        }
+    }
+
+    /// Rejects removed completion fields and unauthorized management or bootstrap overrides.
+    #[test]
     fn peer_sync_does_not_expose_management_or_bootstrap_override() {
         let request =
             CoreCallRequest::new("test", NODE_SYNC_TARGET, "startPairing", CoreValue::Null);
         assert!(PeerSyncMethod::fromRequest(&request).is_err());
         for args in [
-            json!({"operations":[]}),
-            json!({"operations":[],"complete":"yes"}),
-            json!({"operations":{"operations":[],"forceApply":true},"complete":true}),
-            json!({"operations":[],"complete":true,"forceApply":true}),
-            json!({"operations":[],"complete":true,"spaceMerge":true}),
-            json!({"operations":[],"complete":true,"firstJoin":true}),
+            json!({}),
+            json!({"operations":[],"complete":true}),
+            json!({"operations":{"operations":[],"forceApply":true}}),
+            json!({"operations":[],"forceApply":true}),
+            json!({"operations":[],"spaceMerge":true}),
+            json!({"operations":[],"firstJoin":true}),
         ] {
             let request = PeerSyncMethod::SyncApplyOperations
                 .request("test".into(), toCoreValue(args).unwrap());

@@ -73,7 +73,7 @@ class _WorkspaceBrowserNativeSurfaceState
           widget.sessionId,
         );
         if (tab == null) {
-          return const SizedBox.expand();
+          return const Center(child: CircularProgressIndicator());
         }
         return RuntimeBrowserOwnerWebView(
           tab: tab,

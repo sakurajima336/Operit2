@@ -2,19 +2,18 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createDiskHarness } from "./disk-files.mjs";
 import { openPlugin } from "./plugin-entry-harness.mjs";
-import { loadModule, plain } from "./runtime.mjs";
+import { plain } from "./runtime.mjs";
 
 /** Supplies neutral Core sidebar metadata without business extensions. */
-function summary(i) { return { id: "loading-" + i, title: "Chat " + i, updatedAt: "0", displayOrder: i, workspaceId: null, workspaceName: null, locked: false, pinned: false, group: null }; }
+function summary(i) { return { id: "loading-" + i, title: "Chat " + i, updatedAt: "0", displayOrder: i, workspaceId: null, workspaceName: null, parentChatId: null, locked: false, pinned: false, group: null }; }
 /** Builds the existing generic sidebar request. */
 function context(chats) { return { input: { view: "characters" }, chatSidebar: { chats, currentChatId: null, activeStreamingChatIds: [] } }; }
 /** Opens real plugin SQL storage with unrelated directory and Chat capabilities unavailable. */
 async function environment(t) {
   const disk = await createDiskHarness(t, { legacyIdentity: "default" }), plugin = openPlugin(disk);
-  const storage = loadModule("src/chat-storage.ts", disk.globals);
   await plugin.api("character.list", {});
   disk.clearCalls();
-  return { disk, plugin, storage };
+  return { disk, plugin };
 }
 
 test("sidebar batches 525 preference bindings and never queries memory or Core extensions", async t => {
@@ -30,15 +29,39 @@ test("sidebar batches 525 preference bindings and never queries memory or Core e
 test("sidebar refresh observes a preference binding edit with unchanged Core chat IDs", async t => {
   const h = await environment(t), request = context([summary(1)]);
   assert.equal(plain(await h.plugin.sidebar(request)).sections.find(section => section.id === "unbound").chats.length, 1);
-  await h.storage.writeChatBinding({ chatId: "loading-1", selection: "card:default" });
+  const chats = await h.disk.storage.dataStore.open({ path: h.disk.directory + "/chats.preferences.json" });
+  await chats.edit(preferences => preferences.set("binding_loading-1", { version: 1, selection: "card:default" }));
+  await chats.close();
   const updated = plain(await h.plugin.sidebar(request));
   assert.equal(updated.sections.find(section => section.id === "card:default").chats[0].id, "loading-1");
 });
 
-test("sidebar propagates preference failures and missing bound roles without substituting unbound state", async t => {
+test("sidebar propagates preference read failures", async t => {
   const h = await environment(t), request = context([summary(1)]), failure = new Error("SQL read failed");
   h.disk.failNext("storage.preferences.data", failure);
   await assert.rejects(h.plugin.sidebar(request), error => error === failure);
-  await h.storage.writeChatBinding({ chatId: "loading-1", selection: "card:missing" });
-  await assert.rejects(h.plugin.sidebar(request), /exactly one stored record/);
+});
+
+test("sidebar keeps chats with missing cards or groups in unbound without rewriting bindings", async t => {
+  const h = await environment(t), chats = [summary(1), summary(2), summary(3), summary(4)];
+  const store = await h.disk.storage.dataStore.open({ path: h.disk.directory + "/chats.preferences.json" });
+  await store.edit(preferences => {
+    preferences.set("binding_loading-1", { version: 1, selection: "card:missing" });
+    preferences.set("binding_loading-2", { version: 1, selection: "group:missing" });
+    preferences.set("binding_loading-3", { version: 1, selection: "card:default" });
+  });
+  for (const view of ["characters", "groups"]) {
+    const result = plain(await h.plugin.sidebar({ ...context(chats), input: { view } }));
+    if (view === "characters") {
+      assert.deepEqual(result.sections.find(section => section.id === "unbound").chats, [chats[0], chats[1], chats[3]]);
+      assert.deepEqual(result.sections.find(section => section.id === "card:default").chats, [chats[2]]);
+    } else {
+      const scope = result.scopes.find(scope => scope.id === "unbound");
+      assert.deepEqual(scope.ungrouped, [chats[0], chats[1], chats[3]]);
+    }
+  }
+  const stored = await store.data();
+  assert.equal(stored.get("binding_loading-1").selection, "card:missing");
+  assert.equal(stored.get("binding_loading-2").selection, "group:missing");
+  await store.close();
 });

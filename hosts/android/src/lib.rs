@@ -16,6 +16,8 @@ mod filesystem;
 mod document_filesystem;
 mod http;
 #[cfg(target_os = "android")]
+mod jni_thread;
+#[cfg(target_os = "android")]
 mod local_inference;
 #[cfg(target_os = "android")]
 mod logging;
@@ -26,8 +28,13 @@ mod runtime_event_scheduler;
 mod runtime_storage;
 #[cfg(target_os = "android")]
 mod secret_store;
+#[cfg(target_os = "android")]
+mod service_discovery;
 mod system_operation;
 mod terminal;
+mod terminal_privilege;
+#[cfg(target_os = "android")]
+pub use terminal::androidPrivilegedPtyOperation;
 mod tts_playback;
 mod tts_synthesis;
 mod web_visit;
@@ -36,6 +43,8 @@ pub use audio_playback::{AndroidAudioPlaybackHost, AndroidMusicCommand};
 pub use bluetooth::AndroidBluetoothHost;
 pub use filesystem::AndroidFileSystemHost;
 pub use http::AndroidHttpHost;
+#[cfg(target_os = "android")]
+pub use jni_thread::attachCurrentThread;
 #[cfg(target_os = "android")]
 pub use local_inference::AndroidLocalInferenceHost;
 #[cfg(target_os = "android")]
@@ -101,7 +110,7 @@ pub fn createRuntimeHostManager(
     .withLocalInferenceHost(Arc::new(AndroidLocalInferenceHost::new()))
     .withHostRuntimeEventSchedulerHost(Arc::new(AndroidHostRuntimeEventSchedulerHost::new()))
     .withHostJavaScriptRuntimeHost(Arc::new(AndroidHostJavaScriptRuntimeHost::new()))
-    .withServiceDiscoveryHost(Arc::new(operit_host_native_common::ServiceDiscovery::ServiceDiscoveryProvider::default()))
+    .withServiceDiscoveryHost(Arc::new(operit_host_native_common::ServiceDiscovery::ServiceDiscoveryProvider::withNetworkLease(service_discovery::acquireMulticastLease)))
     .withHostRuntimeTaskSchedulerHost(Arc::new(AndroidHostRuntimeTaskSchedulerHost::new()))
     .withPluginSdkIpcHost(Arc::new(AndroidPluginSdkIpcHost::new()))
 }

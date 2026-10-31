@@ -1,8 +1,8 @@
 import type { SnapshotRecord } from "./api";
 import { record } from "./domain";
-import { decodeSelection, encodeSelection, requireUiCaller } from "./ui-contributions";
+import { encodeSelection, requireUiCaller } from "./ui-contributions";
 import { bindingsForChats } from "./chat-storage";
-import { requireChatSelection } from "./chat-bindings";
+import { parseChatSelection } from "./chat-bindings";
 import { getService } from "./service-runtime";
 
 /** Selects one plugin-owned embedded sidebar view without creating a modal presentation. */
@@ -10,7 +10,7 @@ export interface SidebarInput { view: "characters" | "groups" }
 /** Contains only the neutral chat metadata supplied by the existing native history source. */
 export interface SidebarChatSummary {
   id: string; title: string; updatedAt: string; displayOrder: number;
-  workspaceId: string | null; workspaceName: string | null; locked: boolean; pinned: boolean; group: string | null;
+  workspaceId: string | null; workspaceName: string | null; locked: boolean; pinned: boolean; group: string | null; parentChatId: string | null;
 }
 /** Describes the exact live host context of an embedded chat sidebar. */
 export interface ChatSidebarContext { chats: SidebarChatSummary[]; currentChatId: string | null; activeStreamingChatIds: string[] }
@@ -97,15 +97,16 @@ export function parseSidebarInput(value: unknown): SidebarInput {
 }
 /** Validates a neutral host history summary and rejects plugin role-binding fields. */
 export function parseSidebarChat(value: unknown): SidebarChatSummary {
-  const chat = exactFields(value, ["id", "title", "updatedAt", "displayOrder", "workspaceId", "workspaceName", "locked", "pinned", "group"], "sidebar chat");
+  const chat = exactFields(value, ["id", "title", "updatedAt", "displayOrder", "workspaceId", "workspaceName", "locked", "pinned", "group", "parentChatId"], "sidebar chat");
   if (chat.group !== null && typeof chat.group !== "string") throw new Error("sidebar chat.group must be a string or null");
+  if (chat.parentChatId !== null) sidebarIdentity(chat.parentChatId, "sidebar chat.parentChatId");
   const id = sidebarIdentity(chat.id, "sidebar chat.id");
   if (typeof chat.title !== "string" || typeof chat.updatedAt !== "string") throw new Error("sidebar chat title and updatedAt must be strings");
   if (typeof chat.displayOrder !== "number" || !Number.isSafeInteger(chat.displayOrder)) throw new Error("sidebar chat.displayOrder must be a safe integer");
   if (chat.workspaceId !== null && typeof chat.workspaceId !== "string") throw new Error("sidebar chat.workspaceId must be a string or null");
   if (chat.workspaceName !== null && typeof chat.workspaceName !== "string") throw new Error("sidebar chat.workspaceName must be a string or null");
   if (typeof chat.locked !== "boolean" || typeof chat.pinned !== "boolean") throw new Error("sidebar chat locked and pinned must be booleans");
-  return { id, title: chat.title, updatedAt: chat.updatedAt, displayOrder: chat.displayOrder, workspaceId: chat.workspaceId, workspaceName: chat.workspaceName, locked: chat.locked, pinned: chat.pinned, group: chat.group };
+  return { id, title: chat.title, updatedAt: chat.updatedAt, displayOrder: chat.displayOrder, workspaceId: chat.workspaceId, workspaceName: chat.workspaceName, locked: chat.locked, pinned: chat.pinned, group: chat.group, parentChatId: chat.parentChatId as string | null };
 }
 /** Validates the live generic host state without defaulting missing state to a management screen. */
 export function parseChatSidebarContext(value: unknown): ChatSidebarContext {
@@ -160,16 +161,16 @@ export function characterSidebarSections(directory: Pick<SnapshotRecord, "cards"
   const selectionByChat = new Map<string, SidebarChatSelection>();
   for (const state of selections) {
     if (selectionByChat.has(state.chatId)) throw new Error("Duplicate sidebar selection state: " + state.chatId);
-    if (state.selection !== null) decodeSelection(state.selection, directory);
+    if (state.selection !== null) parseChatSelection(state.selection);
     selectionByChat.set(state.chatId, state);
   }
   const unbound: CharacterSidebarSection = { id: "unbound", title: "未绑定角色", avatarUri: null, kind: "unbound", selection: null, chats: [] };
   for (const chat of chats) {
     const state = selectionByChat.get(chat.id);
     if (state === undefined) throw new Error("Sidebar has no explicit namespace selection state for chat: " + chat.id);
-    if (state.selection === null || decodeSelection(state.selection, directory).entity === "model") { unbound.chats.push(chat); continue; }
-    const section = bySelection.get(state.selection);
-    if (section === undefined) throw new Error("Plugin selection has no real category: " + state.selection);
+    const section = state.selection === null ? undefined : bySelection.get(state.selection);
+    // A removed or merged role leaves the conversation reachable for explicit reassignment.
+    if (section === undefined) { unbound.chats.push(chat); continue; }
     section.chats.push(chat);
   }
   if (unbound.chats.length !== 0) sections.push(unbound);
@@ -215,11 +216,8 @@ export function reconcileSidebarCatalog(catalog: SidebarCatalog, current: Curren
 /** Reads the actual sidebar catalog from namespace extensions and the same database-backed service used by every other plugin surface. */
 export async function readSidebarCatalog(value: CurrentSidebar): Promise<SidebarCatalog> {
   const current = parseCurrentSidebar(value), service = await getService();
-  // Directory and extension reads are independent; validate their joined results before publishing.
+  // Resolve stored selections against the current directory when projecting categories.
   const [directory, selections] = await Promise.all([service.sidebarDirectory(), readSidebarSelections(current.chatSidebar.chats)]);
-  for (const selection of selections) {
-    if (selection.selection !== null) requireChatSelection(selection.selection, directory.cards, directory.groups);
-  }
   const sections = characterSidebarSections(directory, selections, current.chatSidebar.chats);
   if (!sections.some(
     /** Ensures an explicit unbound grouping scope remains available for real empty group creation. */

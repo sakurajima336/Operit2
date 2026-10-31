@@ -20,7 +20,9 @@ import '../../../../viewmodel/ChatViewModel.dart';
 import '../../../ChatLayoutMetrics.dart';
 import '../common/ChatAttachmentImagePreview.dart';
 import '../common/ChatAttachmentMenuPopup.dart';
+import '../common/ChatComposerSendActionMenu.dart';
 import '../common/ChatComposerSlotHost.dart';
+import '../common/ChatPendingMessageQueuePanel.dart';
 import '../common/ChatPastedImageHandler.dart';
 import '../common/PendingQueueMessageItem.dart';
 import 'AgentInputMenuPopup.dart';
@@ -41,6 +43,8 @@ class AgentChatInputSection extends StatefulWidget {
     required this.currentChatId,
     required this.onSendMessage,
     required this.onQueueMessage,
+    this.onGuideMessage,
+    this.onInterruptAndSendMessage,
     required this.onCancelMessage,
     required this.isSpeechRecording,
     required this.isSpeechTranscribing,
@@ -51,6 +55,7 @@ class AgentChatInputSection extends StatefulWidget {
     this.onDeletePendingQueueMessage,
     this.onEditPendingQueueMessage,
     this.onSendPendingQueueMessage,
+    this.onGuidePendingQueueMessage,
     this.attachments = const <AttachmentInfo>[],
     this.onRemoveAttachment,
     this.onInsertAttachment,
@@ -79,6 +84,8 @@ class AgentChatInputSection extends StatefulWidget {
   final String? currentChatId;
   final VoidCallback onSendMessage;
   final VoidCallback onQueueMessage;
+  final VoidCallback? onGuideMessage;
+  final VoidCallback? onInterruptAndSendMessage;
   final VoidCallback onCancelMessage;
   final bool isSpeechRecording;
   final bool isSpeechTranscribing;
@@ -89,6 +96,7 @@ class AgentChatInputSection extends StatefulWidget {
   final ValueChanged<int>? onDeletePendingQueueMessage;
   final ValueChanged<int>? onEditPendingQueueMessage;
   final ValueChanged<int>? onSendPendingQueueMessage;
+  final ValueChanged<int>? onGuidePendingQueueMessage;
   final List<AttachmentInfo> attachments;
   final ValueChanged<String>? onRemoveAttachment;
   final ValueChanged<AttachmentInfo>? onInsertAttachment;
@@ -374,6 +382,7 @@ class _AgentChatInputSectionState extends State<AgentChatInputSection>
                     currentChatId: chatId,
                     onDismiss: _dismissInputMenuPopup,
                     isChatContextCurrent: isChatContextCurrent,
+                    showNativeStatistics: false,
                   ),
                 ),
               ),
@@ -549,6 +558,7 @@ class _AgentChatInputSectionState extends State<AgentChatInputSection>
     widget.onAttachPackage?.call(packageName);
   }
 
+  /// Places popups using the anchor and dimensions of their owning Overlay.
   _PopupPlacement _popupPlacement(
     BuildContext context, {
     required GlobalKey targetKey,
@@ -556,19 +566,19 @@ class _AgentChatInputSectionState extends State<AgentChatInputSection>
     required double maxWidth,
   }) {
     final mediaQuery = MediaQuery.of(context);
-    final screenSize = mediaQuery.size;
+    final overlaySize = overlaySizeOf(context);
     final horizontalPadding = 12.0 + mediaQuery.padding.left;
     final rightPadding = 12.0 + mediaQuery.padding.right;
-    final availableWidth = screenSize.width - horizontalPadding - rightPadding;
+    final availableWidth = overlaySize.width - horizontalPadding - rightPadding;
     final width = availableWidth < maxWidth ? availableWidth : maxWidth;
     final targetRect = _targetRect(targetKey);
     final targetLeft = targetRect.left;
     final targetRight = targetRect.right;
     final desiredLeft = alignEnd ? targetRight - width : targetLeft;
-    final maxLeft = screenSize.width - rightPadding - width;
+    final maxLeft = overlaySize.width - rightPadding - width;
     final left = desiredLeft.clamp(horizontalPadding, maxLeft).toDouble();
     final targetTop = targetRect.top;
-    final bottom = screenSize.height - targetTop + 8;
+    final bottom = overlaySize.height - targetTop + 8;
     final maxHeight = (targetTop - mediaQuery.padding.top - 20).clamp(
       96.0,
       420.0,
@@ -663,16 +673,15 @@ class _AgentChatInputSectionState extends State<AgentChatInputSection>
                   pendingQueueCount: widget.pendingQueueMessages.length,
                 ),
               if (widget.pendingQueueMessages.isNotEmpty)
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(12, 4, 12, 0),
-                  child: _PendingMessageQueuePanel(
-                    queuedMessages: widget.pendingQueueMessages,
-                    expanded: widget.isPendingQueueExpanded,
-                    onExpandedChange: widget.onPendingQueueExpandedChange,
-                    onDeleteMessage: widget.onDeletePendingQueueMessage,
-                    onEditMessage: widget.onEditPendingQueueMessage,
-                    onSendMessage: widget.onSendPendingQueueMessage,
-                  ),
+                ChatPendingMessageQueuePanel(
+                  queuedMessages: widget.pendingQueueMessages,
+                  expanded: widget.isPendingQueueExpanded,
+                  onExpandedChange: widget.onPendingQueueExpandedChange,
+                  onDeleteMessage: widget.onDeletePendingQueueMessage,
+                  onEditMessage: widget.onEditPendingQueueMessage,
+                  onSendMessage: widget.onSendPendingQueueMessage,
+                  onGuideMessage: widget.onGuidePendingQueueMessage,
+                  canGuide: processing,
                 ),
               KeyedSubtree(
                 key: _mentionPopupTargetKey,
@@ -712,6 +721,8 @@ class _AgentChatInputSectionState extends State<AgentChatInputSection>
                     hostMissing: widget.hostMissing,
                     onSendMessage: widget.onSendMessage,
                     onQueueMessage: widget.onQueueMessage,
+                    onGuideMessage: widget.onGuideMessage,
+                    onInterruptAndSendMessage: widget.onInterruptAndSendMessage,
                     onCancelMessage: widget.onCancelMessage,
                     isSpeechRecording: widget.isSpeechRecording,
                     isSpeechTranscribing: widget.isSpeechTranscribing,
@@ -796,6 +807,8 @@ class _InputBody extends StatelessWidget {
     required this.hostMissing,
     required this.onSendMessage,
     required this.onQueueMessage,
+    this.onGuideMessage,
+    this.onInterruptAndSendMessage,
     required this.onCancelMessage,
     required this.isSpeechRecording,
     required this.isSpeechTranscribing,
@@ -835,6 +848,8 @@ class _InputBody extends StatelessWidget {
   final bool hostMissing;
   final VoidCallback onSendMessage;
   final VoidCallback onQueueMessage;
+  final VoidCallback? onGuideMessage;
+  final VoidCallback? onInterruptAndSendMessage;
   final VoidCallback onCancelMessage;
   final bool isSpeechRecording;
   final bool isSpeechTranscribing;
@@ -939,8 +954,12 @@ class _InputBody extends StatelessWidget {
           icon: Icons.tune_outlined,
           color: colorScheme.onSurfaceVariant,
           onTap: onSettings,
-          imageAsset: OperitTheme.of(context).themePreferenceSnapshot.inputSettingsAsset,
-          imageSize: OperitTheme.of(context).themePreferenceSnapshot.inputSettingsAssetSize,
+          imageAsset: OperitTheme.of(
+            context,
+          ).themePreferenceSnapshot.inputSettingsAsset,
+          imageSize: OperitTheme.of(
+            context,
+          ).themePreferenceSnapshot.inputSettingsAssetSize,
           targetSize: 34,
           tooltip: l10n.settings,
         ),
@@ -951,81 +970,104 @@ class _InputBody extends StatelessWidget {
           icon: Icons.add,
           color: colorScheme.onSurfaceVariant.withValues(alpha: 0.9),
           onTap: onAttach,
-          imageAsset: OperitTheme.of(context).themePreferenceSnapshot.inputAttachmentAsset,
-          imageSize: OperitTheme.of(context).themePreferenceSnapshot.inputAttachmentAssetSize,
+          imageAsset: OperitTheme.of(
+            context,
+          ).themePreferenceSnapshot.inputAttachmentAsset,
+          imageSize: OperitTheme.of(
+            context,
+          ).themePreferenceSnapshot.inputAttachmentAssetSize,
           size: 24,
           tooltip: l10n.addAttachment,
         ),
       ),
-      action: _ActionButton(
-        key: const ValueKey<String>('chat.send'),
-        imageAsset: showMissingHost
-            ? null
-            : resolveThemeInputActionAsset(
-                OperitTheme.of(context).themePreferenceSnapshot,
-                isStop: isSpeechRecording || showCancelAction,
-                isSend: showQueueAction || canSendMessage,
-              ),
-        imageSize: showMissingHost
-            ? null
-            : resolveThemeInputActionAssetSize(
-                OperitTheme.of(context).themePreferenceSnapshot,
-                isStop: isSpeechRecording || showCancelAction,
-                isSend: showQueueAction || canSendMessage,
-              ),
-        processing: processing || isSpeechTranscribing,
-        progress: isSpeechTranscribing ? null : _progressFor(inputState),
-        background: isSpeechRecording
-            ? colorScheme.error
-            : _actionBackground(
-                colorScheme,
-                showCancelAction: showCancelAction,
-                showQueueAction: showQueueAction,
-                canSend: canSendMessage,
-              ),
-        foreground: isSpeechRecording
-            ? colorScheme.onError
-            : _actionForeground(
-                colorScheme,
-                showCancelAction: showCancelAction,
-                showQueueAction: showQueueAction,
-                canSend: canSendMessage,
-              ),
-        icon: isSpeechRecording
-            ? Icons.stop
-            : isSpeechTranscribing
-            ? Icons.graphic_eq
-            : showMissingHost
-            ? Icons.device_unknown
-            : _actionIcon(
-                showCancelAction: showCancelAction,
-                showQueueAction: showQueueAction,
-                canSend: canSendMessage,
-              ),
-        tooltip: isSpeechRecording
-            ? '停止录音'
-            : isSpeechTranscribing
-            ? '正在识别'
-            : showCancelAction
-            ? l10n.cancel
-            : showQueueAction
-            ? l10n.chatQueueAddMessage
-            : showMissingHost
-            ? l10n.chatRouteClaimHostPrompt
-            : (canSendMessage ? l10n.send : ''),
-        onPressed: isSpeechTranscribing
-            ? null
-            : () {
-                if (showCancelAction) {
-                  onCancelMessage();
-                } else if (showQueueAction) {
+      action: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          if (showQueueAction &&
+              onGuideMessage != null &&
+              onInterruptAndSendMessage != null)
+            ChatComposerSendActionMenu(
+              onAction: (action) {
+                if (action == ChatComposerSendAction.queue) {
                   onQueueMessage();
-                } else if (showMissingHost || canSendMessage) {
-                  onSendMessage();
+                } else if (action == ChatComposerSendAction.guide) {
+                  onGuideMessage!();
                 } else {
-                  onSpeechInput();
+                  onInterruptAndSendMessage!();
                 }
               },
+            ),
+          _ActionButton(
+            key: const ValueKey<String>('chat.send'),
+            imageAsset: showMissingHost
+                ? null
+                : resolveThemeInputActionAsset(
+                    OperitTheme.of(context).themePreferenceSnapshot,
+                    isStop: isSpeechRecording || showCancelAction,
+                    isSend: showQueueAction || canSendMessage,
+                  ),
+            imageSize: showMissingHost
+                ? null
+                : resolveThemeInputActionAssetSize(
+                    OperitTheme.of(context).themePreferenceSnapshot,
+                    isStop: isSpeechRecording || showCancelAction,
+                    isSend: showQueueAction || canSendMessage,
+                  ),
+            processing: processing || isSpeechTranscribing,
+            progress: isSpeechTranscribing ? null : _progressFor(inputState),
+            background: isSpeechRecording
+                ? colorScheme.error
+                : _actionBackground(
+                    colorScheme,
+                    showCancelAction: showCancelAction,
+                    showQueueAction: showQueueAction,
+                    canSend: canSendMessage,
+                  ),
+            foreground: isSpeechRecording
+                ? colorScheme.onError
+                : _actionForeground(
+                    colorScheme,
+                    showCancelAction: showCancelAction,
+                    showQueueAction: showQueueAction,
+                    canSend: canSendMessage,
+                  ),
+            icon: isSpeechRecording
+                ? Icons.stop
+                : isSpeechTranscribing
+                ? Icons.graphic_eq
+                : showMissingHost
+                ? Icons.device_unknown
+                : _actionIcon(
+                    showCancelAction: showCancelAction,
+                    showQueueAction: showQueueAction,
+                    canSend: canSendMessage,
+                  ),
+            tooltip: isSpeechRecording
+                ? '停止录音'
+                : isSpeechTranscribing
+                ? '正在识别'
+                : showCancelAction
+                ? l10n.cancel
+                : showQueueAction
+                ? l10n.chatQueueAddMessage
+                : showMissingHost
+                ? l10n.chatRouteClaimHostPrompt
+                : (canSendMessage ? l10n.send : ''),
+            onPressed: isSpeechTranscribing
+                ? null
+                : () {
+                    if (showCancelAction) {
+                      onCancelMessage();
+                    } else if (showQueueAction) {
+                      onQueueMessage();
+                    } else if (showMissingHost || canSendMessage) {
+                      onSendMessage();
+                    } else {
+                      onSpeechInput();
+                    }
+                  },
+          ),
+        ],
       ),
     );
     return DropTarget(
@@ -1393,159 +1435,6 @@ String _buildAttachmentPackageSubtitle(
   return '$typeLabel · ${option.description}';
 }
 
-class _PendingMessageQueuePanel extends StatelessWidget {
-  const _PendingMessageQueuePanel({
-    required this.queuedMessages,
-    required this.expanded,
-    required this.onExpandedChange,
-    required this.onDeleteMessage,
-    required this.onEditMessage,
-    required this.onSendMessage,
-  });
-
-  final List<PendingQueueMessageItem> queuedMessages;
-  final bool expanded;
-  final ValueChanged<bool>? onExpandedChange;
-  final ValueChanged<int>? onDeleteMessage;
-  final ValueChanged<int>? onEditMessage;
-  final ValueChanged<int>? onSendMessage;
-
-  @override
-  Widget build(BuildContext context) {
-    if (queuedMessages.isEmpty) {
-      return const SizedBox.shrink();
-    }
-    final theme = Theme.of(context);
-    final colorScheme = theme.colorScheme;
-    final l10n = AppLocalizations.of(context)!;
-    return Material(
-      color: colorScheme.surfaceContainerHighest,
-      borderRadius: BorderRadius.circular(8),
-      clipBehavior: Clip.antiAlias,
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: <Widget>[
-          InkWell(
-            onTap: onExpandedChange == null
-                ? null
-                : () => onExpandedChange!(!expanded),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              child: Row(
-                children: <Widget>[
-                  Expanded(
-                    child: Text(
-                      l10n.chatPendingQueueTitle(queuedMessages.length),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: theme.textTheme.labelLarge?.copyWith(
-                        color: colorScheme.onSurfaceVariant,
-                      ),
-                    ),
-                  ),
-                  Icon(
-                    expanded
-                        ? Icons.keyboard_arrow_up
-                        : Icons.keyboard_arrow_down,
-                    color: colorScheme.onSurfaceVariant,
-                  ),
-                ],
-              ),
-            ),
-          ),
-          if (expanded)
-            ConstrainedBox(
-              constraints: const BoxConstraints(maxHeight: 220),
-              child: ListView.separated(
-                padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
-                shrinkWrap: true,
-                itemCount: queuedMessages.length,
-                separatorBuilder: (_, _) => const SizedBox(height: 8),
-                itemBuilder: (context, index) {
-                  final item = queuedMessages[index];
-                  return _PendingQueueMessageTile(
-                    item: item,
-                    onDeleteMessage: onDeleteMessage,
-                    onEditMessage: onEditMessage,
-                    onSendMessage: onSendMessage,
-                  );
-                },
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-}
-
-class _PendingQueueMessageTile extends StatelessWidget {
-  const _PendingQueueMessageTile({
-    required this.item,
-    required this.onDeleteMessage,
-    required this.onEditMessage,
-    required this.onSendMessage,
-  });
-
-  final PendingQueueMessageItem item;
-  final ValueChanged<int>? onDeleteMessage;
-  final ValueChanged<int>? onEditMessage;
-  final ValueChanged<int>? onSendMessage;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final colorScheme = theme.colorScheme;
-    final l10n = AppLocalizations.of(context)!;
-    final actionColor = colorScheme.onSurfaceVariant.withValues(alpha: 0.9);
-    return Material(
-      color: colorScheme.surface,
-      borderRadius: BorderRadius.circular(8),
-      clipBehavior: Clip.antiAlias,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-        child: Row(
-          children: <Widget>[
-            _QueueIconAction(
-              icon: Icons.edit,
-              tooltip: l10n.edit,
-              color: actionColor,
-              onTap: onEditMessage == null
-                  ? null
-                  : () => onEditMessage!(item.id),
-            ),
-            Expanded(
-              child: Text(
-                item.text,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: colorScheme.onSurface,
-                ),
-              ),
-            ),
-            _QueueIconAction(
-              icon: Icons.send,
-              tooltip: l10n.send,
-              color: actionColor,
-              onTap: onSendMessage == null
-                  ? null
-                  : () => onSendMessage!(item.id),
-            ),
-            _QueueIconAction(
-              icon: Icons.delete,
-              tooltip: l10n.delete,
-              color: actionColor,
-              onTap: onDeleteMessage == null
-                  ? null
-                  : () => onDeleteMessage!(item.id),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
 class _AttachmentStrip extends StatelessWidget {
   const _AttachmentStrip({
     required this.attachments,
@@ -1750,36 +1639,6 @@ class _AttachmentImageRemoveButton extends StatelessWidget {
             height: 18,
             child: Icon(Icons.close, size: 10, color: Colors.white),
           ),
-        ),
-      ),
-    );
-  }
-}
-
-class _QueueIconAction extends StatelessWidget {
-  const _QueueIconAction({
-    required this.icon,
-    required this.tooltip,
-    required this.color,
-    required this.onTap,
-  });
-
-  final IconData icon;
-  final String tooltip;
-  final Color color;
-  final VoidCallback? onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return Tooltip(
-      message: tooltip,
-      child: InkResponse(
-        onTap: onTap,
-        radius: 16,
-        child: SizedBox(
-          width: 28,
-          height: 28,
-          child: Icon(icon, size: 16, color: color),
         ),
       ),
     );

@@ -33,6 +33,7 @@ impl ToolPkgMainRegistrationScriptParser {
             toolPkgId,
             mainScriptPath,
             crate::toolpkg::ToolPkgApiVersion::CURRENT_TOOLPKG_API_VERSION,
+            &[],
             ToolPkgConfigScope::Device,
             jsEngine,
             None,
@@ -46,6 +47,7 @@ impl ToolPkgMainRegistrationScriptParser {
         toolPkgId: &str,
         mainScriptPath: &str,
         apiVersion: &str,
+        environmentNames: &[String],
         configScope: ToolPkgConfigScope,
         jsEngine: &dyn JsExecutionEngine,
         textResources: Option<Arc<BTreeMap<String, String>>>,
@@ -64,6 +66,8 @@ impl ToolPkgMainRegistrationScriptParser {
             Value::String(format!("registerToolPkg:{toolPkgId}")),
         );
         params.insert("__operit_registration_mode".to_string(), Value::Bool(true));
+        params.insert("__operit_registration_environment_names".to_string(),
+            Value::Array(environmentNames.iter().cloned().map(Value::String).collect()));
         // The scope is fixed before module evaluation, not looked up through the loading manager.
         params.insert(
             "__operit_registration_config_scope".to_string(),
@@ -196,6 +200,11 @@ fn parseCapturedRegistration(
             TOOLPKG_REGISTRATION_CHAT_MESSAGE_MENU_ITEM,
             toolPkgId,
         )?,
+        chatResponseHooks: parseRegisteredItems(
+            &captured.chatResponseHooks,
+            TOOLPKG_REGISTRATION_CHAT_RESPONSE_HOOK,
+            toolPkgId,
+        )?,
         chatRuntimeHooks: parseRegisteredItems(
             &captured.chatRuntimeHooks,
             TOOLPKG_REGISTRATION_CHAT_RUNTIME_HOOK,
@@ -281,7 +290,7 @@ fn validateEmbeddedRoutes(registration: &ToolPkgMainRegistration, toolPkgId: &st
         .chain(registration.toolboxUiModules.iter().map(|module| (buildToolPkgRouteId(toolPkgId, module.id.trim()), module.runtime.as_str())))
         .collect::<Vec<_>>();
     for (index, entry) in registration.navigationEntries.iter().enumerate() {
-        if entry.surface != TOOLPKG_NAV_SURFACE_CHAT_SIDEBAR_TABS && entry.surface != TOOLPKG_NAV_SURFACE_CHAT_INPUT_MENU { continue; }
+        if !isToolPkgEmbeddedUiSurface(&entry.surface) { continue; }
         let surface = &entry.surface;
         let routeId = entry.routeId.as_deref().ok_or_else(|| format!("{TOOLPKG_REGISTRATION_NAVIGATION_ENTRY}[{index}].route is required for {surface}"))?;
         if !routeId.starts_with(&format!("toolpkg:{toolPkgId}:ui:")) {
@@ -437,7 +446,11 @@ impl ValidateToolPkgRegistration for ToolPkgRegisteredChatComposerSlot {
     fn validate(&self, registryName: &str, index: usize) -> Result<(), String> {
         requireNotBlank(&self.id, "id", registryName, index)?;
         requireNotBlank(&self.slot, "slot", registryName, index)?;
-        requireNotBlank(&self.screen, "screen", registryName, index)
+        requireNotBlank(&self.screen, "screen", registryName, index)?;
+        if let Some(exportName) = &self.screenExport {
+            requireNotBlank(exportName, "screenExport", registryName, index)?;
+        }
+        Ok(())
     }
 }
 
@@ -455,7 +468,7 @@ impl ValidateToolPkgRegistration for ToolPkgRegisteredNavigationEntry {
         requireToolPkgNavigationSurface(&self.surface).map_err(|error| {
             format!("{registryName}[{index}].surface {error}")
         })?;
-        if self.surface == TOOLPKG_NAV_SURFACE_CHAT_ATTACHMENTS || self.surface == TOOLPKG_NAV_SURFACE_CHAT_SIDEBAR_TABS || self.surface == TOOLPKG_NAV_SURFACE_CHAT_INPUT_MENU {
+        if self.surface == TOOLPKG_NAV_SURFACE_CHAT_ATTACHMENTS || isToolPkgEmbeddedUiSurface(&self.surface) {
             if self.action.is_some() {
                 return Err(format!("{registryName}[{index}].action is unsupported for {}", self.surface));
             }
@@ -552,7 +565,14 @@ impl ValidateToolPkgRegistration for ToolPkgRegisteredChatMessageMenuItem {
     /// Validates the id and function of a chat message menu item.
     fn validate(&self, registryName: &str, index: usize) -> Result<(), String> {
         requireNotBlank(&self.id, "id", registryName, index)?;
-        requireNotBlank(&self.function, "function", registryName, index)
+        requireNotBlank(&self.function, "function", registryName, index)?;
+        if let Some(dialog) = &self.dialog {
+            requireNotBlank(&dialog.screen, "dialog.screen", registryName, index)?;
+            if let Some(exportName) = &dialog.screenExport {
+                requireNotBlank(exportName, "dialog.screenExport", registryName, index)?;
+            }
+        }
+        Ok(())
     }
 }
 

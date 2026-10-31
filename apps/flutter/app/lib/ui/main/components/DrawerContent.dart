@@ -3,6 +3,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:operit_folder_access/operit_folder_access.dart';
 import 'package:operit_ui/operit_ui.dart';
 
 import '../../../core/bridge/OperitRuntimeBridge.dart';
@@ -13,11 +14,13 @@ import '../../../core/proxy/generated/CoreProxyModels.g.dart' as core_proxy;
 import '../../../l10n/generated/app_localizations.dart';
 import '../../common/contributions/ChatSidebarTabHost.dart';
 import '../../features/chat/viewmodel/ChatSelectionTransition.dart';
+import '../../features/chat/viewmodel/ChatMessageLookupRequests.dart';
 import '../../features/chat/components/NewChatIntro.dart';
 import '../../features/chat/components/workspace/WorkspaceUnbindDialog.dart';
 import '../navigation/AppNavigationModels.dart';
 import '../layout/SidebarDockController.dart';
 import '../layout/NavigationLayoutMetrics.dart';
+import '../layout/SidebarDockPreferences.dart';
 import '../screens/ScreenRouteRegistry.dart';
 import '../../theme/OperitTheme.dart';
 import '../../window/DetachedChatWindowLauncher.dart';
@@ -26,8 +29,12 @@ import 'CollapsedDrawerContent.dart';
 import '../../common/components/M3LoadingIndicator.dart';
 import 'DrawerContentDialogs.dart';
 import 'NavigationDrawerAppearance.dart';
+import 'SidebarMoreMenu.dart';
+import 'SidebarChatCreation.dart';
 
 part 'DrawerContentGroups.dart';
+
+enum _WorkspaceBindingChoice { existing, folder, create }
 
 class DrawerContent extends StatefulWidget {
   /// Receives generic chat metadata; plugin tabs own all subject-specific views.
@@ -44,6 +51,7 @@ class DrawerContent extends StatefulWidget {
     required this.loading,
     required this.onNavigationEntrySelected,
     required this.onConversationActivated,
+    this.onCollapseSidebar,
     this.bridge = const ProxyCoreRuntimeBridge(),
   });
 
@@ -58,6 +66,7 @@ class DrawerContent extends StatefulWidget {
   final bool loading;
   final ValueChanged<NavigationEntrySpec> onNavigationEntrySelected;
   final VoidCallback onConversationActivated;
+  final VoidCallback? onCollapseSidebar;
   final OperitRuntimeBridge bridge;
 
   /// Creates the native workspace consumer and real registered-tab surface.
@@ -74,10 +83,15 @@ class _DrawerContentState extends State<DrawerContent> {
     _rememberedCollapsedWorkspaces,
   );
   final Set<String> _expandedWorkspaces = <String>{};
+  final Set<String> _collapsedGroups = <String>{};
+  Set<SidebarDirectory> _pinnedDirectories = const <SidebarDirectory>{};
   bool _searchExpanded = false;
   String? _errorMessage;
-  final Set<String> _collapsedGroups = {};
   bool _groupMutationPending = false;
+  List<core_proxy.Workspace> _workspaces = const <core_proxy.Workspace>[];
+  int _workspaceLoadGeneration = 0;
+  StreamSubscription<List<core_proxy.Workspace>>? _workspacesSubscription;
+  StreamSubscription<Set<SidebarDirectory>>? _directoryPinsSubscription;
 
   /// Uses the actual receiving bridge for native conversation operations.
   GeneratedCoreProxyClients get _clients =>
@@ -87,11 +101,40 @@ class _DrawerContentState extends State<DrawerContent> {
   GeneratedChatRuntimeHolderMainCoreProxy get _chatCoreProxy =>
       _clients.chatRuntimeHolderMain;
 
+  SidebarDockPreferences get _directoryPreferences =>
+      SidebarDockPreferences(clients: _clients);
+
   /// Observes native workspace search independently of plugin-owned tab state.
   @override
   void initState() {
     super.initState();
     _searchController.addListener(_onSearchChanged);
+    unawaited(_loadWorkspaces());
+    _workspacesSubscription = _clients.repositoryWorkspacePreferenceStore
+        .allWorkspacesFlow()
+        .listen(
+          (workspaces) {
+            if (!mounted) return;
+            setState(() {
+              _workspaces = List<core_proxy.Workspace>.unmodifiable(workspaces);
+            });
+          },
+          onError: (Object error) {
+            debugPrint('Failed to watch workspaces: $error');
+          },
+        );
+    _directoryPinsSubscription = _directoryPreferences
+        .watchDirectoryPins()
+        .listen(
+          (directories) {
+            if (!mounted) return;
+            setState(() => _pinnedDirectories = directories);
+          },
+          onError: (Object error) {
+            debugPrint('Failed to watch sidebar directory pins: $error');
+            if (mounted) setState(() => _errorMessage = error.toString());
+          },
+        );
   }
 
   /// Clears local errors only after fresh canonical drawer state arrives.
@@ -99,11 +142,42 @@ class _DrawerContentState extends State<DrawerContent> {
   void didUpdateWidget(covariant DrawerContent oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.errorMessage != widget.errorMessage) _errorMessage = null;
+    if (_workspaceMembershipFingerprint(oldWidget.histories) !=
+        _workspaceMembershipFingerprint(widget.histories)) {
+      unawaited(_loadWorkspaces());
+    }
+  }
+
+  String _workspaceMembershipFingerprint(
+    List<core_proxy.ChatHistoryListItem> histories,
+  ) => histories
+      .map(
+        (history) =>
+            '${history.id}:${history.workspaceId ?? ''}:${history.workspaceName ?? ''}',
+      )
+      .join('|');
+
+  Future<void> _loadWorkspaces() async {
+    final generation = ++_workspaceLoadGeneration;
+    try {
+      final workspaces = await _clients.servicesWorkspaceService
+          .listWorkspaces();
+      if (!mounted || generation != _workspaceLoadGeneration) return;
+      setState(() {
+        _workspaces = List<core_proxy.Workspace>.unmodifiable(workspaces);
+      });
+    } catch (error, stackTrace) {
+      debugPrint('Failed to load workspaces: $error\n$stackTrace');
+      if (!mounted || generation != _workspaceLoadGeneration) return;
+      setState(() => _errorMessage = error.toString());
+    }
   }
 
   /// Releases native controllers without modifying persisted plugin tab selection.
   @override
   void dispose() {
+    unawaited(_workspacesSubscription?.cancel());
+    unawaited(_directoryPinsSubscription?.cancel());
     _searchController.removeListener(_onSearchChanged);
     _searchController.dispose();
     _historyScrollController.dispose();
@@ -116,6 +190,84 @@ class _DrawerContentState extends State<DrawerContent> {
   /// Toggles only the native search control, not plugin registration parameters.
   void _toggleSearchExpanded() =>
       setState(() => _searchExpanded = !_searchExpanded);
+
+  Future<void> _showBindWorkspaceDialog(
+    core_proxy.ChatHistoryListItem history,
+  ) async {
+    final chatId = history.id;
+    if (chatId.trim().isEmpty) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('对话 ID 无效')));
+      return;
+    }
+    final choice = await showDialog<_WorkspaceBindingChoice>(
+      context: context,
+      builder: (context) => SimpleDialog(
+        title: const Text('绑定对话到项目'),
+        children: <Widget>[
+          if (_workspaces.any(
+            (workspace) =>
+                workspace.id.isNotEmpty && workspace.id != history.workspaceId,
+          ))
+            SimpleDialogOption(
+              onPressed: () =>
+                  Navigator.of(context).pop(_WorkspaceBindingChoice.existing),
+              child: const ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: Icon(Icons.folder_special_outlined),
+                title: Text('选择已有项目'),
+                subtitle: Text('把当前对话移动到已有项目'),
+              ),
+            ),
+          SimpleDialogOption(
+            onPressed: () =>
+                Navigator.of(context).pop(_WorkspaceBindingChoice.folder),
+            child: const ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(Icons.folder_open_outlined),
+              title: Text('绑定本地文件夹'),
+              subtitle: Text('无项目时创建项目，有项目时追加文件夹'),
+            ),
+          ),
+          SimpleDialogOption(
+            onPressed: () =>
+                Navigator.of(context).pop(_WorkspaceBindingChoice.create),
+            child: const ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(Icons.create_new_folder_outlined),
+              title: Text('新建空白项目'),
+              subtitle: Text('创建内部项目并移动当前对话'),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (!mounted || choice == null) return;
+
+    switch (choice) {
+      case _WorkspaceBindingChoice.existing:
+        await _showMoveConversationToWorkspaceDialog(history);
+      case _WorkspaceBindingChoice.folder:
+        final source = await OperitFolderAccess.pickWorkspaceDirectory();
+        if (!mounted || source == null) return;
+        await _runGroupMutation(
+          () => _chatCoreProxy.bindChatToWorkspace(
+            chatId: chatId,
+            workspace: source.encode(),
+          ),
+        );
+      case _WorkspaceBindingChoice.create:
+        final name = await _groupNameDialog('新建项目', '', labelText: '项目名称');
+        if (!mounted || name == null) return;
+        await _runGroupMutation(() async {
+          await _chatCoreProxy.createAndBindWorkspace(
+            chatId: chatId,
+            name: name,
+          );
+        });
+    }
+  }
 
   /// Opens an existing navigation entry using its exact registered host identity.
   void _openNavigation(String id) {
@@ -149,17 +301,28 @@ class _DrawerContentState extends State<DrawerContent> {
     }
   }
 
-  /// Creates through the generic hook using the displayed chat as the nullable source.
-  Future<void> _createConversation() async {
-    final sourceChatId = widget.currentChatId;
+  /// Creates in an explicit workspace or inherits the native tab's selected binding.
+  Future<void> _createConversation({
+    String? workspaceId,
+    bool inheritWorkspace = false,
+  }) async {
     final chatCore = _chatCoreProxy;
     final onActivated = widget.onConversationActivated;
     newChatIntroArmed.value = true;
     if (mounted) setState(() => _errorMessage = null);
     try {
+      if (inheritWorkspace) {
+        workspaceId = await sidebarNewChatWorkspaceId(
+          clients: _clients,
+          histories: widget.histories,
+          currentChatId: widget.currentChatId,
+        );
+      }
       await chatCore.createNewChat(
         setAsCurrentChat: true,
-        sourceChatId: sourceChatId,
+        sourceChatId: null,
+        parentChatId: null,
+        workspaceId: workspaceId,
         input: null,
       );
       onActivated();
@@ -247,6 +410,9 @@ class _DrawerContentState extends State<DrawerContent> {
           canOpenInWindow: operitSupportsDesktopMultiWindow,
           canMoveUp: canMoveUp,
           canMoveDown: canMoveDown,
+          canMoveToWorkspace: _workspaces.any(
+            (workspace) => workspace.id != history.workspaceId,
+          ),
         );
       },
     );
@@ -254,6 +420,10 @@ class _DrawerContentState extends State<DrawerContent> {
       return;
     }
     switch (action) {
+      case ConversationAction.searchMessages:
+        await _openMessageLookup(history);
+      case ConversationAction.viewFavorites:
+        await _openMessageLookup(history, favoritesOnly: true);
       case ConversationAction.openInWindow:
         await _openConversationInWindow(history);
       case ConversationAction.rename:
@@ -262,6 +432,10 @@ class _DrawerContentState extends State<DrawerContent> {
         await _moveConversationRelative(history, -1);
       case ConversationAction.moveDown:
         await _moveConversationRelative(history, 1);
+      case ConversationAction.bindWorkspace:
+        await _showBindWorkspaceDialog(history);
+      case ConversationAction.moveToWorkspace:
+        await _showMoveConversationToWorkspaceDialog(history);
       case ConversationAction.togglePinned:
         await _updateConversationPinned(history);
       case ConversationAction.toggleLocked:
@@ -271,6 +445,63 @@ class _DrawerContentState extends State<DrawerContent> {
       case ConversationAction.delete:
         await _deleteConversation(history);
     }
+  }
+
+  Future<void> _openMessageLookup(
+    core_proxy.ChatHistoryListItem history, {
+    bool favoritesOnly = false,
+  }) async {
+    try {
+      await _activateChat(history.id);
+    } catch (_) {
+      // Activation already exposes its failure in the sidebar.
+      return;
+    }
+    ChatMessageLookupRequests.open(history.id, favoritesOnly: favoritesOnly);
+  }
+
+  Future<void> _showMoveConversationToWorkspaceDialog(
+    core_proxy.ChatHistoryListItem history,
+  ) async {
+    final workspaceId = await showDialog<String>(
+      context: context,
+      useRootNavigator: true,
+      builder: (context) => WorkspacePickerDialog(
+        workspaces: _workspaces,
+        currentWorkspaceId: history.workspaceId,
+      ),
+    );
+    if (!mounted || workspaceId == null) return;
+    await _runGroupMutation(
+      () => _chatCoreProxy.moveChatToWorkspace(
+        chatId: history.id,
+        workspaceId: workspaceId,
+      ),
+    );
+  }
+
+  Future<void> _deleteWorkspace(_WorkspaceSection section) async {
+    final workspaceId = section.workspaceId;
+    if (workspaceId == null || _groupMutationPending) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => DeleteWorkspaceDialog(name: section.label),
+    );
+    if (!mounted || confirmed != true) return;
+    await _runGroupMutation(() async {
+      await _chatCoreProxy.deleteWorkspace(workspaceId: workspaceId);
+      await _directoryPreferences.setDirectoryPinned(
+        SidebarDirectory.workspace(workspaceId),
+        false,
+      );
+      if (!mounted) return;
+      setState(() {
+        _collapsedWorkspaces.remove(section.key);
+        _rememberedCollapsedWorkspaces.remove(section.key);
+        _expandedWorkspaces.remove(section.key);
+      });
+      await _loadWorkspaces();
+    });
   }
 
   /// Lets a conversation detach an exact workspace binding even when its record is missing.
@@ -407,36 +638,114 @@ class _DrawerContentState extends State<DrawerContent> {
   String _workspaceLabel(core_proxy.ChatHistoryListItem history) {
     final id = history.workspaceId?.trim();
     if (id == null || id.isEmpty) {
-      return '未绑定工作区';
+      return '未绑定项目';
     }
     final name = history.workspaceName?.trim();
     if (name == null || name.isEmpty) {
-      return '工作区缺失';
+      return '项目记录缺失';
     }
     return name;
   }
 
-  /// Projects the full canonical order into native workspace sections and search matches.
+  bool _matchesHistory(core_proxy.ChatHistoryListItem history, String query) =>
+      query.isEmpty ||
+      history.title.toLowerCase().contains(query) ||
+      (history.group ?? '未分组').toLowerCase().contains(query) ||
+      _workspaceLabel(history).toLowerCase().contains(query);
+
+  /// Projects persisted workspaces first, then places canonical chats inside them.
   List<_WorkspaceSection> _workspaceSections({bool filter = true}) {
     final query = _searchController.text.trim().toLowerCase();
-    final sections = <String, _WorkspaceSection>{};
+    final historiesByWorkspace =
+        <String?, List<core_proxy.ChatHistoryListItem>>{};
     for (final history in widget.histories) {
-      final label = _workspaceLabel(history);
-      if (filter &&
-          query.isNotEmpty &&
-          !history.title.toLowerCase().contains(query) &&
-          !label.toLowerCase().contains(query) &&
-          !(history.group ?? '未分组').toLowerCase().contains(query)) {
+      final workspaceId = history.workspaceId?.trim();
+      historiesByWorkspace
+          .putIfAbsent(
+            workspaceId == null || workspaceId.isEmpty ? null : workspaceId,
+            () => <core_proxy.ChatHistoryListItem>[],
+          )
+          .add(history);
+    }
+
+    final sections = <_WorkspaceSection>[];
+    final unbound =
+        historiesByWorkspace[null] ?? const <core_proxy.ChatHistoryListItem>[];
+    if (unbound.any((history) => !filter || _matchesHistory(history, query))) {
+      final section = _WorkspaceSection(
+        key: 'workspace:unbound',
+        label: '未绑定项目',
+        canCreate: true,
+      );
+      section.histories.addAll(
+        unbound.where((history) => !filter || _matchesHistory(history, query)),
+      );
+      sections.add(section);
+    }
+
+    final knownWorkspaceIds = <String>{};
+    for (final workspace in _workspaces) {
+      final workspaceId = workspace.id.trim();
+      if (workspaceId.isEmpty) continue;
+      knownWorkspaceIds.add(workspaceId);
+      final histories =
+          historiesByWorkspace[workspaceId] ??
+          const <core_proxy.ChatHistoryListItem>[];
+      final workspaceMatches =
+          !filter ||
+          query.isEmpty ||
+          workspace.name.toLowerCase().contains(query) ||
+          workspace.folders.any(
+            (folder) => folder.path.toLowerCase().contains(query),
+          );
+      final visibleHistories = workspaceMatches
+          ? histories
+          : histories.where((history) => _matchesHistory(history, query));
+      if (!workspaceMatches && visibleHistories.isEmpty) continue;
+      final section = _WorkspaceSection(
+        key: 'workspace:$workspaceId',
+        label: workspace.name,
+        workspaceId: workspaceId,
+        subtitle: workspace.folders.isEmpty
+            ? null
+            : workspace.folders.first.path,
+        canCreate: true,
+      );
+      section.histories.addAll(visibleHistories);
+      sections.add(section);
+    }
+
+    for (final entry in historiesByWorkspace.entries) {
+      final workspaceId = entry.key;
+      if (workspaceId == null || knownWorkspaceIds.contains(workspaceId)) {
         continue;
       }
-      final key = _workspaceKey(history);
-      final section = sections.putIfAbsent(
-        key,
-        () => _WorkspaceSection(key: key, label: label),
+      final visibleHistories = entry.value.where(
+        (history) => !filter || _matchesHistory(history, query),
       );
-      section.histories.add(history);
+      if (visibleHistories.isEmpty) continue;
+      final first = entry.value.first;
+      final section = _WorkspaceSection(
+        key: _workspaceKey(first),
+        label: _workspaceLabel(first),
+        workspaceId: workspaceId,
+        canCreate: false,
+      );
+      section.histories.addAll(visibleHistories);
+      sections.add(section);
     }
-    return sections.values.toList(growable: false);
+    return [
+      ...sections.where(
+        (section) => _pinnedDirectories.contains(
+          SidebarDirectory.workspace(section.workspaceId),
+        ),
+      ),
+      ...sections.where(
+        (section) => !_pinnedDirectories.contains(
+          SidebarDirectory.workspace(section.workspaceId),
+        ),
+      ),
+    ];
   }
 
   void _showGroupError(Object error) =>
@@ -489,9 +798,6 @@ class _DrawerContentState extends State<DrawerContent> {
         _workspaceKey(moved) != _workspaceKey(target)) {
       return;
     }
-    if (moved.group != target.group) {
-      await _moveWorkspaceGroup(moved, target.group);
-    }
     final from = widget.histories.indexWhere((item) => item.id == moved.id);
     final to = widget.histories.indexWhere((item) => item.id == target.id);
     if (from < 0 || to < 0) {
@@ -533,7 +839,11 @@ class _DrawerContentState extends State<DrawerContent> {
         nested: true,
         workspaceStyle: true,
         onClick: () => unawaited(_switchConversation(history)),
+        onSearchMessages: () => unawaited(_openMessageLookup(history)),
+        onViewFavorites: () =>
+            unawaited(_openMessageLookup(history, favoritesOnly: true)),
         onRename: () => unawaited(_showRenameConversationDialog(history)),
+        onBindWorkspace: () => unawaited(_showBindWorkspaceDialog(history)),
         onTogglePinned: () => unawaited(_updateConversationPinned(history)),
         onToggleLocked: () => unawaited(_updateConversationLocked(history)),
         onDelete: () => unawaited(_deleteConversation(history)),
@@ -558,14 +868,46 @@ class _DrawerContentState extends State<DrawerContent> {
             _workspaceKey(moved) == _workspaceKey(history),
       );
 
-  Widget _sidebarHeader(Widget tabs) => Padding(
-    padding: const EdgeInsets.only(top: 26, right: 12),
-    child: SidebarInfoCard(
-      brandName: 'Operit',
-      appearance: widget.appearance,
-      trailing: tabs,
-    ),
-  );
+  Widget _sidebarHeader(Widget tabs) {
+    final onCollapse = widget.onCollapseSidebar;
+    final desktopHeader = useTabletLayoutForContext(context);
+    final topPadding = MediaQuery.paddingOf(context).top;
+    final header = Padding(
+      padding: EdgeInsets.only(top: desktopHeader ? topPadding : 26, right: 12),
+      child: Row(
+        children: <Widget>[
+          Expanded(
+            child: SidebarInfoCard(
+              brandName: 'Operit',
+              appearance: widget.appearance,
+              trailing: tabs,
+            ),
+          ),
+          if (onCollapse != null) ...<Widget>[
+            const SizedBox(width: 4),
+            IconButton(
+              tooltip: '收起侧边栏',
+              onPressed: onCollapse,
+              icon: Icon(
+                Icons.chevron_left,
+                size: 20,
+                color: widget.appearance.itemColor.withValues(alpha: 0.82),
+              ),
+              visualDensity: VisualDensity.compact,
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+            ),
+          ],
+        ],
+      ),
+    );
+    return desktopHeader
+        ? SizedBox(
+            height: topPadding + ThemeTopBarChrome.toolbarHeight,
+            child: header,
+          )
+        : header;
+  }
 
   /// Adds plugin navigation to the native workspace's existing scrolling surface.
   List<Widget> _pluginNavigationSlivers() => <Widget>[
@@ -596,52 +938,43 @@ class _DrawerContentState extends State<DrawerContent> {
     ],
   );
 
-  /// The workspace is always native; resolving membership never replaces its widgets.
+  /// Renders collapsible groups and their flat conversation rows within a project.
   Widget _workspaceHistory(_WorkspaceSection section, bool searching) {
     final groups = _nativeGroups(section);
     return Column(
       mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        for (final group in groups) ...[
+        for (final group in groups) ...<Widget>[
           _GroupSectionHeader(
             key: ValueKey('workspace-group:${group.key}'),
-            label: group.label,
-            pinned:
-                group.histories.isNotEmpty &&
-                group.histories.every((chat) => chat.pinned),
-            workspaceStyle: true,
+            group: group,
+            pinned: _pinnedDirectories.contains(group.directory),
             expanded: !_collapsedGroups.contains(group.key),
             appearance: widget.appearance,
+            canCreate: section.canCreate,
             onToggleExpanded: () => setState(() {
-              if (!_collapsedGroups.remove(group.key))
+              if (!_collapsedGroups.remove(group.key)) {
                 _collapsedGroups.add(group.key);
+              }
             }),
             onCreateChat: () => unawaited(
               _runGroupMutation(
                 () => _createGroupedConversation(section, group.name),
               ),
             ),
+            onCreateGroup: () => unawaited(_createWorkspaceGroup(section)),
             onRename: () => unawaited(_renameWorkspaceGroup(section, group)),
-            onTogglePinned: () => unawaited(
-              _runGroupMutation(() async {
-                final pinned =
-                    group.histories.isNotEmpty &&
-                    group.histories.every((chat) => chat.pinned);
-                for (final chat in group.histories) {
-                  await _chatCoreProxy.updateChatPinned(
-                    chatId: chat.id,
-                    pinned: !pinned,
-                  );
-                }
-              }),
-            ),
-            onDelete: () => unawaited(_deleteWorkspaceGroup(group)),
+            onTogglePinned: () =>
+                unawaited(_toggleDirectoryPinned(group.directory)),
+            onDissolve: () =>
+                unawaited(_dissolveWorkspaceGroup(section, group)),
             canAcceptDrop: (chat) => _workspaceKey(chat) == section.key,
             onMoveToGroup: (chat) => unawaited(
               _runGroupMutation(() => _moveWorkspaceGroup(chat, group.name)),
             ),
           ),
-          if (!_collapsedGroups.contains(group.key)) ...[
+          if (!_collapsedGroups.contains(group.key)) ...<Widget>[
             for (final chat
                 in searching || _expandedWorkspaces.contains(group.key)
                     ? group.histories
@@ -696,10 +1029,9 @@ class _DrawerContentState extends State<DrawerContent> {
                     children: <Widget>[
                       Expanded(
                         child: _WorkspaceCreateBar(
-                          onCreateGroup: () =>
-                              unawaited(_createWorkspaceGroup()),
-                          onCreateConversation: () =>
-                              unawaited(_createConversation()),
+                          onCreateConversation: () => unawaited(
+                            _createConversation(inheritWorkspace: true),
+                          ),
                         ),
                       ),
                       const SizedBox(width: 8),
@@ -748,10 +1080,27 @@ class _DrawerContentState extends State<DrawerContent> {
                 child: _WorkspaceHeader(
                   key: ValueKey('workspace-header:${section.key}'),
                   label: section.label,
-                  count: section.histories.length,
+                  subtitle: section.subtitle,
+                  pinned: _pinnedDirectories.contains(
+                    SidebarDirectory.workspace(section.workspaceId),
+                  ),
                   expanded: !_collapsedWorkspaces.contains(section.key),
                   appearance: widget.appearance,
+                  canCreate: section.canCreate,
+                  onDelete: section.workspaceId != null && section.canCreate
+                      ? () => unawaited(_deleteWorkspace(section))
+                      : null,
                   onToggleExpanded: () => _toggleWorkspace(section.key),
+                  onCreateConversation: () => unawaited(
+                    _createConversation(workspaceId: section.workspaceId),
+                  ),
+                  onCreateGroup: () =>
+                      unawaited(_createWorkspaceGroup(section)),
+                  onTogglePinned: () => unawaited(
+                    _toggleDirectoryPinned(
+                      SidebarDirectory.workspace(section.workspaceId),
+                    ),
+                  ),
                 ),
               ),
               if (!_collapsedWorkspaces.contains(section.key)) ...<Widget>[
@@ -863,12 +1212,8 @@ class _DrawerContentState extends State<DrawerContent> {
 }
 
 class _WorkspaceCreateBar extends StatelessWidget {
-  const _WorkspaceCreateBar({
-    required this.onCreateConversation,
-    required this.onCreateGroup,
-  });
+  const _WorkspaceCreateBar({required this.onCreateConversation});
   final VoidCallback onCreateConversation;
-  final VoidCallback onCreateGroup;
 
   @override
   Widget build(BuildContext context) {
@@ -885,9 +1230,7 @@ class _WorkspaceCreateBar extends StatelessWidget {
             Expanded(
               child: InkWell(
                 key: const ValueKey('workspace-create-chat'),
-                borderRadius: const BorderRadius.horizontal(
-                  left: Radius.circular(17),
-                ),
+                borderRadius: BorderRadius.circular(17),
                 hoverColor: contentColor.withValues(alpha: 0.08),
                 focusColor: contentColor.withValues(alpha: 0.10),
                 splashColor: contentColor.withValues(alpha: 0.10),
@@ -899,13 +1242,17 @@ class _WorkspaceCreateBar extends StatelessWidget {
                     children: <Widget>[
                       Icon(Icons.add_rounded, size: 17, color: contentColor),
                       const SizedBox(width: 6),
-                      Text(
-                        '新建对话',
-                        style: TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w600,
-                          color: contentColor,
-                          letterSpacing: -0.1,
+                      Flexible(
+                        child: Text(
+                          '新建对话',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                            color: contentColor,
+                            letterSpacing: -0.1,
+                          ),
                         ),
                       ),
                     ],
@@ -913,34 +1260,6 @@ class _WorkspaceCreateBar extends StatelessWidget {
                 ),
               ),
             ),
-            ...[
-              Container(
-                width: 1,
-                height: 16,
-                color: contentColor.withValues(alpha: 0.16),
-              ),
-              SizedBox(
-                width: 38,
-                height: 34,
-                child: InkWell(
-                  key: const ValueKey('workspace-create-group'),
-                  onTap: onCreateGroup,
-                  borderRadius: const BorderRadius.horizontal(
-                    right: Radius.circular(17),
-                  ),
-                  child: Tooltip(
-                    message: '新建分组',
-                    child: Center(
-                      child: Icon(
-                        Icons.create_new_folder_outlined,
-                        size: 16,
-                        color: contentColor,
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ],
           ],
         ),
       ),
@@ -949,31 +1268,66 @@ class _WorkspaceCreateBar extends StatelessWidget {
 }
 
 class _WorkspaceSection {
-  /// Retains complete native conversation rows for count, collapse and search behavior.
-  _WorkspaceSection({required this.key, required this.label});
+  /// Retains complete native conversation rows for grouping, preview and search.
+  _WorkspaceSection({
+    required this.key,
+    required this.label,
+    this.workspaceId,
+    this.subtitle,
+    required this.canCreate,
+  });
   final String key;
   final String label;
+  final String? workspaceId;
+  final String? subtitle;
+  final bool canCreate;
   final List<core_proxy.ChatHistoryListItem> histories =
       <core_proxy.ChatHistoryListItem>[];
 }
 
+enum _WorkspaceQuickAction { createChat, createGroup, togglePinned, delete }
+
 class _WorkspaceHeader extends StatelessWidget {
-  /// Displays the native workspace header without subject-specific icons or avatars.
   const _WorkspaceHeader({
     super.key,
     required this.label,
-    required this.count,
+    this.subtitle,
+    required this.pinned,
     required this.expanded,
     required this.appearance,
+    required this.canCreate,
     required this.onToggleExpanded,
+    required this.onCreateConversation,
+    required this.onCreateGroup,
+    required this.onTogglePinned,
+    this.onDelete,
   });
+
   final String label;
-  final int count;
+  final String? subtitle;
+  final bool pinned;
   final bool expanded;
   final NavigationDrawerAppearance appearance;
+  final bool canCreate;
   final VoidCallback onToggleExpanded;
+  final VoidCallback onCreateConversation;
+  final VoidCallback onCreateGroup;
+  final VoidCallback onTogglePinned;
+  final VoidCallback? onDelete;
 
-  /// Preserves native workspace collapse and complete conversation counts.
+  void _select(_WorkspaceQuickAction action) {
+    switch (action) {
+      case _WorkspaceQuickAction.createChat:
+        onCreateConversation();
+      case _WorkspaceQuickAction.createGroup:
+        onCreateGroup();
+      case _WorkspaceQuickAction.togglePinned:
+        onTogglePinned();
+      case _WorkspaceQuickAction.delete:
+        onDelete?.call();
+    }
+  }
+
   @override
   Widget build(BuildContext context) => Padding(
     padding: const EdgeInsetsDirectional.only(
@@ -1005,19 +1359,77 @@ class _WorkspaceHeader extends StatelessWidget {
             ),
             const SizedBox(width: 7),
             Expanded(
-              child: Text(
-                label,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                  color: appearance.titleColor,
-                  fontWeight: FontWeight.w700,
-                ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Text(
+                    label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                      color: appearance.titleColor,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  if (subtitle != null && subtitle!.trim().isNotEmpty)
+                    Text(
+                      subtitle!,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                        color: appearance.itemColor.withValues(alpha: 0.56),
+                        fontSize: 10,
+                      ),
+                    ),
+                ],
               ),
             ),
-            const SizedBox(width: 8),
-            _HistoryCountBadge(count: count, appearance: appearance),
-            const SizedBox(width: 6),
+            if (pinned) ...<Widget>[
+              const SizedBox(width: 4),
+              Icon(
+                Icons.push_pin_rounded,
+                size: 13,
+                color: appearance.itemColor.withValues(alpha: 0.65),
+              ),
+            ],
+            const SizedBox(width: 4),
+            SidebarMoreMenuButton<_WorkspaceQuickAction>(
+              compact: true,
+              tooltip: '项目操作',
+              color: appearance.itemColor.withValues(alpha: 0.78),
+              onSelected: _select,
+              actions: <SidebarMenuAction<_WorkspaceQuickAction>>[
+                SidebarMenuAction(
+                  value: _WorkspaceQuickAction.createChat,
+                  icon: Icons.add_comment_outlined,
+                  label: '新建对话',
+                  enabled: canCreate,
+                ),
+                SidebarMenuAction(
+                  value: _WorkspaceQuickAction.createGroup,
+                  icon: Icons.create_new_folder_outlined,
+                  label: '新建分组',
+                  enabled: canCreate,
+                ),
+                SidebarMenuAction(
+                  value: _WorkspaceQuickAction.togglePinned,
+                  icon: pinned
+                      ? Icons.push_pin_outlined
+                      : Icons.push_pin_rounded,
+                  label: pinned ? '取消置顶' : '置顶',
+                ),
+                if (onDelete != null)
+                  const SidebarMenuAction(
+                    value: _WorkspaceQuickAction.delete,
+                    icon: Icons.delete_outline_rounded,
+                    label: '删除工作区',
+                    dividerBefore: true,
+                    danger: true,
+                  ),
+              ],
+            ),
+            const SizedBox(width: 4),
             Icon(
               expanded ? Icons.expand_less : Icons.expand_more,
               size: 18,
@@ -1028,37 +1440,6 @@ class _WorkspaceHeader extends StatelessWidget {
       ),
     ),
   );
-}
-
-class _HistoryCountBadge extends StatelessWidget {
-  /// Creates a compact count badge for history section rows.
-  const _HistoryCountBadge({required this.count, required this.appearance});
-
-  final int count;
-  final NavigationDrawerAppearance appearance;
-
-  /// Builds a small outlined count badge.
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      constraints: const BoxConstraints(minWidth: 18),
-      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(6),
-        border: Border.all(color: appearance.dividerColor),
-      ),
-      alignment: Alignment.center,
-      child: Text(
-        count.toString(),
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-        style: Theme.of(context).textTheme.labelSmall?.copyWith(
-          color: appearance.itemColor.withValues(alpha: 0.70),
-          fontWeight: FontWeight.w700,
-        ),
-      ),
-    );
-  }
 }
 
 class _BottomThemeToggleButton extends StatelessWidget {
@@ -1129,7 +1510,7 @@ class _HistoryLimitButton extends StatelessWidget {
   Widget build(BuildContext context) {
     return Padding(
       padding: EdgeInsetsDirectional.only(
-        start: workspaceStyle ? 51 : 56,
+        start: workspaceStyle ? 50 : 56,
         end: 12,
         top: 2,
       ),
@@ -1142,6 +1523,7 @@ class _HistoryLimitButton extends StatelessWidget {
         ),
         label: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis),
         style: TextButton.styleFrom(
+          padding: EdgeInsets.zero,
           alignment: Alignment.centerLeft,
           foregroundColor: appearance.itemColor.withValues(alpha: 0.72),
           textStyle: Theme.of(

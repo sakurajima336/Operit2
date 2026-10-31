@@ -11,7 +11,7 @@ import { composeNodes, keyedNode } from './selector-render.mjs';
 let modules;
 test.before(async () => { modules = await buildUiScreenScripts(); });
 const summary = (id, changes = {}) => ({ id, title: '对话 ' + id, updatedAt: '1791059541109', displayOrder: Number(id.slice(1)) || 0,
-  workspaceId: null, workspaceName: null, locked: false, pinned: false, group: id === "c1" || id === "c2" ? "行程分组" : null, ...changes });
+  workspaceId: null, workspaceName: null, locked: false, pinned: false, group: id === "c1" || id === "c2" ? "行程分组" : null, parentChatId: null, ...changes });
 function context(chats, changes = {}) { return { input: { view: 'characters' }, chatSidebar: { chats, currentChatId: 'c1', activeStreamingChatIds: [], ...changes } }; }
 function catalog(chats) { return { view: 'characters', sections: [
   { id: 'card:travel', title: '旅行角色', avatarUri: null, kind: 'card', selection: 'card:travel', chats,
@@ -282,7 +282,7 @@ test('expanded conversations are complete Column content without viewport callba
   assert.equal(screen.calls.length, calls, 'Local expansion must not read authoritative catalogs or resources');
   assert.equal(screen.events.length - before, 1, 'A synchronous toggle must render only its final commit');
   const update = screen.events[before].response.update;
-  assert.ok(update.upserts.every(node => node.id.length < 12), 'Transport handles must not carry ancestor paths');
+  assert.ok(update.instances.every(node => node.id.length < 12), 'Transport handles must not carry ancestor paths');
   assert.ok(JSON.stringify(update).length < chats.length * 6500, 'Expanded updates must stay within a linear per-chat transport budget');
   const collapsed = await screen.click(expanded.tree, 'sidebar-preview-ungrouped:card:travel');
   assert.equal(composeNodes(collapsed.tree, node => /^sidebar-chat-c\d+$/.test(node.props.key ?? '')).length, 4);
@@ -313,7 +313,9 @@ test('generic long press and swipe callbacks render plugin-owned actions and con
   const combined = hit.props.modifier.__modifierOps.find(op => op.name === 'combinedClickable').args[0];
   const pressed = await screen.dispatch(combined.onLongClick);
   assert.ok(keyedNode(pressed.tree, 'sidebar-edit-dialog'));
-  for (const label of ['编辑名称', '上移', '下移', '置顶', '锁定', '删除'])
+  assert.ok(keyedNode(pressed.tree, 'sidebar-chat-actions-scroll'));
+  if (process.env.OPERIT_NATIVE_SIDEBAR_ACTIONS_FIXTURE) await writeFile(process.env.OPERIT_NATIVE_SIDEBAR_ACTIONS_FIXTURE, JSON.stringify(pressed.tree, null, 2) + '\n');
+  for (const label of ['搜索消息', '查看收藏', '编辑名称', '上移', '下移', '置顶', '锁定', '删除'])
     assert.ok(composeNodes(pressed.tree, node => node.type === 'Text' && node.props.text === label).length > 0, label);
   const rename = await screen.dispatch(keyedNode(tree, 'sidebar-chat-swipe-c1').props.onStartAction);
   assert.equal(keyedNode(rename.tree, 'sidebar-group-name').props.value, '对话 c1');
@@ -346,6 +348,38 @@ for (const view of ['characters', 'groups']) {
     assert.equal(keyedNode(opened.tree, 'sidebar-chat-rail-indicator-c2').props.height, 0);
     assert.equal(screen.calls.length, reads);
   });
+}
+
+for (const view of ['characters', 'groups']) {
+  for (const entry of ['popup', 'longPress']) {
+    for (const [label, type] of [['搜索消息', 'toolpkg.chat.searchMessages'], ['查看收藏', 'toolpkg.chat.viewFavorites']]) {
+      test(view + ' ' + entry + ' delegates ' + label + ' for the exact conversation to the host', async () => {
+        const chats = [summary('c1'), summary('c2')], roles = catalog(chats);
+        const data = view === 'characters' ? roles : { view, scopes: roles.sections.map(section => ({
+          id: section.id, title: section.title, ownerSelection: section.selection,
+          kind: section.kind, avatarUri: section.avatarUri, groups: section.conversationGroups,
+          ungrouped: section.ungroupedChats,
+        })) };
+        const screen = mount({ ...context(chats), input: { view } }, data);
+        const { tree } = await screen.load();
+        let result;
+        const reads = screen.calls.length;
+        if (entry === 'popup') {
+          const menu = keyedNode(tree, 'sidebar-chat-menu-c2');
+          result = await screen.dispatch(menu.props.onSelected, menu.props.items.findIndex(item => item.label === label));
+        } else {
+          const combined = keyedNode(tree, 'sidebar-chat-hit-c2').props.modifier.__modifierOps.find(op => op.name === 'combinedClickable').args[0];
+          const pressed = await screen.dispatch(combined.onLongClick);
+          const tile = composeNodes(pressed.tree, node => node.type === 'Surface' && node.props.onClick
+            && composeNodes(node, child => child.type === 'Text' && child.props.text === label).length > 0)[0];
+          result = await screen.dispatch(tile.props.onClick);
+        }
+        assert.deepEqual(JSON.parse(JSON.stringify(result.actionResult)), { type, chatId: 'c2' });
+        assert.equal(composeNodes(result.tree, node => node.type === 'Dialog').length, 0);
+        assert.equal(screen.calls.length, reads, 'lookup must use the validated host activation path');
+      });
+    }
+  }
 }
 
 for (const capabilities of [undefined, { openInWindow: false }]) {
@@ -388,7 +422,7 @@ for (const entry of ['popup', 'longPress']) {
     const { tree } = await screen.load();
     let result;
     if (entry === 'popup') {
-      result = await screen.dispatch(keyedNode(tree, 'sidebar-chat-menu-c1').props.onSelected, 3);
+      result = await screen.dispatch(keyedNode(tree, 'sidebar-chat-menu-c1').props.onSelected, 5);
     } else {
       const hit = keyedNode(tree, 'sidebar-chat-hit-c1');
       const combined = hit.props.modifier.__modifierOps.find(op => op.name === 'combinedClickable').args[0];
@@ -408,7 +442,7 @@ test('direct deletion keeps backend lock refusal visible', async () => {
     deleteChat: async id => { calls.push(id); throw new Error('Locked conversation cannot be deleted'); },
   }});
   const { tree } = await screen.load();
-  const result = await screen.dispatch(keyedNode(tree, 'sidebar-chat-menu-c1').props.onSelected, 3);
+  const result = await screen.dispatch(keyedNode(tree, 'sidebar-chat-menu-c1').props.onSelected, 5);
   assert.deepEqual(calls, ['c1']);
   assert.equal(composeNodes(result.tree, node => node.type === 'Dialog').length, 0);
   assert.ok(composeNodes(result.tree, node => node.type === 'Text'
@@ -423,8 +457,8 @@ test('plugin menu delegates pin and lock to the real SDK interface, not native b
   }});
   const {tree} = await screen.load();
   const selected = keyedNode(tree, 'sidebar-chat-menu-c1').props.onSelected;
-  await screen.dispatch(selected, 1);
-  await screen.dispatch(selected, 2);
+  await screen.dispatch(selected, 3);
+  await screen.dispatch(selected, 4);
   assert.deepEqual(mutations, [['pin', 'c1', true], ['lock', 'c1', true]]);
 });
 
@@ -672,4 +706,27 @@ test('a newly activated chat refreshes its role category and selection from host
   assert.equal(keyedNode(result.tree, 'sidebar-status-c4').props.selected, true);
   assert.equal(keyedNode(result.tree, 'sidebar-status-c1').props.selected, false);
   assert.equal(screen.calls.filter(call => call.name === 'character-sidebar.catalog').length, 2);
+});
+
+/** Uses the real retained Compose screen to verify child collapse, updates, indentation and search paths. */
+test('parent conversations contain running children without expanding during live updates', async () => {
+  const chats = [summary('c1'), summary('c2', { parentChatId: 'c1', title: 'Nested task' }),
+    summary('c3', { parentChatId: 'c2', title: 'Deep task' })];
+  const screen = mount(context(chats, { activeStreamingChatIds: ['c2'] }), catalog(chats));
+  let { tree } = await screen.load();
+  assert.ok(keyedNode(tree, 'sidebar-chat-c1'));
+  assert.equal(composeNodes(tree, node => node.props.key === 'sidebar-chat-c2').length, 0);
+  ({ tree } = await screen.click(tree, 'sidebar-children-c1'));
+  assert.ok(keyedNode(tree, 'sidebar-chat-c2'));
+  assert.equal(keyedNode(tree, 'sidebar-chat-c2').props.paddingStart - keyedNode(tree, 'sidebar-chat-c1').props.paddingStart, 16);
+  assert.equal(composeNodes(tree, node => node.props.key === 'sidebar-chat-c3').length, 0);
+  ({ tree } = await screen.click(tree, 'sidebar-children-c1'));
+  ({ tree } = await screen.update(context(chats, { activeStreamingChatIds: ['c2', 'c3'] })));
+  assert.equal(composeNodes(tree, node => node.props.key === 'sidebar-chat-c2').length, 0);
+  ({ tree } = await screen.click(tree, 'sidebar-search-toggle'));
+  ({ tree } = await screen.dispatch(keyedNode(tree, 'sidebar-search').props.onValueChange, 'Deep task'));
+  for (const id of ['c1', 'c2', 'c3']) assert.ok(keyedNode(tree, 'sidebar-chat-' + id));
+  ({ tree } = await screen.dispatch(keyedNode(tree, 'sidebar-search').props.onValueChange, ''));
+  assert.equal(composeNodes(tree, node => node.props.key === 'sidebar-chat-c2').length, 0);
+  assert.equal(screen.calls.some(call => call.name === 'character-memory.domain'), false);
 });

@@ -1,18 +1,23 @@
 pub mod client;
+pub mod isolation;
 pub mod session;
 pub use session::CoreLinkSession;
 pub mod codec;
+mod operation_codec;
+pub use operation_codec::{decodeLinkRequest, decodeLinkResponse, decodeLinkRequestOwned, decodeLinkResponseOwned};
 pub use bytes::Bytes as CoreBytes;
 #[path = "CoreStream.rs"]
 mod core_stream;
 pub mod protocol;
 pub mod route_runtime;
 mod value_codec;
+mod buffer;
+pub use buffer::CoreBuffer;
 
 pub const LINK_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub use client::{CoreLinkClient, CoreLinkPushSession, CoreLinkSharedClient};
-pub use codec::{decodeLink, encodeLink, encodeLinkInto, CoreLinkCodecError};
+pub use codec::{decodeLink, decodeLinkOwned, encodeLink, encodeLinkInto, encodedLinkSize, CoreLinkCodecError};
 pub use core_stream::{
     withCoreStreamCapture, withCoreStreamCaptureSync, withCoreStreamSourceResolverSync, CoreStream,
     CoreStreamAttachment, CoreStreamDescriptor, CoreStreamSource,

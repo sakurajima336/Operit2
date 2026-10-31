@@ -7,6 +7,8 @@ import vm from 'node:vm';
 
 /** Installs production host ownership/snapshot semantics and the shared SDK Promise helper. */
 export function installScopedHostRuntime(sandbox) {
+  /** Receives context changes without introducing execution deadlines in this fixture. */
+  sandbox.__operitNativeActivateCall = () => {};
   vm.runInContext(`
     globalThis.__operitCurrentCallId = 'owner';
     globalThis.refs = 0;
@@ -64,7 +66,7 @@ export function domainToolResult(name, payload, request) {
     switch (op) {
       case 'open': return {op,...payload};
       case 'open_preferences': return {op:'open',...payload};
-      case 'preferences_data': case 'preferences_finish_edit': return {op,snapshot:payload};
+      case 'preferences_schema': case 'preferences_data': case 'preferences_finish_edit': return {op,snapshot:payload};
       case 'preferences_begin_edit': return {op,edit:payload};
       case 'preferences_cancel_edit': return {op};
       case 'close': return {op};
@@ -74,6 +76,7 @@ export function domainToolResult(name, payload, request) {
       case 'get': return {op,entry:payload};
       case 'get_many': case 'list': return {op,entries:payload};
       case 'commit': return {op,...payload};
+      case 'changes': return {op,page:payload};
       default: throw new Error('Unexpected test Storage operation: ' + op);
     }
   }

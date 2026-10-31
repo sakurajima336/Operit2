@@ -1,6 +1,9 @@
 package app.operit.keep_alive;
 
+import android.Manifest;
 import android.app.Service;
+import android.content.pm.PackageManager;
+import android.os.Build;
 import android.content.Context;
 import android.content.Intent;
 import java.util.ArrayDeque;
@@ -17,7 +20,8 @@ import io.flutter.plugin.common.MethodCall;
 import io.flutter.plugin.common.MethodChannel;
 
 /** Connects the common lease protocol to the application-owned foreground Core service. */
-public final class OperitKeepAlivePlugin implements FlutterPlugin, MethodChannel.MethodCallHandler, ActivityAware, PluginRegistry.NewIntentListener {
+public final class OperitKeepAlivePlugin implements FlutterPlugin, MethodChannel.MethodCallHandler, ActivityAware, PluginRegistry.NewIntentListener, PluginRegistry.RequestPermissionsResultListener {
+    private static final int NOTIFICATION_PERMISSION_REQUEST = 0x4f4b;
     private final Set<String> ownedLeases = new HashSet<>();
     private Context context;
     private MethodChannel channel;
@@ -25,12 +29,15 @@ public final class OperitKeepAlivePlugin implements FlutterPlugin, MethodChannel
     private ActivityPluginBinding activityBinding;
     private final ArrayDeque<Map<String, Object>> pendingActions = new ArrayDeque<>();
     private boolean actionsReady;
+    private boolean notificationPermissionRequested;
 
     /** Attaches notification activation to the real activity independently of Core ownership. */
     @Override
     public void onAttachedToActivity(ActivityPluginBinding binding) {
         activityBinding = binding;
         binding.addOnNewIntentListener(this);
+        binding.addRequestPermissionsResultListener(this);
+        requestNotificationPermission();
         onNewIntent(binding.getActivity().getIntent());
     }
 
@@ -45,8 +52,34 @@ public final class OperitKeepAlivePlugin implements FlutterPlugin, MethodChannel
     /** Releases activity references without affecting the service notification. */
     @Override
     public void onDetachedFromActivity() {
-        if (activityBinding != null) activityBinding.removeOnNewIntentListener(this);
+        if (activityBinding != null) {
+            activityBinding.removeOnNewIntentListener(this);
+            activityBinding.removeRequestPermissionsResultListener(this);
+        }
         activityBinding = null;
+    }
+
+    /** Requests Android's status-bar authorization once while the initialized owner is attached. */
+    private void requestNotificationPermission() {
+        if (serviceType == null || activityBinding == null || notificationPermissionRequested ||
+                Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return;
+        if (activityBinding.getActivity().checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                == PackageManager.PERMISSION_GRANTED) return;
+        notificationPermissionRequested = true;
+        activityBinding.getActivity().requestPermissions(
+            new String[] {Manifest.permission.POST_NOTIFICATIONS}, NOTIFICATION_PERMISSION_REQUEST);
+    }
+
+    /** Republishes the foreground notification after the system permission decision. */
+    @Override
+    public boolean onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        if (requestCode != NOTIFICATION_PERMISSION_REQUEST) return false;
+        try {
+            KeepAliveServiceHost.refreshNotifications();
+        } catch (RuntimeException error) {
+            KeepAliveServiceHost.reportWorkError(error.toString());
+        }
+        return true;
     }
 
     /** Queues cold-start and existing-window activations until Dart installs its receiver. */
@@ -124,9 +157,11 @@ public final class OperitKeepAlivePlugin implements FlutterPlugin, MethodChannel
                     serviceType = Class.forName(string(call, "androidServiceClassName"), true,
                         context.getClassLoader()).asSubclass(Service.class);
                     KeepAliveServiceHost.observe(channel);
+                    requestNotificationPermission();
                     result.success(KeepAliveServiceHost.report());
                     return;
                 case "workCapabilities":
+                    KeepAliveServiceHost.refreshNotifications();
                     result.success(KeepAliveServiceHost.workCapabilities());
                     return;
                 case "workActionsReady":

@@ -30,6 +30,8 @@ function runtime(operations = {}) {
   vm.runInContext(source('hosts/web/src/javascript_promises.js'), context);
   const registry = context.__operitHostPromiseRegistry;
   const builtins = {
+    /** Receives the exact execution owner selected by the production call registry. */
+    __operitNativeActivateCall() { return null; },
     /** Reads the exact trusted library requested by its production accessor. */
     __operitNativeReadBootstrapLibrary: bootstrapLibrarySource,
     __operitNativePrepareComposeModule: compileComposeModule,
@@ -45,7 +47,10 @@ function runtime(operations = {}) {
     /** Cancels the exact scope owned by the runtime session or timer. */
     __operitNativeCancelJavaScriptPromises(scope) { registry.cancel(scope); timers.delete(scope); return null; },
     /** Accepts the explicit detached-session lifecycle notification. */
-    __operitNativeNotifyDetachedCall() { return null; },
+    __operitNativeNotifyDetachedCall(id) {
+      setImmediate(() => context.__operitFinalizeDetachedCall(id));
+      return null;
+    },
     ...operations,
   };
   const engine = source(bridge + 'JsEngine.rs');
@@ -70,6 +75,8 @@ function runtime(operations = {}) {
       );
     });
   }
+  // The engine registers this lifecycle binding separately from syncNames.
+  context.__operitNativeNotifyDetachedCall = registry.syncBinding(builtins.__operitNativeNotifyDetachedCall);
   context.__operitNativeCancelJavaScriptPromises = registry.syncBinding(builtins.__operitNativeCancelJavaScriptPromises);
   context.__operitNativeScheduleJavaScriptTimer = registry.binding((id, delay) => timers.set(id, delay));
   vm.runInContext(`globalThis.__operitNativeCompileModuleFactory = body =>
@@ -86,7 +93,11 @@ function runtime(operations = {}) {
 }
 
 /** Flushes deterministic Promise turns without advancing any safety timers. */
-async function flush() { for (let turn = 0; turn < 16; turn++) await Promise.resolve(); }
+async function flush() {
+  for (let turn = 0; turn < 16; turn++) await Promise.resolve();
+  // Native wakes finalize detached sessions after the queued Promise jobs drain.
+  await new Promise(setImmediate);
+}
 
 /** Confirms the complete bootstrap no longer installs a native-interface object or callback delegates. */
 test('production bootstrap exposes public wrappers without the removed global object', () => {
@@ -125,18 +136,22 @@ test('crypto and deflate use direct structured values without error-string guess
 });
 
 /** Checks asynchronous image operations retain the session and never publish callback IDs. */
-test('Jimp uses an owned host Promise and releases exactly the original execution reference', async () => {
+test('Jimp retains its owner while pending and releases all references on success and failure', async () => {
+  let finishRead;
+  const read = new Promise(resolve => { finishRead = resolve; });
   const { context, calls, openCall } = runtime({
     /** Returns an owned image handle or fails the exact submitted image operation. */
     __operitNativeImageProcessing(operation, args) {
-      if (operation === 'read') { assert.equal(args[0], 'encoded'); return 'image-handle'; }
+      if (operation === 'read') { assert.equal(args[0], 'encoded'); return read; }
       throw new Error('image operation rejected');
     },
   });
   openCall();
   vm.runInContext('JSON.parse = JSON.stringify = function() { throw Error("JSON transport used"); };', context);
   const pending = context.Jimp.read('encoded');
-  assert.equal(context.__operitGetCallState('owner').pendingReferences, 1);
+  await flush();
+  assert.ok(context.__operitGetCallState('owner').pendingReferences > 0, 'Pending image work must retain its owner');
+  finishRead('image-handle');
   const image = await pending;
   assert.equal(image.id, 'image-handle');
   await flush();
@@ -185,7 +200,7 @@ test('script completion uses structured host values with JSON text disabled', as
   const { context, outputs, failures } = runtime();
   vm.runInContext('JSON.parse = JSON.stringify = function() { throw Error("JSON transport used"); };', context);
   executeScript(context, 'script-owner', {__operit_toolpkg_api_version: '2.0.0'},
-    'exports.run = function() { return { literal: "{\\\"data\\\":1}", nested: {value: 7} }; };', 'run', 60, 10000);
+    'exports.run = function() { return { literal: "{\\\"data\\\":1}", nested: {value: 7} }; };', 'run');
   await flush();
   assert.equal(failures.size, 0);
   assert.equal(outputs.get('script-owner').literal, '{"data":1}');
@@ -228,7 +243,7 @@ test('cancelled tool execution releases a waiting chat initializer without reviv
         released++;
       }
     };
-  `, 'run', 60, 10000);
+  `, 'run');
   await flush();
   executeScript(context, 'new-chat-owner', params, `
     /** Reads the binding through the same serialized queue using the new chat's own session. */
@@ -236,7 +251,7 @@ test('cancelled tool execution releases a waiting chat initializer without reviv
       const binding = await store.data();
       return { selection: binding.get('selection'), owner: __operitCurrentCallId };
     };
-  `, 'run', 60, 10000);
+  `, 'run');
   await flush();
   assert.equal(outputs.size, 0);
   context.__operitCancelCallSession('weather-owner');
@@ -259,7 +274,7 @@ test('cancelled tool execution releases a waiting chat initializer without reviv
 test('cyclic script results fail explicitly rather than producing replacement data', async () => {
   const { context, outputs, failures } = runtime();
   executeScript(context, 'cycle-owner', {__operit_toolpkg_api_version: '2.0.0'},
-    'exports.run = function() { var value = {}; value.self = value; return value; };', 'run', 60, 10000);
+    'exports.run = function() { var value = {}; value.self = value; return value; };', 'run');
   await flush();
   assert.equal(outputs.size, 0);
   assert.equal(failures.get('cycle-owner').success, false);
@@ -400,7 +415,7 @@ test('module reads preserve empty source and propagate the original resource-own
   executeScript(successful.context, 'modules', {
     __operit_toolpkg_api_version:'2.0.0', toolPkgId:'fixture', __operit_ui_package_name:'fixture',
     __operit_script_screen:'dist/main.js',
-  }, 'var empty = require("./empty"); var shared = require("./shared"); exports.run = function() { return {empty:empty.missing===undefined, label:shared.label}; };', 'run', 60, 10000);
+  }, 'var empty = require("./empty"); var shared = require("./shared"); exports.run = function() { return {empty:empty.missing===undefined, label:shared.label}; };', 'run');
   await flush();
   assert.equal(successful.failures.size, 0);
   assert.equal(successful.outputs.get('modules').empty, true);
@@ -412,7 +427,7 @@ test('module reads preserve empty source and propagate the original resource-own
   executeScript(failed.context, 'failed-modules', {
     __operit_toolpkg_api_version:'2.0.0', toolPkgId:'fixture', __operit_ui_package_name:'fixture',
     __operit_script_screen:'dist/main.js',
-  }, 'var shared = require("./shared"); exports.run = function() { return shared; };', 'run', 60, 10000);
+  }, 'var shared = require("./shared"); exports.run = function() { return shared; };', 'run');
   await flush();
   assert.equal(failed.outputs.size, 0);
   assert.match(failed.failures.get('failed-modules').message, /resource owner read denied/);
@@ -425,7 +440,7 @@ test('page bootstrap owns no compiler and precompiled factories bypass shared lo
     __operitNativePrepareComposeModule() { throw Error('Artifact attempted source lowering'); },
   });
   assert.equal(vm.runInContext('typeof __operitAcorn + ":" + typeof OperitComposeCompiler', context), 'undefined:undefined');
-  const source = '// @operit-compose-artifact 1\nexports.run = function() { return 7; };';
+  const source = '// @operit-compose-artifact 4\nexports.run = function() { return 7; };';
   const factory = context.__operitGetFactory('main', 'pkg:artifact', source, true);
   const module = { exports: {} };
   factory(module, module.exports, () => { throw Error('Unexpected require'); }, {});

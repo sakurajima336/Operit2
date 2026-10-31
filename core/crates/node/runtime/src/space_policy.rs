@@ -3,7 +3,7 @@ use operit_link::CoreLinkError;
 use operit_store::CoreSpaceStore::CoreSpaceStore;
 use operit_store::NetworkControlStore::NetworkControlStore;
 
-/// Pairing alone cannot authorize a Space return channel. Both endpoints must
+/// Pairing alone cannot authorize a Space entry. Both endpoints must
 /// be admitted and active in the same initialized control projection.
 pub(crate) fn spaceChannelScope(
     spaceStore: &CoreSpaceStore,
@@ -12,21 +12,20 @@ pub(crate) fn spaceChannelScope(
     peer: &str,
 ) -> Result<Option<String>, CoreLinkError> {
     let space = spaceStore.space().map_err(CoreLinkError::internal)?;
-    let control = controlStore
-        .currentState()
-        .map_err(CoreLinkError::internal)?;
-    if peer == local || !control.initialized || control.spaceId != space.spaceId {
-        return Ok(None);
-    }
-    for node in [local, peer] {
-        if !space.members.iter().any(|member| member == node)
-            || !control.memberNodeIds.contains(node)
-            || control.disconnectedNodeIds.contains(node)
-        {
-            return Ok(None);
+    controlStore.withCurrentState(|control| {
+        if peer == local || !control.initialized || control.spaceId != space.spaceId {
+            return None;
         }
-    }
-    Ok(Some(space.spaceId))
+        for node in [local, peer] {
+            if !space.members.iter().any(|member| member == node)
+                || !control.memberNodeIds.contains(node)
+                || control.disconnectedNodeIds.contains(node)
+            {
+                return None;
+            }
+        }
+        Some(space.spaceId)
+    }).map_err(CoreLinkError::internal)
 }
 
 /// One control projection is used for target, first-hop and transit eligibility.

@@ -23,6 +23,7 @@ pub const EXTENSIONS_PLUGIN_CONFIGS_DIR_PATH: &str = Layout::EXTENSIONS_PLUGIN_C
 pub const EXTENSIONS_MCP_DIR_PATH: &str = Layout::EXTENSIONS_MCP_DIR_PATH;
 
 pub const RUNTIME_CLEAN_ON_EXIT_DIR_PATH: &str = Layout::RUNTIME_CLEAN_ON_EXIT_DIR_PATH;
+pub const RUNTIME_CHAT_ATTACHMENTS_DIR_PATH: &str = Layout::RUNTIME_CHAT_ATTACHMENTS_DIR_PATH;
 pub const RUNTIME_TOOLPKG_RESOURCE_EXPORTS_DIR_PATH: &str =
     Layout::RUNTIME_TOOLPKG_RESOURCE_EXPORTS_DIR_PATH;
 pub const RUNTIME_TOOLPKG_RESOURCE_EXPORTS_INTERNAL_DIR_PATH: &str =
@@ -45,7 +46,6 @@ pub const TOOLPKG_LOG_PATH: &str = Layout::TOOLPKG_LOG_PATH;
 
 pub const USER_PREFERENCES_PATH: &str = Layout::USER_PREFERENCES_PATH;
 pub const API_PREFERENCES_PATH: &str = Layout::API_PREFERENCES_PATH;
-pub const ENV_PREFERENCES_PATH: &str = Layout::ENV_PREFERENCES_PATH;
 pub const GITHUB_AUTH_PREFERENCES_PATH: &str = Layout::GITHUB_AUTH_PREFERENCES_PATH;
 pub const CODEX_AUTH_PREFERENCES_PATH: &str = Layout::CODEX_AUTH_PREFERENCES_PATH;
 pub const MODEL_CONFIGS_PREFERENCES_PATH: &str = Layout::MODEL_CONFIGS_PREFERENCES_PATH;
@@ -125,6 +125,18 @@ pub fn cleanOnExitDir() -> Result<PathBuf, String> {
 }
 
 #[allow(non_snake_case)]
+/// Returns the persistent attachment collection for the active identity.
+pub fn chatAttachmentsDir() -> Result<PathBuf, String> {
+    relativeDir(RUNTIME_CHAT_ATTACHMENTS_DIR_PATH)
+}
+
+/// Returns unregistered attachment uploads removed by startup cleanup.
+#[allow(non_snake_case)]
+pub fn chatAttachmentUploadsDir() -> Result<PathBuf, String> {
+    relativeDir(Layout::RUNTIME_CHAT_ATTACHMENT_UPLOADS_DIR_PATH)
+}
+
+#[allow(non_snake_case)]
 pub fn toolPkgResourceExportsDir(internal: bool) -> Result<PathBuf, String> {
     if internal {
         relativeDir(RUNTIME_TOOLPKG_RESOURCE_EXPORTS_INTERNAL_DIR_PATH)
@@ -190,11 +202,6 @@ pub fn userPreferencesPath() -> Result<PathBuf, String> {
 #[allow(non_snake_case)]
 pub fn apiPreferencesPath() -> Result<PathBuf, String> {
     relativeFile(API_PREFERENCES_PATH)
-}
-
-#[allow(non_snake_case)]
-pub fn envPreferencesPath() -> Result<PathBuf, String> {
-    relativeFile(ENV_PREFERENCES_PATH)
 }
 
 #[allow(non_snake_case)]

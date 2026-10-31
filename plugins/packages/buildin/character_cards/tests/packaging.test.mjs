@@ -92,6 +92,9 @@ test("archive includes all current nested source modules with their exact bytes"
   for (const [file, bytes] of Object.entries(await buildUiScreenScripts())) {
     assert.ok(Object.hasOwn(entries, file), "Package archive omitted executable screen: " + file);
     assert.equal(digest(entries[file]), digest(bytes), "Stale archived screen: " + file);
+    const source = Buffer.from(entries[file]).toString("utf8");
+    assert.doesNotMatch(source, /^\/\/ @operit-compose-artifact /u, "Screens must ship editable source: " + file);
+    assert.match(source, /\.UI\.[A-Za-z_$]/u, "Screens must preserve their UI declarations: " + file);
   }
   assert.equal(digest(entries["dist/main.js"]), digest(main));
   assert.equal(digest(entries["dist/tools.js"]), digest(tools));
@@ -141,6 +144,12 @@ test("single Core production archive exactly matches the packaged plugin and its
   const manifest = JSON.parse(Buffer.from(entries["manifest.json"]).toString("utf8"));
   assert.equal(manifest.public_api, "src/api.ts"); assert.ok(Object.hasOwn(entries, manifest.public_api));
   assert.deepEqual(manifest.subpackages, [{ id: "character_memory", entry: "dist/tools.js" }]);
+  assert.equal(manifest.wasm_modules.length, 1);
+  assert.equal(manifest.wasm_modules[0].id, "usearch");
+  assert.equal(digest(entries[manifest.wasm_modules[0].path]), digest(await readFile(path.join(root, manifest.wasm_modules[0].path))));
+  for (const file of ["vendor/usearch/index.cpp", "vendor/usearch/build.py", "vendor/usearch/LICENSE-USEARCH", "vendor/usearch/LICENSE-EMSCRIPTEN"]) {
+    assert.ok(Object.hasOwn(entries, file), "Archive omitted the memory-owned WASM source or license: " + file);
+  }
   for (const file of [...await sourcePaths("src"), ...await sourcePaths("web"), ...await sourcePaths("scripts")]) {
     assert.ok(Object.hasOwn(entries, file), "Production archive omitted module: " + file);
     assert.equal(digest(entries[file]), digest(await readFile(path.join(root, file))), "Production archive has stale module: " + file);

@@ -187,6 +187,59 @@ pub const RUNTIME_LINK_ACCESS_HOST_CONFIG: RuntimeStoragePathDefinition =
         RuntimeStorageOwnership::CoreNode,
     );
 pub const RUNTIME_LINK_ACCESS_HOST_CONFIG_PATH: &str = RUNTIME_LINK_ACCESS_HOST_CONFIG.path;
+/// Node-local Space protocol receipts and projections; they are never business replicas.
+pub const RUNTIME_SPACE_CONTROL_PROJECTION: RuntimeStoragePathDefinition =
+    RuntimeStoragePathDefinition::exact("runtime/link_access/space_policy.preferences.json", RuntimeStorageOwnership::CoreNode);
+pub const RUNTIME_SPACE_CONTROL_PROJECTION_PATH: &str = RUNTIME_SPACE_CONTROL_PROJECTION.path;
+pub const RUNTIME_SPACE_MERGE_INBOUND: RuntimeStoragePathDefinition =
+    RuntimeStoragePathDefinition::exact("runtime/link_access/space_merge_inbound.preferences.json", RuntimeStorageOwnership::CoreNode);
+pub const RUNTIME_SPACE_MERGE_INBOUND_PATH: &str = RUNTIME_SPACE_MERGE_INBOUND.path;
+pub const RUNTIME_SPACE_MERGE_OUTBOUND: RuntimeStoragePathDefinition =
+    RuntimeStoragePathDefinition::exact("runtime/link_access/space_merge_outbound.preferences.json", RuntimeStorageOwnership::CoreNode);
+pub const RUNTIME_SPACE_MERGE_OUTBOUND_PATH: &str = RUNTIME_SPACE_MERGE_OUTBOUND.path;
+pub const RUNTIME_SPACE_MERGE_REVIEW_INBOX: RuntimeStoragePathDefinition =
+    RuntimeStoragePathDefinition::exact("runtime/link_access/space_merge_review_inbox.preferences.json", RuntimeStorageOwnership::CoreNode);
+pub const RUNTIME_SPACE_MERGE_REVIEW_INBOX_PATH: &str = RUNTIME_SPACE_MERGE_REVIEW_INBOX.path;
+pub const RUNTIME_SPACE_MERGE_REVIEW_RESULTS: RuntimeStoragePathDefinition =
+    RuntimeStoragePathDefinition::exact("runtime/link_access/space_merge_review_results.preferences.json", RuntimeStorageOwnership::CoreNode);
+pub const RUNTIME_SPACE_MERGE_REVIEW_RESULTS_PATH: &str = RUNTIME_SPACE_MERGE_REVIEW_RESULTS.path;
+pub const RUNTIME_SPACE_LEGACY_JOIN_INBOUND: RuntimeStoragePathDefinition =
+    RuntimeStoragePathDefinition::exact("runtime/link_access/space_join_inbound.preferences.json", RuntimeStorageOwnership::CoreNode);
+pub const RUNTIME_SPACE_LEGACY_JOIN_INBOUND_PATH: &str = RUNTIME_SPACE_LEGACY_JOIN_INBOUND.path;
+pub const RUNTIME_SPACE_LEGACY_JOIN_OUTBOUND: RuntimeStoragePathDefinition =
+    RuntimeStoragePathDefinition::exact("runtime/link_access/space_join_outbound.preferences.json", RuntimeStorageOwnership::CoreNode);
+pub const RUNTIME_SPACE_LEGACY_JOIN_OUTBOUND_PATH: &str = RUNTIME_SPACE_LEGACY_JOIN_OUTBOUND.path;
+pub const RUNTIME_SPACE_LEGACY_JOIN_REVIEW_INBOX: RuntimeStoragePathDefinition =
+    RuntimeStoragePathDefinition::exact("runtime/link_access/space_join_review_inbox.preferences.json", RuntimeStorageOwnership::CoreNode);
+pub const RUNTIME_SPACE_LEGACY_JOIN_REVIEW_INBOX_PATH: &str = RUNTIME_SPACE_LEGACY_JOIN_REVIEW_INBOX.path;
+pub const RUNTIME_SPACE_LEGACY_JOIN_REVIEW_RESULTS: RuntimeStoragePathDefinition =
+    RuntimeStoragePathDefinition::exact("runtime/link_access/space_join_review_results.preferences.json", RuntimeStorageOwnership::CoreNode);
+pub const RUNTIME_SPACE_LEGACY_JOIN_REVIEW_RESULTS_PATH: &str = RUNTIME_SPACE_LEGACY_JOIN_REVIEW_RESULTS.path;
+pub const RUNTIME_SPACE_DEPARTURES: RuntimeStoragePathDefinition =
+    RuntimeStoragePathDefinition::exact("runtime/link_access/space_departures.preferences.json", RuntimeStorageOwnership::CoreNode);
+pub const RUNTIME_SPACE_DEPARTURES_PATH: &str = RUNTIME_SPACE_DEPARTURES.path;
+pub const RUNTIME_SPACE_REMOVAL_EFFECTS: RuntimeStoragePathDefinition =
+    RuntimeStoragePathDefinition::exact("runtime/link_access/space_removal_effects.preferences.json", RuntimeStorageOwnership::CoreNode);
+pub const RUNTIME_SPACE_REMOVAL_EFFECTS_PATH: &str = RUNTIME_SPACE_REMOVAL_EFFECTS.path;
+pub const RUNTIME_SPACE_RECONCILE_CAPS: RuntimeStoragePathDefinition =
+    RuntimeStoragePathDefinition::exact("runtime/link_access/space_reconcile_caps.preferences.json", RuntimeStorageOwnership::CoreNode);
+pub const RUNTIME_SPACE_RECONCILE_CAPS_PATH: &str = RUNTIME_SPACE_RECONCILE_CAPS.path;
+pub const RUNTIME_SPACE_DOCTOR_COUNTERS: RuntimeStoragePathDefinition =
+    RuntimeStoragePathDefinition::exact("runtime/diagnostics/space_doctor_counters.preferences.json", RuntimeStorageOwnership::CoreNode);
+pub const RUNTIME_SPACE_DOCTOR_COUNTERS_PATH: &str = RUNTIME_SPACE_DOCTOR_COUNTERS.path;
+
+/// Approval receipts retired by an explicit local Space exit, including legacy schemas.
+pub const RUNTIME_SPACE_APPROVAL_STATE_PATHS: &[&str] = &[
+    RUNTIME_SPACE_LEGACY_JOIN_INBOUND_PATH,
+    RUNTIME_SPACE_LEGACY_JOIN_OUTBOUND_PATH,
+    RUNTIME_SPACE_LEGACY_JOIN_REVIEW_INBOX_PATH,
+    RUNTIME_SPACE_LEGACY_JOIN_REVIEW_RESULTS_PATH,
+    RUNTIME_SPACE_MERGE_INBOUND_PATH,
+    RUNTIME_SPACE_MERGE_OUTBOUND_PATH,
+    RUNTIME_SPACE_MERGE_REVIEW_INBOX_PATH,
+    RUNTIME_SPACE_MERGE_REVIEW_RESULTS_PATH,
+];
+
 pub const CLIENT_RUNTIME_BOOTSTRAP: RuntimeStoragePathDefinition =
     RuntimeStoragePathDefinition::exact(
         "runtime/link/local_runtime_storage.json",
@@ -260,9 +313,16 @@ pub const RUNTIME_CLEAN_ON_EXIT: RuntimeStoragePathDefinition = RuntimeStoragePa
     RuntimeStorageOwnership::Ephemeral,
 );
 pub const RUNTIME_CLEAN_ON_EXIT_DIR_PATH: &str = RUNTIME_CLEAN_ON_EXIT.path;
+/// Owns persistent attachments grouped by chat and attachment identity.
+pub const RUNTIME_CHAT_ATTACHMENTS: RuntimeStoragePathDefinition =
+    RuntimeStoragePathDefinition::tree("runtime/data/chat_attachments", RuntimeStorageOwnership::CoreNode);
+pub const RUNTIME_CHAT_ATTACHMENTS_DIR_PATH: &str = RUNTIME_CHAT_ATTACHMENTS.path;
+pub const RUNTIME_CHAT_ATTACHMENT_UPLOADS_DIR_PATH: &str =
+    "runtime/temp/clean_on_exit/chat_attachment_uploads";
 pub const RUNTIME_SYNC: RuntimeStoragePathDefinition =
     RuntimeStoragePathDefinition::tree("runtime/sync", RuntimeStorageOwnership::CoreNode);
 pub const RUNTIME_SYNC_DIR_PATH: &str = RUNTIME_SYNC.path;
+pub const RUNTIME_SYNC_PREFERENCE_LAYOUT_PATH: &str = "runtime/sync/preference_layout.preferences.json";
 pub const RUNTIME_SYNC_PREFERENCES_PAYLOADS_DIR_PATH: &str = "runtime/sync/preferences_payloads";
 pub const RUNTIME_MODEL_CONNECTION_TEST_CACHE_DIR_PATH: &str =
     "runtime/cache/model_connection_test";
@@ -331,8 +391,15 @@ pub const TOOLPKG_LOG_PATH: &str = "runtime/logs/toolpkg.log";
 
 pub const USER_PREFERENCES_PATH: &str =
     "runtime/config/preferences/user_preferences.preferences.json";
+pub const ONBOARDING_PREFERENCES_PATH: &str =
+    "runtime/config/preferences/onboarding_preferences";
+pub const REMOTE_ANNOUNCEMENT_PREFERENCES_PATH: &str =
+    "runtime/config/preferences/remote_announcement_preferences";
+pub const SIDEBAR_DOCK_PREFERENCES_PATH: &str =
+    "runtime/config/preferences/sidebar_dock.preferences.json";
 pub const API_PREFERENCES_PATH: &str = "runtime/config/preferences/api_settings.json";
-pub const ENV_PREFERENCES_PATH: &str =
+/// Identifies the retired node-global environment file used only by the one-time package import.
+pub const LEGACY_ENV_PREFERENCES_PATH: &str =
     "runtime/config/preferences/env_preferences.preferences.json";
 pub const GITHUB_AUTH_PREFERENCES_PATH: &str =
     "runtime/config/preferences/github_auth_preferences.json";
@@ -410,8 +477,25 @@ pub const RUNTIME_STORAGE_PATH_DEFINITIONS: &[RuntimeStoragePathDefinition] = &[
     RUNTIME_LINK_ACCESS_PENDING_PAIRINGS,
     RUNTIME_LINK_ACCESS_PENDING_OUTBOUND_PAIRINGS,
     RUNTIME_LINK_ACCESS_HOST_CONFIG,
+    RUNTIME_SPACE_CONTROL_PROJECTION,
+    RUNTIME_SPACE_MERGE_INBOUND,
+    RUNTIME_SPACE_MERGE_OUTBOUND,
+    RUNTIME_SPACE_MERGE_REVIEW_INBOX,
+    RUNTIME_SPACE_MERGE_REVIEW_RESULTS,
+    RUNTIME_SPACE_LEGACY_JOIN_INBOUND,
+    RUNTIME_SPACE_LEGACY_JOIN_OUTBOUND,
+    RUNTIME_SPACE_LEGACY_JOIN_REVIEW_INBOX,
+    RUNTIME_SPACE_LEGACY_JOIN_REVIEW_RESULTS,
+    RUNTIME_SPACE_DEPARTURES,
+    RUNTIME_SPACE_REMOVAL_EFFECTS,
+    RUNTIME_SPACE_RECONCILE_CAPS,
+    RUNTIME_SPACE_DOCTOR_COUNTERS,
+    RuntimeStoragePathDefinition::exact(CURRENT_CHAT_ID_PREFERENCES_PATH, RuntimeStorageOwnership::CoreNode),
     CLIENT_RUNTIME_BOOTSTRAP,
     RUNTIME_APPLICATION_ZOOM,
+    // Model weights, native runtimes and installation inventories belong to this node.
+    RuntimeStoragePathDefinition::tree(RUNTIME_LOCAL_MODELS_DIR_PATH, RuntimeStorageOwnership::CoreNode),
+    RuntimeStoragePathDefinition::exact(RUNTIME_LOCAL_MODEL_REGISTRY_PATH, RuntimeStorageOwnership::CoreNode),
     RUNTIME_CLIENT_LOG,
     RUNTIME_SHARE_IMAGE_EXPORTS,
     // Retain ownership for queued operations and legacy data during the non-destructive upgrade.
@@ -428,6 +512,7 @@ pub const RUNTIME_STORAGE_PATH_DEFINITIONS: &[RuntimeStoragePathDefinition] = &[
     EXTENSIONS_PLUGIN_CONFIGS,
     EXTENSIONS_PLUGIN_DATA,
     RUNTIME_CLEAN_ON_EXIT,
+    RUNTIME_CHAT_ATTACHMENTS,
     RUNTIME_SYNC,
     RUNTIME_IMPORTED_OPERIT1_FILES,
     RUNTIME_IMPORTED_OPERIT1_EXTERNAL_FILES,
@@ -489,7 +574,29 @@ mod tests {
 
     /// Verifies exact, tree, and relative-file definitions resolve from path metadata.
     #[test]
+    fn local_model_weights_and_install_inventory_are_node_owned() {
+        for path in [
+            "runtime/models/local/chat/llama_cpp/qwen/model.gguf",
+            "runtime/models/local/chat/mnn/qwen/llm.mnn.weight",
+            "runtime/models/local/engines/mnn/3.6.1/engine.json",
+            "runtime/models/local/manifests/qwen.json",
+            "runtime/models/local/download/weights.part",
+            RUNTIME_LOCAL_MODEL_REGISTRY_PATH,
+        ] {
+            assert_eq!(runtimeStorageOwnership(path).unwrap(), RuntimeStorageOwnership::CoreNode, "{path}");
+        }
+    }
+
+    #[test]
     fn resolves_registered_runtime_storage_ownership() {
+        assert_eq!(
+            runtimeStorageOwnership("runtime/data/chat_attachments/chat-a/attachment-a/report.pdf").unwrap(),
+            RuntimeStorageOwnership::CoreNode
+        );
+        assert_eq!(
+            runtimeStorageOwnership("runtime/temp/clean_on_exit/chat_attachment_uploads/upload-a/report.pdf").unwrap(),
+            RuntimeStorageOwnership::Ephemeral
+        );
         assert_eq!(
             runtimeStorageOwnership(RUNTIME_WEBSESSION_BROWSER_BOOKMARKS_PATH).unwrap(),
             RuntimeStorageOwnership::Space

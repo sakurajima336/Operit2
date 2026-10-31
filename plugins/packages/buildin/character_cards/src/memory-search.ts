@@ -1,139 +1,119 @@
-import type { Memory, MemorySearchConfig, MemorySearchOptions, MemorySpace, MemorySearchDebug, MemorySearchHit } from "./model";
-import { cosineSimilarity, embeddingFor } from "./memory-jobs/embeddings";
+import type { MemorySearchConfig, MemorySearchOptions, MemorySearchDebug, MemorySearchHit, MemorySettings } from "./model";
+import type { CharacterMemoryDatabase } from "./storage/memory";
+import type { SourceEmbedding } from "./memory-jobs/embeddings";
+import { embedTexts } from "./memory-jobs/embeddings";
+import { withMemoryIndex } from "./search/state";
+import type { MemoryIndex, Scope } from "./search/state";
+export const MEMORY_SEARCH_THRESHOLD = 0.025;
 
-/** Tokenizes Unicode words and CJK unigrams/bigrams without substring guessing. */
-function tokens(text: string): string[] {
-  const words = text.toLocaleLowerCase().match(/[\p{L}\p{N}_]+/gu);
-  const result: string[] = [];
-  if (words === null) return result;
-  for (const word of words) {
-    if (/^[\p{Script=Han}]+$/u.test(word)) {
-      const characters = [...word];
-      for (let index = 0; index < characters.length; index += 1) {
-        result.push(characters[index]);
-        if (index + 1 < characters.length) result.push(characters[index] + characters[index + 1]);
+/** Expands Unicode query words, Han bigrams and unigrams under a fixed lexical budget. */
+export function lexicalTerms(query: string): string[] {
+  const terms = new Set<string>();
+  for (const match of query.toLowerCase().matchAll(/[\p{L}\p{N}_*]+/gu)) {
+    const word = match[0]; terms.add(word);
+    for (const han of word.matchAll(/\p{Script=Han}+/gu)) {
+      const chars = [...han[0]];
+      for (let index = 0; index < chars.length - 1; index += 1) terms.add(chars[index] + chars[index + 1]);
+      for (const char of chars) terms.add(char);
+    }
+  }
+  return [...terms].slice(0, 32);
+}
+
+/** The query vector is ephemeral and is shared by memory and document retrieval. */
+export async function prepareMemoryQuery(settings: MemorySettings, query: string, config: MemorySearchConfig): Promise<SourceEmbedding | null> {
+  return query.trim() !== "*" && settings.cloudEmbeddingEnabled && config.vectorWeight > 0 ? (await embedTexts([query], settings))[0] : null;
+}
+const compareId = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
+function rank(index: MemoryIndex, counts: Map<string, number>, weight: number, termCount: number): Map<string, number> {
+  if (weight === 0) return new Map();
+  const ids = [...counts.keys()].sort((a, b) => {
+    const first = index.memories.get(a)!, second = index.memories.get(b)!;
+    return counts.get(b)! - counts.get(a)! || second.importance - first.importance || second.updatedAt - first.updatedAt || compareId(a, b);
+  });
+  return new Map(ids.map((id, offset) => [id, weight * index.memories.get(id)!.importance * (1 + 0.6 * counts.get(id)! / Math.max(1, termCount)) / (61 + offset)]));
+}
+function ranked(index: MemoryIndex, scope: Scope, options: MemorySearchOptions, config: MemorySearchConfig, query: SourceEmbedding | null, debug: boolean): { hits: MemorySearchHit[]; excluded: number } {
+  const excluded = new Set(options.excludeIds ?? []), limit = options.limit ?? 100;
+  if (options.query.trim() === "*") return { excluded: [...excluded].filter(id => scope.ids.has(id)).length,
+    hits: [...scope.ids].filter(id => !excluded.has(id)).sort(compareId).slice(0, limit).map(id => ({ memory: index.memories.get(id)!, score: 1, keywordScore: 0, tagScore: 0, vectorScore: 0, edgeScore: 0, passedThreshold: true })) };
+  const terms = lexicalTerms(options.query), matched = index.matching(terms, scope, config.keywordWeight > 0, config.tagWeight > 0);
+  const lexicalBoost = config.scoreMode === "KEYWORD_FIRST" ? 1.3 : config.scoreMode === "SEMANTIC_FIRST" ? 0.8 : 1;
+  const keywordWeight = config.keywordWeight * lexicalBoost, tagWeight = config.tagWeight * lexicalBoost;
+  const vectorWeight = config.vectorWeight * (config.scoreMode === "SEMANTIC_FIRST" ? 1.3 : config.scoreMode === "KEYWORD_FIRST" ? 0.8 : 1);
+  const edgeWeight = config.edgeWeight * (config.scoreMode === "KEYWORD_FIRST" ? 0.9 : config.scoreMode === "SEMANTIC_FIRST" ? 1.1 : 1);
+  const keywords = rank(index, matched.keywords, keywordWeight, terms.length), tags = rank(index, matched.tags, tagWeight, terms.length);
+  if (keywordWeight > 0) for (const id of index.titles.search(options.query)) if (scope.ids.has(id)) keywords.set(id, (keywords.get(id) ?? 0) + keywordWeight * index.memories.get(id)!.importance / 61);
+  const lexical = new Set([...keywords.keys(), ...tags.keys()]);
+  let semantic = new Map<string, number>();
+  if (query !== null) {
+    index.validate(query, scope);
+    semantic = index.semantic(query, scope, Math.max(10, limit), excluded);
+    // Exact reranking is bounded to the strongest lexical candidates and excluded identities.
+    const candidates = [...lexical].sort((a, b) => (keywords.get(b) ?? 0) + (tags.get(b) ?? 0) - (keywords.get(a) ?? 0) - (tags.get(a) ?? 0));
+    index.scoreCandidates(query, [...new Set([...candidates.slice(0, Math.max(256, limit * 4)), ...excluded].filter(id => scope.ids.has(id)))], semantic);
+  }
+  const ids = debug ? new Set(scope.ids) : new Set([...lexical, ...semantic.keys()]);
+  const hits = new Map<string, MemorySearchHit>();
+  const hit = (id: string) => {
+    let item = hits.get(id);
+    if (!item) {
+      const keywordScore = keywords.get(id) ?? 0, tagScore = tags.get(id) ?? 0, vectorScore = (semantic.get(id) ?? 0) * vectorWeight;
+      item = { memory: index.memories.get(id)!, keywordScore, tagScore, vectorScore, edgeScore: 0, score: keywordScore + tagScore + vectorScore, passedThreshold: false }; hits.set(id, item);
+    }
+    return item;
+  };
+  for (const id of ids) hit(id);
+  const seeds = [...hits.values()].filter(item => item.score > 0).sort((a, b) => b.score - a.score || compareId(a.memory.id, b.memory.id)).slice(0, 10);
+  if (edgeWeight > 0) {
+    const targets = new Set<string>();
+    for (const seed of seeds) for (const linkId of index.adjacency.get(seed.memory.id) ?? []) {
+      const link = index.links.get(linkId)!, id = link.sourceMemoryId === seed.memory.id ? link.targetMemoryId : link.sourceMemoryId;
+      if (scope.ids.has(id)) targets.add(id);
+    }
+    if (query !== null) index.scoreCandidates(query, [...targets], semantic);
+    for (const id of targets) { const item = hit(id); item.vectorScore = (semantic.get(id) ?? 0) * vectorWeight; item.score = item.keywordScore + item.tagScore + item.vectorScore; }
+    // Seed scores are captured before edge propagation; links never recursively amplify a query.
+    const seedScores = seeds.map(seed => ({ id: seed.memory.id, score: seed.keywordScore + seed.tagScore + seed.vectorScore }));
+    for (const seed of seedScores) for (const linkId of index.adjacency.get(seed.id) ?? []) {
+      const link = index.links.get(linkId)!, id = link.sourceMemoryId === seed.id ? link.targetMemoryId : link.sourceMemoryId;
+      if (!scope.ids.has(id)) continue;
+      hit(id).edgeScore += (seed.score * link.weight + 0.03) * edgeWeight;
+    }
+  }
+  let excludedCount = 0;
+  for (const item of hits.values()) {
+    item.score += item.edgeScore; item.passedThreshold = item.score > 0 && item.score >= options.relevanceThreshold;
+    if (excluded.has(item.memory.id) && item.passedThreshold) excludedCount++;
+  }
+  return { excluded: excludedCount, hits: [...hits.values()].filter(item => !excluded.has(item.memory.id) && (debug || item.passedThreshold))
+    .sort((a, b) => b.score - a.score || compareId(a.memory.id, b.memory.id)).slice(0, limit) };
+}
+
+/** Retrieval reads incremental changes, searches derived indexes, then hydrates only the page. */
+export async function searchMemoryDatabase(database: CharacterMemoryDatabase, settings: MemorySettings, options: MemorySearchOptions, config: MemorySearchConfig, debug = false): Promise<{ result: MemorySearchDebug; queryEmbedding: SourceEmbedding | null }> {
+  const limit = options.limit ?? 100, wildcard = options.query.trim() === "*";
+  if (!Number.isInteger(limit) || limit < 1 || limit > 1000) throw new Error("Memory search limit must be between 1 and 1000");
+  if (!wildcard) {
+    if (options.query.trim() === "") throw new Error("Memory search query must not be blank");
+    const vectorWeight = settings.cloudEmbeddingEnabled ? config.vectorWeight : 0;
+    if (lexicalTerms(options.query).length === 0 && vectorWeight === 0) throw new Error("Memory search query has no searchable tokens");
+    if (config.keywordWeight + config.tagWeight + vectorWeight + config.edgeWeight === 0) throw new Error("Memory search has no enabled scoring weights");
+  }
+  const queryEmbedding = await prepareMemoryQuery(settings, options.query, config);
+  return withMemoryIndex(database, options.ownerKey, async index => {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const scope = index.scope(options), page = ranked(index, scope, options, config, queryEmbedding, debug);
+      if (page.hits.length) {
+        const entries = await database.getMany<{ record: MemorySearchHit["memory"] }>("memories", page.hits.map(item => options.ownerKey + "/" + item.memory.id));
+        if (entries.some((entry, offset) => entry === null || entry.version !== index.sources.get("memories/" + page.hits[offset].memory.id)?.version)) {
+          if (!await index.refresh()) throw new Error("Memory index changed during retrieval; retry the query");
+          continue;
+        }
+        page.hits.forEach((item, offset) => { item.memory = entries[offset]!.value.record; });
       }
-    } else result.push(word);
-  }
-  return result;
-}
-/** Counts exact token frequencies for the plugin's BM25 index. */
-function counts(values: string[]): Map<string, number> {
-  const result = new Map<string, number>();
-  for (const value of values) {
-    const previous = result.get(value);
-    result.set(value, previous === undefined ? 1 : previous + 1);
-  }
-  return result;
-}
-/** Applies the complete explicit folder and timestamp filters to full memory records. */
-function matchesFilters(memory: Memory, options: MemorySearchOptions): boolean {
-  if (options.folderPath !== null && memory.folderPath !== options.folderPath && !(memory.folderPath !== null && memory.folderPath.startsWith(options.folderPath + "/"))) return false;
-  if (options.createdAtStartMs !== null && memory.createdAt < options.createdAtStartMs) return false;
-  if (options.createdAtEndMs !== null && memory.createdAt > options.createdAtEndMs) return false;
-  return true;
-}
-/** Computes lexical, real provider-vector, tag and graph scoring over complete plugin records. */
-export async function searchMemorySpace(space: MemorySpace, options: MemorySearchOptions): Promise<Memory[]> {
-  if (options.query.trim() === "*") return space.memories.filter(memory => matchesFilters(memory, options));
-  return (await searchMemorySpaceDebug(space, options, space.searchConfig)).candidates.filter(hit => hit.passedThreshold).map(hit => hit.memory);
-}
-/** Uses the same real index and provider vectors with a caller's validated draft weights. */
-export async function searchMemorySpaceDebug(space: MemorySpace, options: MemorySearchOptions, config: MemorySearchConfig): Promise<MemorySearchDebug> {
-  const memories = space.memories.filter(
-    /** Keeps complete records under the caller's explicit filters. */
-    memory => matchesFilters(memory, options),
-  );
-  if (options.query.trim() === "*") throw new Error("检索调试请输入具体查询文本");
-  const result: MemorySearchDebug = { query: options.query, config: { ...config }, relevanceThreshold: options.relevanceThreshold, memoriesInScopeCount: memories.length, candidates: [] };
-  const query = [...new Set(tokens(options.query))];
-  if (query.length === 0) throw new Error("Memory search query has no searchable tokens");
-  const index = memories.map(
-    /** Builds frequencies from the complete title, content and document chunks. */
-    memory => {
-      const chunks = space.chunks.filter(
-        /** Selects chunks by the actual persisted UUID, never graph labels. */
-        chunk => chunk.memoryUuid === memory.uuid,
-      );
-      const text = memory.title + "\n" + memory.content + "\n" + chunks.map(
-        /** Retains every document chunk's searchable content. */
-        chunk => chunk.content,
-      ).join("\n");
-      const values = tokens(text);
-      return { memory, length: values.length, frequencies: counts(values), tags: new Set(memory.tags.flatMap(
-        /** Indexes real memory tag names independently from content. */
-        tag => tokens(tag.name),
-      )) };
-    },
-  );
-  if (index.length === 0) return result;
-  const average = index.reduce(
-    /** Accumulates actual token lengths for length normalization. */
-    (total, document) => total + document.length, 0,
-  ) / index.length;
-  const lexical = new Map<string, number>(), tagScores = new Map<string, number>();
-  let maximum = 0;
-  for (const document of index) {
-    let bm25 = 0, hits = 0;
-    for (const token of query) {
-      const df = index.filter(
-        /** Counts documents with this exact token. */
-        candidate => candidate.frequencies.has(token),
-      ).length;
-      const frequency = document.frequencies.get(token);
-      if (frequency !== undefined) {
-        const idf = Math.log(1 + (index.length - df + 0.5) / (df + 0.5));
-        const lengthFactor = average === 0 ? 1 : document.length / average;
-        bm25 += idf * frequency * 2.2 / (frequency + 1.2 * (0.25 + 0.75 * lengthFactor));
-      }
-      if (document.tags.has(token)) hits += 1;
+      return { queryEmbedding, result: { excludedBySnapshotCount: page.excluded, query: options.query, config, relevanceThreshold: options.relevanceThreshold, memoriesInScopeCount: scope.ids.size, candidates: page.hits } };
     }
-    lexical.set(document.memory.id, bm25); tagScores.set(document.memory.id, hits / query.length); maximum = Math.max(maximum, bm25);
-  }
-  const semantic = new Map<string, number>();
-  if (config.vectorWeight > 0) {
-    const queryVector = await embeddingFor(space, options.query);
-    for (const document of index) {
-      const memory = document.memory;
-      const vector = await embeddingFor(space, memory.isDocumentNode ? memory.title : memory.content);
-      let similarity = Math.max(0, cosineSimilarity(queryVector, vector));
-      if (memory.isDocumentNode) for (const chunk of space.chunks) if (chunk.memoryUuid === memory.uuid) similarity = Math.max(similarity, cosineSimilarity(queryVector, await embeddingFor(space, chunk.content)));
-      semantic.set(memory.id, similarity);
-    }
-  }
-  let keywordMultiplier: number, semanticMultiplier: number, edgeMultiplier: number;
-  switch (config.scoreMode) {
-    case "BALANCED": keywordMultiplier = 1; semanticMultiplier = 1; edgeMultiplier = 1; break;
-    case "KEYWORD_FIRST": keywordMultiplier = 1.3; semanticMultiplier = 0.8; edgeMultiplier = 0.9; break;
-    case "SEMANTIC_FIRST": keywordMultiplier = 0.8; semanticMultiplier = 1.3; edgeMultiplier = 1.1; break;
-    default: throw new Error("Invalid memory scoring mode");
-  }
-  const keywordWeight = config.keywordWeight * keywordMultiplier, tagWeight = config.tagWeight * keywordMultiplier,
-    vectorWeight = config.vectorWeight * semanticMultiplier, edgeWeight = config.edgeWeight * edgeMultiplier;
-  const scores: MemorySearchHit[] = [];
-  for (const document of index) {
-    const lexicalValue = lexical.get(document.memory.id), tagValue = tagScores.get(document.memory.id);
-    if (lexicalValue === undefined || tagValue === undefined) throw new Error("Search index is inconsistent");
-    const keyword = maximum === 0 ? 0 : lexicalValue / maximum;
-    let edge = 0;
-    for (const link of space.links) {
-      let other: string;
-      if (link.sourceMemoryId === document.memory.id) other = link.targetMemoryId;
-      else if (link.targetMemoryId === document.memory.id) other = link.sourceMemoryId;
-      else continue;
-      const otherLexical = lexical.get(other);
-      if (otherLexical !== undefined && maximum !== 0) edge = Math.max(edge, link.weight * otherLexical / maximum);
-    }
-    const denominator = keywordWeight + tagWeight + vectorWeight + edgeWeight;
-    if (denominator === 0) throw new Error("Memory search has no enabled scoring weights");
-    let vector = 0;
-    if (vectorWeight > 0) { const value = semantic.get(document.memory.id); if (value === undefined) throw new Error("Semantic search index is inconsistent"); vector = value; }
-    const score = (keyword * keywordWeight + tagValue * tagWeight + vector * vectorWeight + edge * edgeWeight) / denominator;
-    scores.push({ memory: document.memory, score, keywordScore: keyword * keywordWeight / denominator, tagScore: tagValue * tagWeight / denominator, vectorScore: vector * vectorWeight / denominator, edgeScore: edge * edgeWeight / denominator, passedThreshold: score > 0 && score >= options.relevanceThreshold });
-  }
-  scores.sort(
-    /** Orders actual ranked hits with a stable lossless identity tie breaker. */
-    (left, right) => right.score - left.score || (left.memory.id < right.memory.id ? -1 : left.memory.id > right.memory.id ? 1 : 0),
-  );
-  result.candidates = scores; return result;
+    throw new Error("Memory records changed repeatedly during retrieval");
+  });
 }

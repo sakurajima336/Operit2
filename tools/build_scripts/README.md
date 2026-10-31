@@ -12,8 +12,9 @@ Release package filenames use
 `operit2-<product>-<platform>-<architecture>-<release-version>.<extension>`.
 `release_artifacts.py` validates the shared App runtime and CLI version and keeps
 prerelease identifiers and compound extensions intact. App packages for macOS
-use `universal` and `.zip`; macOS CLI packages use their target architecture and
-`.tar.gz`. Build and verification scripts must not write separate `.sha256`
+use `operit2-app-macos-universal-<sandbox|unsandbox>-<release-version>.zip`.
+Sandbox App Store installers use the same naming rule with `.pkg`. macOS CLI
+packages retain their target architecture and `.tar.gz` naming. Build and verification scripts must not write separate `.sha256`
 files or `SHA256SUMS` lists for release packages. Verification results may
 include hashes in the existing build manifest.
 
@@ -23,6 +24,7 @@ include hashes in the existing build manifest.
   OpenHarmony, and Windows.
 - `build_cli_<platform>.py`: CLI builds for Linux, macOS, and Windows.
 - `build_cli_current.py`: CLI build for the current host platform.
+- `build_cli_linux_debian12.py`: glibc 2.36-compatible Linux CLI build inside a Debian 12 container (`containers/debian12/`). The image is provisioned through `podman run` + `commit`, avoiding kernel-overlayfs build-context mounts.
 - `build_local.py`: existing current-host App/CLI/ESP32 dispatcher.
 - `build_apple_release.py`: Apple release asset dispatcher.
 - `build_esp32.py`: ESP32 firmware builder.
@@ -40,24 +42,225 @@ from their native hooks. `verify_cli_plugin_assets()` rejects a packaged CLI
 whose binary omits any generated asset name. Do not commit or reuse stale
 asset directories across machines.
 
+## OpenHarmony native libraries
+
+The HAP build uses the API 18 native SDK configured in the OHOS project's
+`local.properties` and a current `ld.lld` on `PATH`. V8's Chromium compiler emits
+ELF CREL relocations, which the SDK's bundled LLD 15 cannot read. The final Rust
+link uses the selected LLD with the SDK sysroot and compiler builtins, and rejects
+undefined symbols.
+
+Provide a V8 archive and its matching generated Rust bindings for
+the selected target (`aarch64-unknown-linux-ohos` or
+`x86_64-unknown-linux-ohos`) through `RUSTY_V8_ARCHIVE` and
+`RUSTY_V8_SRC_BINDING_PATH`. Set `RUSTY_V8_ARCHIVE_SHA256` to the archive's SHA-256.
+Both artifacts must come from the locked V8 version, built against the OHOS
+sysroot; Android and GNU/Linux artifacts have a different ABI.
+
+Local native source caches can be supplied through `OPERIT_LLAMA_SOURCE`,
+`OPERIT_MNN_SOURCE`, and `OPERIT_KLEIDIAI_SOURCE` (KleidiAI 1.16.0 for MNN 3.6.1).
+Use CMake-style forward slashes in these paths. The OHOS engine uses the SDK's
+C++ headers, aligns their namespace with the SDK's `__n1` ABI, and uses
+`sched_setaffinity` for inference thread affinity. Its static C++ runtime stays
+private behind the three exported inference C functions. Packaging includes both `liboperit_flutter_bridge.so` and
+`liboperit_local_llm.so`.
+
+The entry module enables `compressNativeLibs` so the HAP stores shared libraries
+with compression. Before signing, terminal packaging keeps `qemu-harmonix-aarch64`,
+its transitive `DT_NEEDED` libraries and the HNP metadata in both declared packages.
+The dependency check excludes the OS-provided `libc.so` and rejects missing or
+bundled libraries whose ELF architecture differs from the selected target. Full-system emulators, x86 guest programs and libraries
+unreferenced by QEMU-vroot are excluded from the HAP. The offline Alpine tool
+repository remains bundled for terminal, OCR and PDF capabilities.
+
+Select the build architecture from the repository root:
+
+```powershell
+# ARM64 devices
+.venv\Scripts\python.exe tools/build_scripts/build_flutter_ohos.py --target-platform ohos-arm64 --enforce-lockfile
+
+# x86_64 emulator
+.venv\Scripts\python.exe tools/build_scripts/build_flutter_ohos.py --target-platform ohos-x64 --enforce-lockfile
+```
+
+ARM64 remains the default target. Each target selects its Rust triple, Flutter
+engine HAR, CMake ABI, packaged native libraries, HNP directory and output filename.
+The Hvigor plugin reads Flutter's `TARGET_PLATFORM` parameter and sets native ABI
+filters in memory. Both engine dependencies stay declared in the manifests;
+switching targets does not rewrite architecture settings or remove cached libraries.
+Before signing, the build checks that all required native libraries are present and
+that every packaged ELF matches the selected ABI. The same selection works with
+`fvm flutter build hap --target-platform ohos-x64` from `apps/flutter/app` after
+staging the required Rust libraries, HARs and terminal packages.
+
+The x86_64 host HNPs still
+run the shared ARM64 Alpine guest through `qemu-harmonix-aarch64`. Supply both
+HNP files under `apps/flutter/app/ohos/entry/hnp/x86_64/` for emulator builds.
+
 ## Apple release helpers
 
 ```bash
 # Build Flutter artifacts
 python3 tools/build_scripts/build_flutter_ios.py --build-name 2.0.0 --build-number 15
-python3 tools/build_scripts/build_flutter_macos.py --build-name 2.0.0 --build-number 15
+python3 tools/build_scripts/build_flutter_macos.py --type sandbox --build-name 2.0.0 --build-number 15
+python3 tools/build_scripts/build_flutter_macos.py --type unsandbox --build-name 2.0.0 --build-number 15
 
-# Sign the macOS app and create a .pkg
-python3 tools/build_scripts/sign_macos.py
+# Sign the sandbox app for App Store Connect (.pkg)
+python3 tools/build_scripts/sign_macos.py --type sandbox
+
+# Sign the unsandbox app with Developer ID (.zip)
+python3 tools/build_scripts/sign_macos.py --type unsandbox
+# Optionally notarize using credentials already stored in the keychain
+python3 tools/build_scripts/sign_macos.py --type unsandbox --notary-profile OperitDeveloperID
+
+# Current-host dispatcher: build just the unrestricted macOS app
+python3 tools/build_scripts/build_local.py --products app --macos-type unsandbox
+# Apple release dispatcher builds both macOS types by default
+python3 tools/build_scripts/build_apple_release.py --build-name 2.0.0 --build-number 15 --products app
 
 # Validate or upload an .ipa/.pkg
 python3 tools/build_scripts/validate_appstore.py path/to/App.ipa
 python3 tools/build_scripts/upload_appstore.py path/to/App.ipa
 ```
 
+`build_flutter_macos.py` defaults to `sandbox`. Builds are checked against the
+actual signed `com.apple.security.app-sandbox` value before archiving, and each
+App is retained at `tools/release/work/macos/<type>/Operit2.app`. Signing reads
+that type's retained App and writes to `tools/release/work/macos-sign/<type>/`.
+Do not re-sign a different type's App instead of rebuilding it. Sandbox signing
+uses the App Store profile and distribution/installer certificates; unsandbox
+uses Developer ID Application, Hardened Runtime and no App Store profile.
+Without `--notary-profile`, a signed unsandbox archive is not yet notarized.
+
+Direct `flutter run`, VS Code Run (including profile/release), and Xcode Runner
+builds default to **unsandbox**. Release scripts override a custom Runner setting
+through a temporary `XCODE_XCCONFIG_FILE`; they do not edit the project or impose
+application entitlements on CocoaPods frameworks. Existing xcconfig overrides
+are included before the selected type. CI and the release publisher build both
+types; other platform and CLI names are unchanged.
+
+`macos/flutter_assemble.sh` confines a `lipo` compatibility wrapper to Flutter
+assemble. It verifies each requested architecture individually because Xcode 27
+rejects Flutter's multi-architecture `-verify_arch` invocation. All other `lipo`
+commands pass through to the selected Xcode toolchain. The SDK itself is unchanged.
+
+The application reads isolation from the running process signature. The
+unsandbox Host registers native zsh/bash login PTYs with controlling-terminal
+job control and exposes the native `/` filesystem through VFS `/mnt/macos`.
+The sandbox Host retains its no-controlling-TTY PTY adapter and folder bookmarks.
+AI permission modes and approvals apply to both; unsandbox remains subject to
+the current account and macOS privacy permissions.
+
 The App Store Connect scripts read the ignored file
 `tools/release/secrets/appstoreconnect/appstoreconnect.env`. No credentials are
 stored in tracked build scripts.
+
+## iOS V8 runtime
+
+The iOS Rust bridge runs `prepare_ios_v8.py` before compiling Rust. It builds the
+V8 version pinned in the bridge's `Cargo.lock` from source and supplies the
+resulting static library and generated Rust bindings together. The embedded
+startup snapshot comes from that same build. This avoids the incompatible
+snapshot in the previously used precompiled iOS archive.
+
+The iOS build uses compile-time jitless mode with Sparkplug, Maglev, TurboFan and
+WebAssembly disabled. It also disables the cppgc caged heap, avoiding its large
+aligned virtual-address reservation during startup without requiring Extended
+Virtual Addressing entitlements. Intl remains enabled. Temporal is disabled
+because the published source crate omits its Rust vendor dependencies; current
+runtime plugins do not use Temporal. These settings belong to the iOS build
+layer; the common JavaScript scheduler has no Apple-specific runtime branches.
+
+On macOS, install the source-build prerequisites with
+`brew install llvm@23 lld@23`. The helper combines Homebrew's LLVM/libclang with
+Xcode's iOS compiler runtimes in a local toolchain overlay. It downloads missing
+ICU data from the exact revision in V8's DEPS. The first build for each iOS
+architecture takes substantially longer; subsequent builds reuse
+`tools/release/work/ios-v8/<v8-version>/<rust-target>/`. Library, bindings and GN
+arguments are checked against a configuration manifest and SHA-256 hashes before
+reuse. A preparation failure stops the build instead of downloading the old
+archive. CI caches the complete artifact set and uses the same helper.
+
+For a manual build, after installing the Rust target:
+
+```bash
+python3 tools/build_scripts/prepare_ios_v8.py \
+  --target aarch64-apple-ios --env-file tools/release/work/ios-v8/device.env
+```
+
+Debug uses a regular executable with dead-code stripping and disables exporting
+all global symbols, so unused WebAssembly wrappers are removed. Swift-referenced
+Rust bridge entry points remain linked. The iSH runtime also namespaces its
+kernel printf/scanf functions so host V8 calls keep using Darwin libc. See
+`tools/ios-runtime/ish/README.md` for that native regression. Build/cache checks:
+
+```bash
+python3 -m unittest discover -s tools/tests -p test_ios_v8_build.py -v
+python3 -m unittest discover -s tools/tests -p test_apple_plugin_build.py -v
+```
+
+## Android V8 runtime
+
+Android Cargo tasks use the Android SDK's `cmake;3.22.1` package for CMake and
+Ninja. Install it through Android Studio's SDK Manager (SDK Tools > CMake >
+3.22.1), or run `sdkmanager "cmake;3.22.1"`. Gradle sets `CMAKE` and adds that
+package's `bin` directory to the Cargo task's `PATH`; no global PATH change is
+needed for the embedded local inference engines.
+
+Local inference CMake work trees live under `target/local-llm/<build-id>/` at
+the repository root. The build ID hashes the full Cargo `OUT_DIR`, keeping
+targets, profiles and feature configurations isolated without carrying Cargo's
+deep directory prefix into MNN and KleidiAI source/object paths. Shared engines
+still land beside Cargo's bridge artifacts for the existing packaging tasks.
+
+rusty_v8 publishes no prebuilt static libraries for Android targets, so the
+crate's default GitHub download fails with a 404. The Android Gradle build
+therefore runs `prepare_android_v8.py` before compiling Rust. Like the iOS
+helper, it builds the V8 version pinned in the bridge's `Cargo.lock` from
+source and writes `RUSTY_V8_ARCHIVE`, `RUSTY_V8_ARCHIVE_SHA256` and
+`RUSTY_V8_SRC_BINDING_PATH` into an env file; the Cargo compile tasks apply it.
+Library, bindings and GN arguments are verified against a configuration
+manifest and SHA-256 hashes before reuse under
+`tools/release/work/android-v8/<v8-version>/<rust-target>/`.
+
+Unlike iOS, Android keeps the JIT with WebAssembly enabled. The sandbox,
+pointer compression and cppgc caged heap stay disabled to keep both mobile
+builds on the same memory layout, and Temporal stays disabled because the
+published source crate omits its Rust vendor dependencies. The NDK API level
+defaults to 24 (matching the app's minSdkVersion) and can be raised with
+`OPERIT_ANDROID_V8_API_LEVEL`; the value is part of the cache identity.
+
+The Gradle task passes its selected `android.ndkDirectory` to the helper as
+`OPERIT_ANDROID_V8_NDK`, so V8 and the Rust bridge use the app's configured NDK
+even when the SDK is configured only in `local.properties`.
+For standalone invocations, an NDK r23+ installation is required and detected from `OPERIT_ANDROID_V8_NDK`,
+`ANDROID_NDK_HOME`, `$ANDROID_HOME/ndk` or `~/Android/ndk` (newest match wins).
+On Linux, the helper falls back to downloading the NDK that rusty_v8's build
+script pins. The detected NDK is exposed inside the crate source where both the
+build script's guard and the GN `android_ndk_root` default expect it, so no
+extra download happens even when the crate would fetch a Linux-only archive.
+Linux needs libclang 21.1+ and `ld.lld` (`apt install llvm-21-dev lld`); the
+host compiler itself is downloaded from Chromium's pinned build so the
+compiler-runtime layout matches. macOS uses Homebrew LLVM (`brew install
+llvm@23 lld@23`); on Windows, set `OPERIT_LIBCLANG_DIR`
+to a directory containing `libclang.dll` (the Gradle build already does).
+The helper also provisions the pinned `gn` and `ninja` under the cache and
+passes them via `GN`/`NINJA`, because the crate's own downloader opens raw
+connections that bypass proxy environment settings. `armv7-linux-androideabi`
+is not supported: rusty_v8's build script maps only
+the x86_64 and aarch64 Android targets. Build/cache checks:
+
+```bash
+python3 -m unittest discover -s tools/tests -p test_android_v8_build.py -v
+```
+
+For a manual build after installing the Rust target:
+
+```bash
+python3 tools/build_scripts/prepare_android_v8.py \
+  --target aarch64-linux-android \
+  --env-file tools/release/work/android-v8/aarch64-linux-android.env
+```
 
 ## Local CLI development and macOS Keychain authorization
 
@@ -111,7 +314,8 @@ OPERIT_CODE_SIGN_STYLE = Manual
 DEVELOPMENT_TEAM = <team ID associated with that certificate>
 ```
 
-This keeps the app's own bundle identifier, sandbox and encryption entitlements.
+This keeps the app's own bundle identifier and selected distribution entitlements.
+Direct runs select unsandbox; packaging scripts select their explicit type.
 It does not export private keys or alter Keychain ACLs. Without this local file,
 the project's existing ad-hoc signing behavior is retained. A previously
 unauthorized certificate may still require the user to approve its first

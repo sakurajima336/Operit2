@@ -30,6 +30,19 @@ String _deviceInfoName(generated.LinkDeviceInfo info) {
   return parts.isEmpty ? 'Unknown device' : parts.join('-');
 }
 
+/// Names one paired device for display.
+///
+/// The pairing record keeps the name captured at pairing time and never
+/// follows the peer's later renames; only the synchronized Space profile
+/// does. The record stays the fallback for paired devices outside the Space.
+String _pairedDeviceName(
+  generated.RuntimePairedDevice device,
+  generated.RuntimeDeviceSpaceDevice? projected,
+) {
+  final name = projected?.deviceName.trim() ?? '';
+  return name.isEmpty ? _deviceInfoName(device.deviceInfo) : name;
+}
+
 class RuntimeSettingsPanel extends StatefulWidget {
   const RuntimeSettingsPanel({
     super.key,
@@ -66,6 +79,9 @@ class _RuntimeSettingsPanelState extends State<RuntimeSettingsPanel>
   _pairedDevicesSubscription;
   StreamSubscription<Map<String, generated.RuntimePairedDeviceStatus>>?
   _pairedDeviceStatusesSubscription;
+  StreamSubscription<generated.RuntimeDeviceSpaceSnapshot>?
+  _snapshotSubscription;
+  final _watchRetryTimers = <Timer>{};
 
   late final GeneratedCoreProxyClients _clients =
       widget.clients ??
@@ -77,7 +93,13 @@ class _RuntimeSettingsPanelState extends State<RuntimeSettingsPanel>
   @override
   void onPageActivityChanged(bool active) {
     _pageGeneration += 1;
+    for (final timer in _watchRetryTimers) {
+      timer.cancel();
+    }
+    _watchRetryTimers.clear();
     if (!active) {
+      _snapshotSubscription?.cancel();
+      _snapshotSubscription = null;
       _pairedDevicesSubscription?.cancel();
       _pairedDevicesSubscription = null;
       _pairedDeviceStatusesSubscription?.cancel();
@@ -85,12 +107,19 @@ class _RuntimeSettingsPanelState extends State<RuntimeSettingsPanel>
       return;
     }
     unawaited(_refreshCurrentDeviceSpace());
-    _watchPairedDevices();
-    _watchPairedDeviceStatuses();
+    _startWatches();
   }
 
   @override
   void dispose() {
+    for (final timer in _watchRetryTimers) {
+      timer.cancel();
+    }
+    _watchRetryTimers.clear();
+    final snapshotSubscription = _snapshotSubscription;
+    if (snapshotSubscription != null) {
+      unawaited(snapshotSubscription.cancel());
+    }
     final pairedDevicesSubscription = _pairedDevicesSubscription;
     if (pairedDevicesSubscription != null) {
       unawaited(pairedDevicesSubscription.cancel());
@@ -102,40 +131,102 @@ class _RuntimeSettingsPanelState extends State<RuntimeSettingsPanel>
     super.dispose();
   }
 
-  /// Subscribes to pairing changes produced by both connection directions.
-  void _watchPairedDevices() {
-    _pairedDevicesSubscription = _clients.server.runtimeRemoteLinkService
-        .pairedDevicesFlow()
-        .listen(
-          _applyPairedDevices,
-          onError: (Object error, StackTrace stackTrace) {
-            if (!mounted) {
-              return;
-            }
-            setState(() {
-              _connectionMessage = error.toString();
-              _connectionFailed = true;
-            });
-          },
-        );
+  /// Runs one watch subscription; a failed watch resubscribes itself after a
+  /// short delay instead of staying silent until the page is entered again.
+  void _subscribeWatch<T>(
+    Stream<T> Function() flow,
+    void Function(T value) onData,
+    void Function(StreamSubscription<T> subscription) install,
+  ) {
+    Timer? retry;
+    late final StreamSubscription<T> subscription;
+    void scheduleRetry() {
+      if (!mounted || !isPageActive || retry != null) return;
+      final generation = _pageGeneration;
+      retry = Timer(const Duration(seconds: 2), () async {
+        _watchRetryTimers.remove(retry);
+        await subscription.cancel();
+        if (mounted && isPageActive && generation == _pageGeneration) {
+          _subscribeWatch(flow, onData, install);
+        }
+      });
+      _watchRetryTimers.add(retry!);
+    }
+
+    subscription = flow().listen(
+      onData,
+      onError: (Object error) {
+        if (!mounted || !isPageActive) return;
+        setState(() {
+          _connectionMessage = error.toString();
+          _connectionFailed = true;
+        });
+        scheduleRetry();
+      },
+      onDone: scheduleRetry,
+    );
+    install(subscription);
   }
 
-  /// Subscribes to direct Peer Link status changes for paired devices.
-  void _watchPairedDeviceStatuses() {
-    _pairedDeviceStatusesSubscription = _clients.server.runtimeRemoteLinkService
-        .pairedDeviceStatusesFlow()
-        .listen(
-          _applyPairedDeviceStatuses,
-          onError: (Object error, StackTrace stackTrace) {
-            if (!mounted) {
-              return;
-            }
-            setState(() {
-              _connectionMessage = error.toString();
-              _connectionFailed = true;
-            });
-          },
-        );
+  /// Subscribes the synchronized overview, the pairing records and the
+  /// direct-link statuses while this page is active.
+  void _startWatches() {
+    _subscribeWatch(
+      _clients.server.runtimeRemoteLinkService.deviceSpaceSnapshotFlow,
+      _applyDeviceSpaceSnapshot,
+      (subscription) => _snapshotSubscription = subscription,
+    );
+    _subscribeWatch(
+      _clients.server.runtimeRemoteLinkService.pairedDevicesFlow,
+      _applyPairedDevices,
+      (subscription) => _pairedDevicesSubscription = subscription,
+    );
+    _subscribeWatch(
+      _clients.server.runtimeRemoteLinkService.pairedDeviceStatusesFlow,
+      _applyPairedDeviceStatuses,
+      (subscription) => _pairedDeviceStatusesSubscription = subscription,
+    );
+  }
+
+  /// Applies one synchronized space-plus-topology snapshot pushed by the
+  /// runtime. This covers every change the paired-status flow cannot see:
+  /// synchronized profiles, relay topology edges, identities, membership.
+  void _applyDeviceSpaceSnapshot(
+    generated.RuntimeDeviceSpaceSnapshot snapshot,
+  ) {
+    if (!mounted || !isPageActive) {
+      return;
+    }
+    setState(() {
+      _currentDeviceSpace = snapshot.space;
+      _topology = snapshot.topology;
+      _connectionMessage = null;
+      _connectionFailed = false;
+    });
+    unawaited(_pullDeviceSpaceControl());
+  }
+
+  /// Reads the identity-control projection, which is not part of the
+  /// snapshot flow. A failed read is shown while the next snapshot can retry it.
+  Future<void> _pullDeviceSpaceControl() async {
+    if (!mounted || !isPageActive) {
+      return;
+    }
+    final generation = _pageGeneration;
+    try {
+      final control = await _clients.server.runtimeRemoteLinkService
+          .deviceSpaceControl();
+      if (mounted && isPageActive && generation == _pageGeneration) {
+        setState(() => _control = control);
+      }
+    } catch (error) {
+      if (mounted && isPageActive && generation == _pageGeneration) {
+        setState(() {
+          _connectionMessage = error.toString();
+          _connectionFailed = true;
+        });
+      }
+    }
   }
 
   /// Applies peer-driven online states without changing pairing validity prompts.
@@ -159,36 +250,61 @@ class _RuntimeSettingsPanelState extends State<RuntimeSettingsPanel>
       }
       _pairedRemoteStates = nextStates;
     });
-    unawaited(_refreshCurrentDeviceSpace());
   }
 
   /// Reads the synchronized device space projection from the current device.
   Future<void> _refreshCurrentDeviceSpace() async {
     if (!mounted || !isPageActive) return;
     final generation = _pageGeneration;
-    try {
-      final deviceSpace = await _clients.server.runtimeRemoteLinkService
-          .deviceSpace();
-      if (!mounted || !isPageActive || generation != _pageGeneration) return;
-      final topology = await _clients.server.runtimeRemoteLinkService
-          .deviceSpaceTopology();
-      if (!mounted || !isPageActive || generation != _pageGeneration) return;
-      final control = await _clients.server.runtimeRemoteLinkService
-          .deviceSpaceControl();
-      if (mounted && isPageActive && generation == _pageGeneration) {
-        setState(() {
-          _currentDeviceSpace = deviceSpace;
-          _topology = topology;
-          _control = control;
-        });
+    final l10n = AppLocalizations.of(context)!;
+    final errors = <String>[];
+    Future<void> read<T>(
+      String name,
+      Future<T> Function() load,
+      void Function(T) apply,
+    ) async {
+      try {
+        final value = await load();
+        if (mounted && isPageActive && generation == _pageGeneration) {
+          setState(() => apply(value));
+        }
+      } catch (error) {
+        errors.add('$name: $error');
+        if (mounted && isPageActive && generation == _pageGeneration) {
+          setState(() {
+            _connectionMessage = errors.join('\n');
+            _connectionFailed = true;
+          });
+        }
       }
-    } catch (error) {
-      if (mounted && isPageActive && generation == _pageGeneration) {
-        setState(() {
-          _connectionMessage = error.toString();
-          _connectionFailed = true;
-        });
-      }
+    }
+
+    final service = _clients.server.runtimeRemoteLinkService;
+    await Future.wait([
+      read(
+        l10n.settingsRuntimeCurrentSpace,
+        service.deviceSpace,
+        (value) => _currentDeviceSpace = value,
+      ),
+      read(
+        l10n.settingsRuntimeViewSpaceTopology,
+        service.deviceSpaceTopology,
+        (value) => _topology = value,
+      ),
+      read(
+        l10n.runtimeIdentityManage,
+        service.deviceSpaceControl,
+        (value) => _control = value,
+      ),
+    ]);
+    if (errors.isEmpty &&
+        mounted &&
+        isPageActive &&
+        generation == _pageGeneration) {
+      setState(() {
+        _connectionMessage = null;
+        _connectionFailed = false;
+      });
     }
   }
 
@@ -288,13 +404,15 @@ class _RuntimeSettingsPanelState extends State<RuntimeSettingsPanel>
     final pendingJoin = request != null && spaceJoinIsActive(request.status);
     final member = _currentDeviceSpace?.members.contains(deviceId) ?? false;
     final projected = _projectedDevice(deviceId);
+    final displayState = _pairedDisplayState(probeState, projected);
+    final name = _pairedDeviceName(device, projected);
     final status =
-        '${_remoteProbeLabel(probeState, l10n)}'
+        '${_remoteProbeLabel(displayState, l10n)}'
         '${_reachabilitySuffix(l10n, projected)}';
     final path = _relayPathText(l10n, names, projected);
     return _DeviceSpaceRow(
-      leading: _pairedLeading(probeState),
-      title: _deviceInfoName(device.deviceInfo),
+      leading: _pairedLeading(displayState),
+      title: name,
       identity: _identityLabel(l10n, projected),
       status: status,
       tag: pendingJoin
@@ -313,8 +431,8 @@ class _RuntimeSettingsPanelState extends State<RuntimeSettingsPanel>
         projected,
       ),
       onTap: () => _showDeviceDetails(
-        icon: _remoteProbeIconData(probeState),
-        name: _deviceInfoName(device.deviceInfo),
+        icon: _remoteProbeIconData(displayState),
+        name: name,
         deviceId: deviceId,
         statusText: status,
         pathText: path,
@@ -360,6 +478,15 @@ class _RuntimeSettingsPanelState extends State<RuntimeSettingsPanel>
         MenuItemButton(
           onPressed: _busy ? null : _handleRemovedFromSpace,
           child: Text(l10n.settingsRuntimeRemovedFromSpaceConfirm),
+        ),
+      // A failing direct link is what this fixes; relay reachability does not
+      // matter because the operator address replaces the stored one outright.
+      if (probeState == _PairedRemoteProbeState.offline)
+        MenuItemButton(
+          onPressed: _busy
+              ? null
+              : () => unawaited(_updateDeviceEndpoint(device, l10n)),
+          child: Text(l10n.deviceSpaceUpdateEndpoint),
         ),
       MenuItemButton(
         onPressed: _busy ? null : () => _deletePairedDevice(device.deviceId),
@@ -1023,6 +1150,73 @@ class _RuntimeSettingsPanelState extends State<RuntimeSettingsPanel>
     }
   }
 
+  /// Collects an operator-supplied address and repoints the paired device's
+  /// dial record at it: the runtime validates, saves, and probes the new
+  /// address immediately. Offered only while the direct link is failing —
+  /// a live link never needs its endpoint rewritten by hand. Works the same
+  /// for either pairing direction because the runtime updates whichever
+  /// dialable record this side holds.
+  Future<void> _updateDeviceEndpoint(
+    generated.RuntimePairedDevice device,
+    AppLocalizations l10n,
+  ) async {
+    final controller = TextEditingController();
+    final endpoint = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(l10n.deviceSpaceUpdateEndpoint),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: InputDecoration(
+            labelText: l10n.deviceSpaceUpdateEndpointLabel,
+            hintText: l10n.deviceSpaceUpdateEndpointHint,
+          ),
+          onSubmitted: (value) => Navigator.of(dialogContext).pop(value),
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child:
+                Text(MaterialLocalizations.of(dialogContext).cancelButtonLabel),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(controller.text),
+            child: Text(MaterialLocalizations.of(dialogContext).okButtonLabel),
+          ),
+        ],
+      ),
+    );
+    if (!mounted || endpoint == null) {
+      return;
+    }
+    final address = endpoint.trim();
+    if (address.isEmpty) {
+      return;
+    }
+    setState(() => _busy = true);
+    try {
+      await _clients.server.runtimeRemoteLinkService
+          .updatePairedDeviceEndpoint(
+        deviceId: device.deviceId,
+        endpoint: address,
+        transport: null,
+      );
+      await _refreshCurrentDeviceSpace();
+      if (mounted) {
+        _showDeviceFeedback(l10n.deviceSpaceUpdateEndpointSaved);
+      }
+    } catch (error) {
+      if (mounted) {
+        _showDeviceFeedback(error.toString());
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _busy = false);
+      }
+    }
+  }
+
   /// Applies a device space returned by the shared discovery workflow.
   Future<void> _handleJoinedDeviceSpace(generated.CoreSpace deviceSpace) async {
     if (!mounted) {
@@ -1093,6 +1287,7 @@ class _RuntimeSettingsPanelState extends State<RuntimeSettingsPanel>
       _SectionCard(
         title: l10n.deviceSpaceDevices,
         headerActions: DeviceSpaceDiscoveryPanel(
+          key: ValueKey(_currentDeviceSpace?.spaceId),
           clients: _clients,
           enabled: !_busy,
           onJoined: _handleJoinedDeviceSpace,
@@ -1107,6 +1302,7 @@ class _RuntimeSettingsPanelState extends State<RuntimeSettingsPanel>
         title: l10n.settingsRuntimeIdentitiesAndPermissions,
         children: <Widget>[
           NetworkControlPanel(
+            key: ValueKey(_currentDeviceSpace?.spaceId),
             clients: _clients,
             onChanged: _refreshCurrentDeviceSpace,
           ),
@@ -1226,6 +1422,29 @@ _PairedRemoteProbeState _pairedRemoteStateFromStatus(
   };
 }
 
+/// Resolves the connectivity a paired-device row displays.
+///
+/// The status flow only knows whether this device's own direct Peer Link is
+/// up; a member that moved networks stays reachable through a relay, and
+/// showing it offline contradicts the member rows and the routed node list.
+/// Once the synchronized topology projects the member, its route-based state
+/// wins for plain connectivity states; pairing lifecycle states (invalid,
+/// removed from space) keep precedence, and without a projection the direct
+/// probe stays the only source.
+_PairedRemoteProbeState _pairedDisplayState(
+  _PairedRemoteProbeState probeState,
+  generated.RuntimeDeviceSpaceDevice? projected,
+) {
+  if (projected == null ||
+      probeState == _PairedRemoteProbeState.invalid ||
+      probeState == _PairedRemoteProbeState.removedFromSpace) {
+    return probeState;
+  }
+  return projected.online
+      ? _PairedRemoteProbeState.online
+      : _PairedRemoteProbeState.offline;
+}
+
 class _DeviceSpaceOverviewCard extends StatelessWidget {
   const _DeviceSpaceOverviewCard({
     required this.deviceSpace,
@@ -1256,25 +1475,25 @@ class _DeviceSpaceOverviewCard extends StatelessWidget {
     final l10n = AppLocalizations.of(context)!;
     final scheme = Theme.of(context).colorScheme;
     final space = deviceSpace;
-    if (space == null) {
-      return _SectionCard(
-        title: l10n.settingsRuntimeCurrentSpace,
-        children: <Widget>[
-          SizedBox(
-            height: 190,
-            child: Center(child: M3LoadingIndicator(size: 24)),
-          ),
-        ],
-      );
-    }
     final graph = topology;
-    if (graph == null) {
+    if (space == null || graph == null) {
       return _SectionCard(
         title: l10n.settingsRuntimeCurrentSpace,
         children: <Widget>[
-          SizedBox(
-            height: 190,
-            child: Center(child: M3LoadingIndicator(size: 24)),
+          if (connectionMessage != null)
+            _InlineStatus(message: connectionMessage!, failed: connectionFailed)
+          else
+            const SizedBox(
+              height: 120,
+              child: Center(child: M3LoadingIndicator(size: 24)),
+            ),
+          Align(
+            alignment: AlignmentDirectional.centerEnd,
+            child: TextButton.icon(
+              onPressed: busy ? null : onLeave,
+              icon: const Icon(Icons.logout_outlined),
+              label: Text(l10n.settingsRuntimeLeaveSpace),
+            ),
           ),
         ],
       );
@@ -1328,7 +1547,7 @@ class _DeviceSpaceOverviewCard extends StatelessWidget {
                               ),
                               PopupMenuItem<_DeviceSpaceMenuAction>(
                                 value: _DeviceSpaceMenuAction.leave,
-                                enabled: !busy && space.members.length > 1,
+                                enabled: !busy,
                                 child: ListTile(
                                   contentPadding: EdgeInsets.zero,
                                   leading: const Icon(Icons.logout_outlined),

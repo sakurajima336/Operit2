@@ -40,7 +40,7 @@ impl NativeRuntimeStorageWriteSession {
             file.sync_all()?;
         }
         drop(file);
-        atomicReplace(&self.temporaryPath, &self.targetPath)?;
+        publishStagedFile(&self.temporaryPath, &self.targetPath, sync)?;
         Ok(())
     }
 }
@@ -139,6 +139,7 @@ impl Drop for NativeArchiveFiles {
 }
 
 /// Locks staging mutations across Host instances without locking archive payload bytes.
+/// Uses fs2 because Rust 1.95 standard file locking does not support Android.
 fn lockArchiveDirectory(root: &Path) -> HostResult<fs::File> {
     let file = fs::OpenOptions::new().create(true).truncate(false).read(true).write(true)
         .open(root.join(".staging.lock"))?;
@@ -591,6 +592,10 @@ impl RuntimeStorageWriteHost for NativeRuntimeStorageHost {
 }
 
 impl RuntimeStorageHost for NativeRuntimeStorageHost {
+    fn openTransactionDatabase(&self, path: &str) -> operit_host_api::HostResult<Box<dyn operit_host_api::RuntimeSqliteConnection>> {
+        RuntimeSqliteHost::openSqliteDatabase(self, path)
+    }
+
     fn runtimeRootDir(&self) -> Option<PathBuf> {
         Some(self.runtimeRoot.clone())
     }
@@ -638,6 +643,12 @@ impl RuntimeStorageHost for NativeRuntimeStorageHost {
             .open(path)?;
         file.write_all(content)?;
         Ok(())
+    }
+
+    fn flushFile(&self, path: &str) -> HostResult<()> {
+        let path = self.resolveFile(path)?;
+        fs::OpenOptions::new().write(true).open(&path)?.sync_all()?;
+        syncParentDirectory(&path)
     }
 
     fn delete(&self, path: &str, recursive: bool) -> HostResult<()> {
@@ -726,6 +737,7 @@ impl RuntimeStorageHost for NativeRuntimeStorageHost {
 }
 
 /// Detects the atomic writer's private `.{name}.{uuid}.partial` staging siblings.
+#[allow(non_snake_case)]
 fn isPartialStagingFile(name: &str) -> bool {
     name.starts_with('.')
         && name
@@ -747,6 +759,26 @@ fn isStorageLink(metadata: &fs::Metadata) -> bool {
     }
     #[cfg(not(windows))]
     false
+}
+
+/// Publishes a closed staging file through the Host's platform-specific atomic replacement.
+#[allow(non_snake_case)]
+pub fn publishStagedFile(source: &Path, target: &Path, sync: bool) -> HostResult<()> {
+    atomicReplace(source, target)?;
+    if sync { syncParentDirectory(target)?; }
+    Ok(())
+}
+
+/// Persists the directory entry published by a durable write or journal append.
+#[allow(non_snake_case)]
+fn syncParentDirectory(path: &Path) -> HostResult<()> {
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        fs::File::open(parent)?.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
 }
 
 /// Atomically publishes one sibling staging file over its target path.
@@ -805,7 +837,7 @@ fn windowsExtendedPath(path: &Path) -> HostResult<PathBuf> {
     } else {
         std::env::current_dir()?.join(path)
     };
-    let text = absolute.to_string_lossy();
+    let text = absolute.to_string_lossy().replace('/', "\\");
     if text.starts_with(r"\\?\") || text.starts_with(r"\??\") {
         return Ok(absolute);
     }
@@ -1178,37 +1210,73 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// Hides active write sessions in every namespace until commit and preserves the old file on discard.
     #[test]
-    fn workspace_listing_hides_uncommitted_atomic_write_staging() {
-        let root = std::env::temp_dir().join(format!("operit-workspace-stage-{}", uuid::Uuid::new_v4()));
+    fn listings_publish_only_committed_atomic_writes() {
+        let root =
+            std::env::temp_dir().join(format!("operit-storage-stage-{}", uuid::Uuid::new_v4()));
         let host = NativeRuntimeStorageHost::new(root.join("runtime"), root.join("workspaces"));
-        let mut session = host.createWriteSession("workspaces/project/data.txt").unwrap();
-        session.writeChunk(b"new").unwrap();
-        assert!(host.list("workspaces/project").unwrap().is_empty());
-        session.commitFast().unwrap();
-        let files = host.list("workspaces/project").unwrap();
-        assert_eq!(files.len(), 1);
-        assert_eq!(files[0].path, "workspaces/project/data.txt");
+        for prefix in [
+            "runtime/space/members",
+            "workspaces/project",
+            "secure/catalogs",
+        ] {
+            let path = format!("{prefix}/data.txt");
+            let mut session = host.createWriteSession(&path).unwrap();
+            session.writeChunk(b"original").unwrap();
+            assert!(host.list(prefix).unwrap().is_empty());
+            session.commit().unwrap();
+            let mut replacement = host.createWriteSession(&path).unwrap();
+            replacement.writeChunk(b"replacement").unwrap();
+            let files = host.list(prefix).unwrap();
+            assert_eq!(files.len(), 1);
+            assert_eq!(files[0].path, path);
+            assert_eq!(host.readBytes(&path).unwrap(), b"original");
+            replacement.discard().unwrap();
+            assert_eq!(host.list(prefix).unwrap().len(), 1);
+            assert_eq!(host.readBytes(&path).unwrap(), b"original");
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
-    /// A killed process leaves an atomic-write staging sibling behind; runtime
-    /// listings must hide it exactly like workspace listings so directory
-    /// scanners such as the Space member reader never observe it.
+    /// Hides only the reserved staging grammar and leaves all physical entries untouched during listing.
     #[test]
-    fn runtime_listing_hides_leftover_atomic_write_staging() {
-        let root = std::env::temp_dir().join(format!("operit-runtime-stage-{}", uuid::Uuid::new_v4()));
+    fn listings_hide_abandoned_staging_without_hiding_committed_dotfiles() {
+        let root =
+            std::env::temp_dir().join(format!("operit-storage-orphan-{}", uuid::Uuid::new_v4()));
         let host = NativeRuntimeStorageHost::new(root.join("runtime"), root.join("workspaces"));
-        host.writeBytes("runtime/space/members/core-device.preferences.json", b"{}")
-            .unwrap();
-        let staging = root
-            .join("runtime/space/members/.core-device.preferences.json.3d75c4a5-2e81-4d0a-8f85-11ee23df1e79.partial");
-        fs::write(&staging, b"uncommitted").unwrap();
-
-        let files = host.list("runtime/space/members").unwrap();
-        assert_eq!(files.len(), 1);
-        assert_eq!(files[0].path, "runtime/space/members/core-device.preferences.json");
-        assert!(staging.exists(), "the listing must not delete the staging file");
+        for prefix in [
+            "runtime/space/topology",
+            "workspaces/project",
+            "secure/catalogs",
+        ] {
+            let names = [
+                "record.preferences.json",
+                ".hidden.preferences.json",
+                "record.partial",
+                ".record.invalid.partial",
+                "record.3d75c4a5-2e81-4d0a-8f85-11ee23df1e79.partial",
+            ];
+            for name in names {
+                host.writeBytes(&format!("{prefix}/{name}"), b"{}").unwrap();
+            }
+            let staging = host
+                .resolve(prefix)
+                .unwrap()
+                .join(".record.preferences.json.3d75c4a5-2e81-4d0a-8f85-11ee23df1e79.partial");
+            fs::write(&staging, b"uncommitted").unwrap();
+            let mut paths = host
+                .list(prefix)
+                .unwrap()
+                .into_iter()
+                .map(|entry| entry.path)
+                .collect::<Vec<_>>();
+            paths.sort();
+            let mut expected = names.map(|name| format!("{prefix}/{name}")).to_vec();
+            expected.sort();
+            assert_eq!(paths, expected);
+            assert!(staging.exists(), "Listing must not delete a staging file");
+        }
         fs::remove_dir_all(root).unwrap();
     }
 

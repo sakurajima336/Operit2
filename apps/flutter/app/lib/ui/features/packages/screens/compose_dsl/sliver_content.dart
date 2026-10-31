@@ -7,7 +7,7 @@ class _ComposeDslSliverContent extends StatefulWidget {
   /// Reuses the session's node handles and dispatchers for each visible row.
   const _ComposeDslSliverContent({required this.renderer});
 
-  final _ComposeDslRenderer renderer;
+  final _ComposeProgramExecutor renderer;
 
   /// Creates the observer for the root and its immediate item identities.
   @override
@@ -16,13 +16,28 @@ class _ComposeDslSliverContent extends StatefulWidget {
 }
 
 class _ComposeDslSliverContentState extends State<_ComposeDslSliverContent> {
-  final Set<_ComposeDslNode> _dependencies = {};
+  final Set<_ComposeProgramInstance> _dependencies = {};
   _ComposeLazyWindow? _window;
   int _windowItemCount = 0;
   ({int firstIndex, int lastIndex})? _pendingRange;
   ({int firstIndex, int lastIndex})? _lastRequestedRange;
   bool _rangeScheduled = false;
   bool _rangeInFlight = false;
+  final Map<int, double> _measuredExtents = {};
+
+  /// Uses measured cached indices for variable-height rows, including unloaded placeholders.
+  void _observeItems(Map<int, double> items) {
+    final window = _window;
+    if (window == null || items.isEmpty) return;
+    _measuredExtents.addAll(items);
+    _pendingRange = window.rangeToRequest(
+      items.keys.reduce(math.min),
+      items.keys.reduce(math.max) + 1,
+      _windowItemCount,
+      rangeIncludesCache: true,
+    );
+    _scheduleRange();
+  }
 
   /// Coalesces layout requests, keeping the latest viewport during an action.
   void _scheduleRange() {
@@ -84,7 +99,10 @@ class _ComposeDslSliverContentState extends State<_ComposeDslSliverContent> {
   }
 
   /// Reads the live root without reconstructing a snapshot of its descendants.
-  _ComposeDslNode get node => widget.renderer.node;
+  _ComposeProgramNode get node => widget.renderer.node;
+
+  /// Reads root parameters directly for the sliver-owned viewport callback.
+  Map<String, Object?> get props => node.props;
 
   /// Schedules layout after an observed root or item identity changes.
   void _invalidate() {
@@ -113,9 +131,9 @@ class _ComposeDslSliverContentState extends State<_ComposeDslSliverContent> {
     if (node.isDisposed) {
       return const SliverToBoxAdapter(child: SizedBox.shrink());
     }
-    final reads = <_ComposeDslNode>{};
+    final reads = <_ComposeProgramInstance>{};
     try {
-      return _ComposeDslReadScope.track(reads, _sliverContent);
+      return _ComposeProgramReadScope.track(reads, _sliverContent);
     } finally {
       for (final dependency in reads) {
         if (!dependency.isDisposed && _dependencies.add(dependency)) {
@@ -130,14 +148,13 @@ class _ComposeDslSliverContentState extends State<_ComposeDslSliverContent> {
     if (node.type != 'LazyColumn') {
       return SliverToBoxAdapter(child: widget.renderer);
     }
-    if (node.props['reverseLayout'] == true ||
-        node.props['autoScrollToEnd'] == true) {
+    if (props['reverseLayout'] == true || props['autoScrollToEnd'] == true) {
       throw StateError(
         'Embedded LazyColumn content cannot reverse or auto-scroll its parent viewport.',
       );
     }
-    final items = <_ComposeDslNode>[];
-    final dialogs = <_ComposeDslNode>[];
+    final items = <_ComposeProgramNode>[];
+    final dialogs = <_ComposeProgramNode>[];
     final content = node.slots['content'];
     final children = content != null && content.isNotEmpty
         ? content
@@ -149,12 +166,18 @@ class _ComposeDslSliverContentState extends State<_ComposeDslSliverContent> {
         items.add(child);
       }
     }
-    final window = node.props['viewport'] == null
+    final window = props['viewport'] == null
         ? null
-        : _ComposeLazyWindow.parse(node.props['viewport'], items.length);
+        : _ComposeLazyWindow.parse(props['viewport'], items.length);
+    if (_window?.contentRevision != window?.contentRevision ||
+        _window?.itemCount != window?.itemCount) {
+      _measuredExtents.clear();
+    }
     if (_window?.firstIndex != window?.firstIndex ||
         _window?.itemCount != window?.itemCount ||
         _window?.itemExtent != window?.itemExtent ||
+        _window?.variableExtent != window?.variableExtent ||
+        _window?.contentRevision != window?.contentRevision ||
         _window?.staticItemCount != window?.staticItemCount) {
       _lastRequestedRange = null;
       _pendingRange = null;
@@ -184,23 +207,23 @@ class _ComposeDslSliverContentState extends State<_ComposeDslSliverContent> {
         windowIndices[key] = window == null ? index : window.firstIndex + index;
       }
     }
-    final spacing = _number(node.props['spacing']) ?? 0;
+    final spacing = _number(props['spacing']) ?? 0;
     final alignment = Alignment(switch (_normalizeToken(
-      _string(node.props['horizontalAlignment']),
+      _string(props['horizontalAlignment']),
     )) {
       'center' || 'centerhorizontally' => 0,
       'end' || 'right' => 1,
       _ => -1,
     }, -1);
-    EdgeInsetsGeometry padding =
-        _commonPaddingFromProps(node.props) ?? EdgeInsets.zero;
-    for (final operation in _modifierOps(node.props['modifier'])) {
+    EdgeInsetsGeometry padding = _edgeInsetsFromValue(props['contentPadding']);
+    padding = padding.add(_commonPaddingFromProps(props) ?? EdgeInsets.zero);
+    for (final operation in _modifierOps(props['modifier'])) {
       if (_normalizeToken(_string(operation['name'])) == 'padding') {
         padding = padding.add(_edgeInsets(operation['args'] as List<Object?>));
       }
     }
     Widget listItem(
-      _ComposeDslNode child,
+      _ComposeProgramNode child,
       String path, {
       required bool addSpacing,
     }) => KeyedSubtree(
@@ -234,26 +257,34 @@ class _ComposeDslSliverContentState extends State<_ComposeDslSliverContent> {
         ? null
         : SliverLayoutBuilder(
             builder: (context, constraints) {
-              _requestRange(constraints, window, extent);
-              return SliverFixedExtentList(
-                itemExtent: extent,
-                delegate: SliverChildBuilderDelegate(
-                  (context, index) {
-                    final local = index - window.firstIndex;
-                    if (local < 0 || local >= windowItems.length) {
-                      return const SizedBox.shrink();
-                    }
-                    return listItem(
-                      windowItems[local],
-                      'content/${staticItemCount + index}',
-                      addSpacing: index + 1 < window.itemCount,
-                    );
-                  },
-                  childCount: window.itemCount,
-                  findChildIndexCallback: (key) =>
-                      key is ValueKey ? windowIndices[key.value] : null,
-                ),
+              if (!window.variableExtent) {
+                _requestRange(constraints, window, extent);
+              }
+              final delegate = SliverChildBuilderDelegate(
+                (context, index) {
+                  final local = index - window.firstIndex;
+                  if (local < 0 || local >= windowItems.length) {
+                    return SizedBox(height: _measuredExtents[index] ?? extent);
+                  }
+                  return listItem(
+                    windowItems[local],
+                    'content/${staticItemCount + index}',
+                    addSpacing: index + 1 < window.itemCount,
+                  );
+                },
+                childCount: window.itemCount,
+                findChildIndexCallback: (key) =>
+                    key is ValueKey ? windowIndices[key.value] : null,
               );
+              return window.variableExtent
+                  ? ComposeDslVariableSliverList(
+                      delegate: delegate,
+                      onLayoutItems: _observeItems,
+                    )
+                  : SliverFixedExtentList(
+                      itemExtent: extent,
+                      delegate: delegate,
+                    );
             },
           );
     return SliverMainAxisGroup(
@@ -278,14 +309,15 @@ class _ComposeDslSliverContentState extends State<_ComposeDslSliverContent> {
   }
 
   /// Builds one keyed row or persistent modal through the ordinary node renderer.
-  Widget _sliverItem(_ComposeDslNode child, String path) => _ComposeDslRenderer(
-    key: child.props['key'] == null ? null : ValueKey(child.props['key']),
-    node: child,
-    onAction: widget.renderer.onAction,
-    onTextInput: widget.renderer.onTextInput,
-    webViewHostContext: widget.renderer.webViewHostContext,
-    splitMarkdownContent: widget.renderer.splitMarkdownContent,
-    dispatchOnLoad: widget.renderer.dispatchOnLoad,
-    nodePath: '${widget.renderer.nodePath}:$path',
-  );
+  Widget _sliverItem(_ComposeProgramNode child, String path) =>
+      _ComposeProgramExecutor(
+        key: child.props['key'] == null ? null : ValueKey(child.props['key']),
+        node: child,
+        onAction: widget.renderer.onAction,
+        onTextInput: widget.renderer.onTextInput,
+        webViewHostContext: widget.renderer.webViewHostContext,
+        splitMarkdownContent: widget.renderer.splitMarkdownContent,
+        dispatchOnLoad: widget.renderer.dispatchOnLoad,
+        nodePath: '${widget.renderer.nodePath}:$path',
+      );
 }

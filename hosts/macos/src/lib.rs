@@ -1,5 +1,8 @@
 #![allow(non_snake_case)]
 
+#[cfg(target_os = "macos")]
+pub use operit_host_apple_native::AppleServiceDiscoveryHost as MacosServiceDiscoveryHost;
+
 #[cfg(all(feature = "daemon", target_os = "macos"))]
 #[path = "../../unix/daemon.rs"]
 pub mod daemon;
@@ -45,12 +48,8 @@ pub fn createRuntimeHostManager(
     let archiveStagingHost = Arc::new(operit_host_native_common::NativeArchiveStagingHost::new(
         runtimeRoot.clone(),
     ));
-    let runtimeStorageWriteHost =
-        Arc::new(operit_host_native_common::NativeRuntimeStorageHost::new(
-            runtimeRoot.clone(),
-            workspaceRoot.clone(),
-        ));
     let runtimeStorageHost = Arc::new(MacosRuntimeStorageHost::new(runtimeRoot, workspaceRoot));
+    let runtimeStorageWriteHost = runtimeStorageHost.clone();
     let runtimeSqliteHost = runtimeStorageHost.clone();
     let hostSecretStore = runtimeStorageHost.clone();
     HostManager::withFileSystemWebVisitSystemOperationAndManagedRuntimeHosts(
@@ -72,7 +71,7 @@ pub fn createRuntimeHostManager(
     .withHostRuntimeEventHost(Arc::new(MacosHostRuntimeEventHost::new()))
     .withHostRuntimeEventSchedulerHost(Arc::new(MacosHostRuntimeEventSchedulerHost::new()))
     .withHostJavaScriptRuntimeHost(Arc::new(MacosHostJavaScriptRuntimeHost::new()))
-    .withServiceDiscoveryHost(Arc::new(operit_host_native_common::ServiceDiscovery::ServiceDiscoveryProvider::default()))
+    .withServiceDiscoveryHost(Arc::new(operit_host_apple_native::AppleServiceDiscoveryHost::default()))
     .withHostRuntimeTaskSchedulerHost(Arc::new(MacosHostRuntimeTaskSchedulerHost::new()))
     .withPluginSdkIpcHost(Arc::new(MacosPluginSdkIpcHost::new()))
 }

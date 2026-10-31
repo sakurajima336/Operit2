@@ -1,7 +1,6 @@
 use std::sync::Arc;
 use operit_host_api::RuntimeStorageHost;
 use operit_store::PreferencesDataStore::{PreferencesDataStore, PreferencesDataStoreError, stringPreferencesKey};
-use operit_util::OperitPaths;
 
 /// Owns the versioned SidebarDockPreferences preference values.
 pub struct SidebarDockPreferences;
@@ -9,8 +8,13 @@ pub struct SidebarDockPreferences;
 impl SidebarDockPreferences {
     /// Opens this module's preference file and applies its declared migrations.
     pub(crate) fn store(storage: Arc<dyn RuntimeStorageHost>) -> PreferencesDataStore {
-        PreferencesDataStore::newWithStorage(storage, OperitPaths::customPreferenceStoragePath("sidebar_dock.preferences.json").expect("declared preference path"))
-            .withSchema(2, |version, preferences| match version {
+        PreferencesDataStore::newWithStorage(storage, operit_util::RuntimeStorageLayout::SIDEBAR_DOCK_PREFERENCES_PATH)
+.withSchema(2, Self::migratePreferences)
+    }
+
+    /// Applies the local storage migration owned by this preference module.
+    fn migratePreferences(version: u32, preferences: &mut operit_store::PreferencesDataStore::Preferences) -> Result<(), PreferencesDataStoreError> {
+        match version {
                 0 => Ok(()),
                 1 => {
                     let key = stringPreferencesKey("layout");
@@ -21,6 +25,7 @@ impl SidebarDockPreferences {
                     Ok(())
                 }
                 from => Err(PreferencesDataStoreError::MissingMigration { from, to: from + 1 }),
-            })
+            }
     }
+
 }

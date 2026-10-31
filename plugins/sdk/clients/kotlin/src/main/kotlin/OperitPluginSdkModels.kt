@@ -18,6 +18,41 @@ fun decodeNullableToolPackage(value: Any?): ToolPackage? = value?.let { decodeTo
 fun decodeNullableToolPkgContainerDetails(value: Any?): ToolPkgContainerDetails? = value?.let { decodeToolPkgContainerDetails(it) }
 fun decodeNullableToolPkgLogoBytes(value: Any?): ToolPkgLogoBytes? = value?.let { decodeToolPkgLogoBytes(it) }
 
+data class ToolDisplayDeclaration(
+    val label: Map<String, String>,
+    val icon: String,
+    val target_parameter: String?,
+    val result_renderer: ToolResultRenderer
+)
+
+fun decodeToolDisplayDeclaration(value: Any?): ToolDisplayDeclaration {
+    val input = value as Map<*, *>
+    return ToolDisplayDeclaration(
+        label = (input["label"] as Map<*, *>).entries.associate { entry -> entry.key as String to entry.value as String } as Map<String, String>,
+        icon = input["icon"] as String as String,
+        target_parameter = input["targetParameter"]?.let { it as String } as String?,
+        result_renderer = decodeToolResultRenderer(input["resultRenderer"]) as ToolResultRenderer,
+    )
+}
+
+/** Encodes a typed SDK model into its Link argument representation. */
+fun ToolDisplayDeclaration.toMessagePackValue(): Map<String, Any?> = mapOf(
+    "label" to this.label.entries.associate { entry -> entry.key to entry.value },
+    "icon" to this.icon,
+    "targetParameter" to this.target_parameter?.let { it },
+    "resultRenderer" to this.result_renderer.toMessagePackValue(),
+)
+
+enum class ToolResultRenderer { Directory, FileDiff, Text }
+fun decodeToolResultRenderer(value: Any?): ToolResultRenderer = ToolResultRenderer.valueOf(value.toString())
+
+/** Encodes the declared Link enum scalar. */
+fun ToolResultRenderer.toMessagePackValue(): String = when (this) {
+    ToolResultRenderer.Directory -> "directory"
+    ToolResultRenderer.FileDiff -> "fileDiff"
+    ToolResultRenderer.Text -> "text"
+}
+
 data class EnvVar(
     val name: String,
     val description: LocalizedText,
@@ -60,6 +95,7 @@ fun LocalizedText.toMessagePackValue(): Map<String, Any?> = mapOf(
 )
 
 data class PackageTool(
+    val display: ToolDisplayDeclaration?,
     val name: String,
     val description: LocalizedText,
     val parameters: List<PackageToolParameter>,
@@ -70,6 +106,7 @@ data class PackageTool(
 fun decodePackageTool(value: Any?): PackageTool {
     val input = value as Map<*, *>
     return PackageTool(
+        display = input["display"]?.let { decodeToolDisplayDeclaration(it) } as ToolDisplayDeclaration?,
         name = input["name"] as String as String,
         description = decodeLocalizedText(input["description"]) as LocalizedText,
         parameters = (input["parameters"] as List<*>).map { item -> decodePackageToolParameter(item) } as List<PackageToolParameter>,
@@ -80,6 +117,7 @@ fun decodePackageTool(value: Any?): PackageTool {
 
 /** Encodes a typed SDK model into its Link argument representation. */
 fun PackageTool.toMessagePackValue(): Map<String, Any?> = mapOf(
+    "display" to this.display?.let { it.toMessagePackValue() },
     "name" to this.name,
     "description" to this.description.toMessagePackValue(),
     "parameters" to this.parameters.map { item -> item.toMessagePackValue() },
@@ -459,6 +497,7 @@ data class ToolPkgChatComposerSlotRuntime(
     val id: String,
     val slot: String,
     val screen: String,
+    val screenExport: String?,
     val order: Int,
     val keepAlive: Boolean
 )
@@ -469,6 +508,7 @@ fun decodeToolPkgChatComposerSlotRuntime(value: Any?): ToolPkgChatComposerSlotRu
         id = input["id"] as String as String,
         slot = input["slot"] as String as String,
         screen = input["screen"] as String as String,
+        screenExport = input["screenExport"]?.let { it as String } as String?,
         order = (input["order"] as Number).toInt() as Int,
         keepAlive = input["keepAlive"] as Boolean as Boolean,
     )
@@ -479,12 +519,14 @@ fun ToolPkgChatComposerSlotRuntime.toMessagePackValue(): Map<String, Any?> = map
     "id" to this.id,
     "slot" to this.slot,
     "screen" to this.screen,
+    "screenExport" to this.screenExport?.let { it },
     "order" to this.order,
     "keepAlive" to this.keepAlive,
 )
 
 data class ToolPkgChatMessageMenuDialogRuntime(
     val screen: String,
+    val screenExport: String?,
     val title: LocalizedText
 )
 
@@ -492,6 +534,7 @@ fun decodeToolPkgChatMessageMenuDialogRuntime(value: Any?): ToolPkgChatMessageMe
     val input = value as Map<*, *>
     return ToolPkgChatMessageMenuDialogRuntime(
         screen = input["screen"] as String as String,
+        screenExport = input["screenExport"]?.let { it as String } as String?,
         title = decodeLocalizedText(input["title"]) as LocalizedText,
     )
 }
@@ -499,6 +542,7 @@ fun decodeToolPkgChatMessageMenuDialogRuntime(value: Any?): ToolPkgChatMessageMe
 /** Encodes a typed SDK model into its Link argument representation. */
 fun ToolPkgChatMessageMenuDialogRuntime.toMessagePackValue(): Map<String, Any?> = mapOf(
     "screen" to this.screen,
+    "screenExport" to this.screenExport?.let { it },
     "title" to this.title.toMessagePackValue(),
 )
 
@@ -576,6 +620,7 @@ data class ToolPkgContainerRuntime(
     val chatLifecycleHooks: List<ToolPkgFunctionHookRuntime>,
     val chatMessageMenuItems: List<ToolPkgChatMessageMenuItemRuntime>,
     val chatRuntimeHooks: List<ToolPkgFunctionHookRuntime>,
+    val chatResponseHooks: List<ToolPkgFunctionHookRuntime>,
     val hostEventHooks: List<ToolPkgHostEventHookRuntime>,
     val toolLifecycleHooks: List<ToolPkgFunctionHookRuntime>,
     val promptInputHooks: List<ToolPkgFunctionHookRuntime>,
@@ -632,6 +677,7 @@ fun decodeToolPkgContainerRuntime(value: Any?): ToolPkgContainerRuntime {
         chatLifecycleHooks = (input["chatLifecycleHooks"] as List<*>).map { item -> decodeToolPkgFunctionHookRuntime(item) } as List<ToolPkgFunctionHookRuntime>,
         chatMessageMenuItems = (input["chatMessageMenuItems"] as List<*>).map { item -> decodeToolPkgChatMessageMenuItemRuntime(item) } as List<ToolPkgChatMessageMenuItemRuntime>,
         chatRuntimeHooks = (input["chatRuntimeHooks"] as List<*>).map { item -> decodeToolPkgFunctionHookRuntime(item) } as List<ToolPkgFunctionHookRuntime>,
+        chatResponseHooks = (input["chatResponseHooks"] as List<*>).map { item -> decodeToolPkgFunctionHookRuntime(item) } as List<ToolPkgFunctionHookRuntime>,
         hostEventHooks = (input["hostEventHooks"] as List<*>).map { item -> decodeToolPkgHostEventHookRuntime(item) } as List<ToolPkgHostEventHookRuntime>,
         toolLifecycleHooks = (input["toolLifecycleHooks"] as List<*>).map { item -> decodeToolPkgFunctionHookRuntime(item) } as List<ToolPkgFunctionHookRuntime>,
         promptInputHooks = (input["promptInputHooks"] as List<*>).map { item -> decodeToolPkgFunctionHookRuntime(item) } as List<ToolPkgFunctionHookRuntime>,
@@ -688,6 +734,7 @@ fun ToolPkgContainerRuntime.toMessagePackValue(): Map<String, Any?> = mapOf(
     "chatLifecycleHooks" to this.chatLifecycleHooks.map { item -> item.toMessagePackValue() },
     "chatMessageMenuItems" to this.chatMessageMenuItems.map { item -> item.toMessagePackValue() },
     "chatRuntimeHooks" to this.chatRuntimeHooks.map { item -> item.toMessagePackValue() },
+    "chatResponseHooks" to this.chatResponseHooks.map { item -> item.toMessagePackValue() },
     "hostEventHooks" to this.hostEventHooks.map { item -> item.toMessagePackValue() },
     "toolLifecycleHooks" to this.toolLifecycleHooks.map { item -> item.toMessagePackValue() },
     "promptInputHooks" to this.promptInputHooks.map { item -> item.toMessagePackValue() },

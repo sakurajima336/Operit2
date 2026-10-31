@@ -1,6 +1,6 @@
 # Link / Peer / Transport / Space Architecture
 
-本文按 2026-10-13 的源码描述当前链路。Link 的三个基础操作是 **Call、Watch、Push**。
+Link 的三个基础操作是 **Call、Watch、Push**。
 传输统一和路由行为合规是两个独立结论：当前五种 transport 已统一承载标准 Link
 消息，共享客户端具备完整三个操作族；路由行为和 Host 边界仍有待清理项，见第 9 节。
 
@@ -43,7 +43,8 @@ Router 负责目标选择、Space 权限和转发。Peer runtime 负责身份、
 
 `operit-proxy-edge` 提供类型化服务投影，地址由 `operit-edge-contract` 共享。
 完整 CoreNode 拥有身份、Space、持久化及 Agent/Chat 运行时；Edge 提供设备服务及
-相应的 Space 控制能力，不等同于完整 CoreNode。
+相应的 Space 控制能力，不等同于完整 CoreNode。设备原生业务、配置与宿主插件的
+职责见 [Edge 架构](edge-architecture.md)。
 
 ## 2. 标准 Link 的三个操作族
 
@@ -74,8 +75,9 @@ CoreLinkResponse::Push(Opened | ItemAccepted | Closed，或错误)
 服务输入方法使用 `Target` 路由，因此上传等服务保留自身标准对象地址和权限检查。
 `NodeClient` 使用明确目标节点的相同 Push 路径。
 
-当前 Edge 服务没有声明输入流方法，其 Push 返回标准 method-not-found 错误。
-这是服务能力限制；transport 本身可以承载 Push。
+Edge 应用可以通过原生端点声明 Watch / Stream 和 Push / ReverseStream，
+当前固件与模拟器使用 `withStreamHandlers` 注册设备语音协议。没有注册对应输入端点时，
+Push 返回标准 method-not-found 错误；不能从某个服务不支持 Push 推断 transport 不支持。
 
 ## 3. 配对和会话控制
 
@@ -161,6 +163,15 @@ pushId，已打开的流保持所属会话和路由。
 HTTP 在同一连接标识下用持续 GET 响应体接收字节、用 POST 发送字节；连接标识只
 关联 HTTP 请求，不证明节点身份。WebSocket 同样收发统一 framing 的二进制数据。
 监听能力由安装的 Host API 能力决定。
+
+HTTP、WebSocket、TCP 使用同一个网络监听端口。`peer-link/transport/network.rs`
+按 Host 实例和实际绑定地址管理共享监听；每种 transport 只注册自己的处理器。
+原生 Host 的 `TcpHost` 负责绑定和接收，Core 有界读取连接前缀并完整回放，
+HTTP/WS 通过 `HttpServerHost::serveConnection` 使用已接收的 Host 字节流。
+HTTP 解析、WebSocket 升级和原生 socket 均留在 Host，TCP framing、配对和鉴权不变。
+仅开启 TCP 时直接接收，无需协议探测。端口为 0 时只分配一次，后续 transport
+使用实际端口；移除一种 transport 保留其它处理器，最后一种关闭后才释放端口。
+未提供已接收连接能力的 HTTP Host 仍可使用原有独立 HTTP/WS 监听接口。
 
 `PeerConnection` 对外提供 `send`、`receive`、`close`；`PeerLink` 提供 `connect`、
 `listen`。三个基础操作是这些 I/O 接口承载的协议，不是五种 transport 各自实现

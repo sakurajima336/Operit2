@@ -16,6 +16,9 @@ import 'workspace/WorkspaceSession.dart';
 class WorkspaceShell extends StatelessWidget {
   static final WorkspaceSession _session = WorkspaceSession();
 
+  /// Returns the workspace session shared by phone and desktop shells.
+  static WorkspaceSession get session => _session;
+
   const WorkspaceShell({
     super.key,
     required this.workspaceOpen,
@@ -65,9 +68,11 @@ class WorkspaceShell extends StatelessWidget {
         : null;
     return AdaptiveSidePanel(
       open: workspaceOpen,
+      widePanelPadding: EdgeInsets.zero,
       onOpenChanged: onWorkspaceOpenChanged,
       breakpoint: workspaceTabletBreakpoint,
       defaultWidth: workspaceDefaultTabletWidth,
+      defaultWidthFraction: workspaceDefaultWidthFraction,
       minWidth: workspaceMinWidth,
       minContentWidth: workspaceMinTabletChatWidth,
       resizeHandleHitWidth: workspaceResizeHandleHitWidth,

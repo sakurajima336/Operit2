@@ -2,6 +2,7 @@ import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:operit_ui/operit_ui.dart';
 import 'package:operit2/core/host/AppToastController.dart';
 import 'package:operit2/ui/common/AppToastHost.dart';
 import 'package:operit2/ui/common/MacNoticeScaffoldMessenger.dart';
@@ -11,6 +12,96 @@ void main() {
   setUp(AppToastController.instance.reset);
 
   tearDown(AppToastController.instance.reset);
+
+  for (final initiallyVisible in [false, true]) {
+    testWidgets(
+      'notice ${initiallyVisible ? "exit" : "entry"} retains the application background and input',
+      (tester) async {
+        final controller = AppToastController.instance;
+        final int? initialNotice = initiallyVisible
+            ? controller.show('Already queued')
+            : null;
+        const mediaKey = ValueKey('background-media');
+        await tester.pumpWidget(
+          MaterialApp(
+            builder: (context, child) => AppToastHost(
+              child: LiquidGlassBackdrop(
+                background: StatefulBuilder(
+                  key: mediaKey,
+                  builder: (context, setState) =>
+                      const ColoredBox(color: Colors.teal),
+                ),
+                child: child!,
+              ),
+            ),
+            home: const Scaffold(
+              backgroundColor: Colors.transparent,
+              body: TextField(),
+            ),
+          ),
+        );
+        await _pumpNotice(tester);
+        await tester.enterText(find.byType(TextField), 'Keep this draft');
+        final backdrop = tester.state(find.byType(LiquidGlassBackdrop));
+        final media = tester.state(find.byKey(mediaKey));
+        final input = tester.state(find.byType(EditableText));
+        final int? queuedNotice;
+        if (initialNotice == null) {
+          queuedNotice = controller.show('Added to queue');
+        } else {
+          queuedNotice = null;
+          controller.dismiss(initialNotice);
+        }
+        await _pumpNotice(tester);
+        expect(tester.state(find.byType(LiquidGlassBackdrop)), same(backdrop));
+        expect(tester.state(find.byKey(mediaKey)), same(media));
+        expect(tester.state(find.byType(EditableText)), same(input));
+        expect(find.text('Keep this draft'), findsOneWidget);
+        final extra = controller.show('Another queued message');
+        await _pumpNotice(tester);
+        controller.dismiss(extra);
+        if (queuedNotice != null) controller.dismiss(queuedNotice);
+        await _pumpNotice(tester);
+        expect(tester.state(find.byType(LiquidGlassBackdrop)), same(backdrop));
+        expect(tester.state(find.byKey(mediaKey)), same(media));
+        expect(tester.state(find.byType(EditableText)), same(input));
+        expect(tester.takeException(), isNull);
+        await tester.pumpWidget(const SizedBox.shrink());
+      },
+    );
+  }
+
+  testWidgets('dismissing a notice during child disposal waits for the frame', (
+    tester,
+  ) async {
+    final controller = AppToastController.instance;
+    final notice = controller.show('Chat notice');
+    final showChild = ValueNotifier<bool>(true);
+    addTearDown(showChild.dispose);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: AppToastHost(
+          child: ValueListenableBuilder<bool>(
+            valueListenable: showChild,
+            builder: (context, visible, child) => visible
+                ? _DismissNoticeOnDispose(noticeId: notice)
+                : const SizedBox.shrink(),
+          ),
+        ),
+      ),
+    );
+    await _pumpNotice(tester);
+    expect(find.text('Chat notice'), findsOneWidget);
+
+    showChild.value = false;
+    await tester.pump();
+    expect(tester.takeException(), isNull);
+    expect(controller.notices.value, isEmpty);
+    await _pumpNotice(tester);
+    expect(find.text('Chat notice'), findsNothing);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
 
   testWidgets('shows a host notice at the top-right of the window', (
     tester,
@@ -138,4 +229,26 @@ void _expectTopRightNotice(WidgetTester tester, String text) {
   expect(rect.right, lessThanOrEqualTo(window.width));
   expect(rect.right, greaterThan(window.width - 360));
   expect(rect.top, lessThan(120));
+}
+
+/// Matches the chat bridge dismissing its active notice when it is unmounted.
+class _DismissNoticeOnDispose extends StatefulWidget {
+  const _DismissNoticeOnDispose({required this.noticeId});
+
+  final int noticeId;
+
+  @override
+  State<_DismissNoticeOnDispose> createState() =>
+      _DismissNoticeOnDisposeState();
+}
+
+class _DismissNoticeOnDisposeState extends State<_DismissNoticeOnDispose> {
+  @override
+  void dispose() {
+    AppToastController.instance.dismiss(widget.noticeId);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => const SizedBox.shrink();
 }

@@ -9,6 +9,7 @@ import tarfile
 from pathlib import Path
 
 from release_artifacts import release_asset_name
+from cargo_build import cargo_build_environment
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -36,6 +37,8 @@ def run(command: list[str | Path], cwd: Path = REPO_ROOT, env: dict[str, str] | 
     merged_env = os.environ.copy()
     if env:
         merged_env.update(env)
+    if Path(command[0]).name.lower() in ("cargo", "cargo.exe"):
+        merged_env = cargo_build_environment(command, merged_env, cwd=cwd)
     subprocess_options: dict[str, object] = {}
     if os.name == "nt":
         startupinfo = subprocess.STARTUPINFO()
@@ -54,9 +57,9 @@ def run(command: list[str | Path], cwd: Path = REPO_ROOT, env: dict[str, str] | 
         **subprocess_options,
     )
     if completed.returncode != 0:
-        stderr_tail = (completed.stderr or "").strip()[-4000:]
-        if stderr_tail:
-            print(stderr_tail, file=sys.stderr, flush=True)
+        stderr_output = (completed.stderr or "").strip()
+        if stderr_output:
+            print(stderr_output, file=sys.stderr, flush=True)
         raise RuntimeError(
             f"Command failed with exit code {completed.returncode}: "
             + " ".join(str(part) for part in command)
@@ -202,7 +205,9 @@ def java_properties_value(value: str) -> str:
 
 
 def ensure_node_and_npm() -> None:
-    run(["node", "--version"])
+    version = subprocess.run(["node", "--version"], check=True, capture_output=True, text=True).stdout.strip()
+    if not version.startswith("v24."):
+        raise RuntimeError(f"Node.js 24 is required for builds; found {version or 'unknown version'}")
     run([node_package_command("npm"), "--version"])
 
 
@@ -354,7 +359,7 @@ def dart_pub_get(enforce_lockfile: bool = False, env: dict[str, str] | None = No
 
 def flutter_pub_get(enforce_lockfile: bool = False, env: dict[str, str] | None = None) -> None:
     """Resolves app dependencies and generates native plugin registrants with FVM Flutter."""
-    command = [flutter_command(), "pub", "get"]
+    command = [require_command("fvm"), "flutter", "pub", "get"]
     if enforce_lockfile:
         command.append("--enforce-lockfile")
     run(command, cwd=FLUTTER_APP_DIR, env=env)

@@ -20,8 +20,8 @@ use operit_providers::chat::llmprovider::AIService::{AiServiceError, SharedAiRes
 use operit_providers::chat::llmprovider::MediaLinkBuilder::MediaLinkBuilder;
 use operit_providers::chat::llmprovider::MediaLinkParser::MediaLinkParser;
 use operit_providers::chat::EnhancedAIService::{
-    EnhancedAIService, MessageCancellationToken, ResumeRequest, SendMessageCallbacks,
-    SendMessageOptions, SendMessageRuntime,
+    ChatGuidanceInbox, EnhancedAIService, MessageCancellationToken, ResumeRequest,
+    SendMessageCallbacks, SendMessageOptions, SendMessageRuntime,
 };
 use operit_providers::runtime_support::ChatConfigurationResult;
 use operit_store::CoreNodeIdentityStore::CoreNodeIdentityStore;
@@ -56,13 +56,12 @@ pub struct BuildUserMessageContentRequest {
     pub enableDirectVideoProcessing: bool,
     pub chatId: Option<String>,
     pub participantId: Option<String>,
-    /// Host callback used to surface a timed-out Prompt Input Hook.
-    pub onHookTimeout: Option<Arc<dyn Fn(String) + Send + Sync>>,
 }
 
 pub struct SendMessageRequest<'a> {
     pub chatConfiguration: ChatConfigurationResult,
     pub enhancedAiService: &'a mut EnhancedAIService,
+    pub guidanceInbox: Option<ChatGuidanceInbox>,
     pub chatId: Option<String>,
     pub messageContent: String,
     pub chatHistory: Vec<ChatMessage>,
@@ -185,15 +184,20 @@ pub fn logMessageTiming(stage: &str, startTimeMs: MessageTiming, details: Option
 }
 
 impl AIMessageManager {
-    /// Records display identity and the actual author, without persisting execution configuration.
+    /// Records execution ownership and the assistant's display identity separately.
     pub fn applyConfigurationIdentity(message: &mut ChatMessage, configuration: &ChatConfigurationResult) {
-        message.pluginExtensions.insert(
-            "host.chat.identity".into(),
-            serde_json::json!({
-                "title": configuration.profile.name,
-                "avatarUri": configuration.profile.avatarUri,
-            }),
-        );
+        if message.sender == "ai" {
+            message.pluginExtensions.insert(
+                "host.chat.identity".into(),
+                serde_json::json!({
+                    "title": configuration.profile.name,
+                    "avatarUri": configuration.profile.avatarUri,
+                }),
+            );
+        } else {
+            // The configured participant receives user input; it did not author it.
+            message.pluginExtensions.remove("host.chat.identity");
+        }
         message.pluginExtensions.insert(
             configuration.extensionOwner.clone(),
             serde_json::json!({ "participantId": configuration.profile.id }),
@@ -216,9 +220,9 @@ impl AIMessageManager {
             input: request.messageText,
             chat_id: request.chatId.clone(),
             participant_id: request.participantId.clone(),
-            on_hook_timeout: request.onHookTimeout.clone(),
         })
-        .await;
+        .await
+        .map_err(AiServiceError::RequestFailed)?;
         logMessageTiming(
             "buildUserMessageContent.processUserInput",
             promptInputStartTime,
@@ -342,8 +346,7 @@ impl AIMessageManager {
 
         let memory = match request.promptHistoryOverride.clone() {
             Some(promptHistory) => promptHistory,
-            None => Self::getMemoryFromMessages(
-                request.chatHistory.clone()),
+            None => Self::getMemoryFromMessages(request.chatHistory.clone(), &request.chatConfiguration)?,
         };
 
         let apiPreferences = ApiPreferences::getInstance();
@@ -399,6 +402,7 @@ impl AIMessageManager {
 
         let mut options = SendMessageOptions::new();
         options.cancellationToken = Some(cancellationToken);
+        options.guidanceInbox = request.guidanceInbox;
         options.message = request.messageContent;
         options.chatId = request.chatId;
         options.chatHistory = memoryForRequest;
@@ -562,9 +566,11 @@ impl AIMessageManager {
             (role, format!("#{}: {cleanedContent}", index + 1))
         }).collect::<Vec<_>>();
 
+        let startTime = ChatMessageTimestampAllocator::currentTimeMillis();
         let summary = enhancedAiService
             .generateSummary(conversationToSummarize, previousSummary)
             .await?;
+        let endTime = ChatMessageTimestampAllocator::currentTimeMillis();
         if summary.trim().is_empty() {
             return Ok(None);
         }
@@ -590,6 +596,9 @@ impl AIMessageManager {
             summaryWithQuotes.trim_end().to_string()
         };
 
+        let estimatedInputTokens = (summaryWithQuotes.len() * 3 / 2).max(1) as i64;
+        let estimatedOutputTokens = (finalSummary.len() / 2).max(1) as i64;
+
         Ok(Some(ChatMessage {
             sender: "summary".to_string(),
             parts: vec![operit_model::MessagePart::MessagePart::markdown(
@@ -599,6 +608,11 @@ impl AIMessageManager {
             )],
             timestamp: ChatMessageTimestampAllocator::next(),
             roleName: "system".to_string(),
+            inputTokens: estimatedInputTokens,
+            outputTokens: estimatedOutputTokens,
+            waitDurationMs: (endTime - startTime).max(1),
+            sentAt: startTime,
+            completedAt: endTime,
             ..ChatMessage::new("summary".to_string())
         }))
     }
@@ -608,8 +622,7 @@ impl AIMessageManager {
     pub async fn calculateStableContextWindow(
         request: StableContextWindowRequest<'_>,
     ) -> Result<i64, operit_providers::chat::llmprovider::AIService::AiServiceError> {
-        let memory = Self::getMemoryFromMessages(
-            request.chatHistory);
+        let memory = Self::getMemoryFromMessages(request.chatHistory, &request.runtime.chatConfiguration)?;
         request
             .enhancedAiService
             .estimateRequestWindowFromMemory(
@@ -665,16 +678,54 @@ impl AIMessageManager {
         false
     }
 
+    /// Projects history using persisted participant identities and the owner's explicit history policy.
     #[allow(non_snake_case)]
-    pub fn getMemoryFromMessages(messages: Vec<ChatMessage>) -> Vec<PromptTurn> {
+    pub fn getMemoryFromMessages(
+        messages: Vec<ChatMessage>, configuration: &ChatConfigurationResult,
+    ) -> Result<Vec<PromptTurn>, AiServiceError> {
         let lastSummaryIndex = messages.iter().rposition(|message| message.sender == "summary");
         let relevantMessages = match lastSummaryIndex { Some(index) => &messages[index..], None => messages.as_slice() };
-        relevantMessages.iter().flat_map(|message| match message.sender.as_str() {
-            "ai" => Self::assistantPromptTurnsFromParts(message),
-            "user" => vec![PromptTurn::new(PromptTurnKind::USER, message.displayText())],
-            "summary" => vec![PromptTurn::new(PromptTurnKind::SUMMARY, message.displayText())],
-            _ => Vec::new(),
-        }).collect()
+        let mut turns = Vec::new();
+        for message in relevantMessages {
+            match message.sender.as_str() {
+                "ai" if configuration.historyPolicy.isolateParticipants => {
+                    let author = message.pluginExtensions.get(&configuration.extensionOwner)
+                        .and_then(|identity| identity.get("participantId"))
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|id| !id.trim().is_empty())
+                        .ok_or_else(|| AiServiceError::RequestFailed(format!(
+                            "History message has no recorded participant: {}", message.timestamp)))?;
+                    if author == configuration.profile.id {
+                        turns.extend(Self::assistantPromptTurnsFromParts(message));
+                    } else {
+                        let name = message.pluginExtensions.get("host.chat.identity")
+                            .and_then(|identity| identity.get("title"))
+                            .and_then(serde_json::Value::as_str)
+                            .filter(|name| !name.trim().is_empty())
+                            .ok_or_else(|| AiServiceError::RequestFailed(format!(
+                                "History message has no recorded display identity: {}", message.timestamp)))?;
+                        let speech = MessagePartCodec::orderedParts(&message.parts).into_iter()
+                            .filter(|part| part.kind == MessagePartKind::Markdown)
+                            .map(|part| part.content.as_str()).collect::<Vec<_>>().join("\n");
+                        if !speech.trim().is_empty() {
+                            turns.push(PromptTurn::new(PromptTurnKind::USER,
+                                format!("[From role: {name}]\n{}", speech.trim())));
+                        }
+                    }
+                }
+                "ai" => turns.extend(Self::assistantPromptTurnsFromParts(message)),
+                "user" => {
+                    let content = message.displayText();
+                    let content = if configuration.historyPolicy.labelUserMessages && !content.trim().is_empty() {
+                        format!("[From user]\n{content}")
+                    } else { content };
+                    turns.push(PromptTurn::new(PromptTurnKind::USER, content));
+                }
+                "summary" => turns.push(PromptTurn::new(PromptTurnKind::SUMMARY, message.displayText())),
+                _ => {}
+            }
+        }
+        Ok(turns)
     }
 
     /// Converts stored assistant parts into provider turns while preserving tool boundaries.
@@ -939,7 +990,7 @@ impl AIMessageManager {
         {
             attributes.push_str(&format!(" node_id=\"{}\"", escape(nodeId)));
         }
-        if toolPath.starts_with("/app/data/temp/clean_on_exit/") {
+        if toolPath.starts_with("/app/data/data/chat_attachments/") {
             attributes.push_str(&format!(" path=\"{}\"", escape(&toolPath)));
         }
         if attachment.fileSize > 0 {
@@ -1374,6 +1425,80 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
+    /// Constructs an explicit descriptor for real history projection tests without a host runtime.
+    fn historyConfiguration(isolate: bool, labelUsers: bool) -> ChatConfigurationResult {
+        let profile = serde_json::json!({
+            "id":"author-id","name":"Display name","avatarUri":null,
+            "introPrompt":"role","userPreferencesText":"","openingStatement":"",
+            "modelBinding":{"providerId":"provider","modelId":"model"},"ttsConfigId":"voice",
+            "toolAccess":{"enabled":false,"allowedBuiltinTools":[],"allowedPackages":[],"allowedSkills":[],"allowedMcpServers":[]},"resources":[]
+        });
+        let mut configuration: ChatConfigurationResult = serde_json::from_value(serde_json::json!({
+            "contextKey":"context", "historyPolicy":{"isolateParticipants":isolate,"labelUserMessages":labelUsers},
+            "profile":profile,"participants":[profile],"executionData":{"version":1}
+        })).unwrap();
+        configuration.extensionOwner = "configuration-owner".into();
+        configuration
+    }
+
+    /// Builds exact persisted authors independently of the current participant roster or display names.
+    fn authoredHistory(id: &str, title: &str, parts: Vec<MessagePart>) -> ChatMessage {
+        let mut message = ChatMessage::new_with_parts("ai".into(), parts);
+        message.pluginExtensions.insert("configuration-owner".into(), serde_json::json!({"participantId":id}));
+        message.pluginExtensions.insert("host.chat.identity".into(), serde_json::json!({"title":title,"avatarUri":null}));
+        message
+    }
+
+    /// Keeps renamed own messages as assistant turns and treats same-name former members as reference context.
+    #[test]
+    fn participant_history_uses_ids_across_rename_and_removed_members() {
+        let configuration = historyConfiguration(true, true);
+        let own = authoredHistory("author-id", "Old name", vec![MessagePart::markdown("own".into(), 0, "My old reply".into())]);
+        let peer = authoredHistory("removed-peer", "Display name", vec![MessagePart::markdown("peer".into(), 0, "Another participant".into())]);
+        let turns = AIMessageManager::getMemoryFromMessages(vec![own, peer], &configuration).unwrap();
+        assert_eq!(turns[0].kind, PromptTurnKind::ASSISTANT);
+        assert_eq!(turns[0].content, "My old reply");
+        assert_eq!(turns[1].kind, PromptTurnKind::USER);
+        assert_eq!(turns[1].content, "[From role: Display name]\nAnother participant");
+    }
+
+    /// Excludes a peer's private thinking, status and tool protocol from another participant's reference text.
+    #[test]
+    fn participant_history_exposes_only_other_participants_speech() {
+        let peer = authoredHistory("peer", "Peer", vec![
+            MessagePart::thinking("thinking".into(), 0, "Private reasoning".into()),
+            MessagePart::markdown("speech".into(), 1, "Public reply".into()),
+            MessagePart::toolResult("tool".into(), 2, Some("call".into()), "read".into(), "success".into(), "Private tool output".into()),
+            MessagePart::status("status".into(), 3, "Internal status".into(), BTreeMap::new()),
+        ]);
+        let turns = AIMessageManager::getMemoryFromMessages(vec![peer], &historyConfiguration(true, true)).unwrap();
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].content, "[From role: Peer]\nPublic reply");
+    }
+
+    /// Applies group user labels after the last summary while preserving ordinary conversation histories.
+    #[test]
+    fn participant_history_labels_users_and_respects_summary_boundaries() {
+        let invalidOld = ChatMessage::new("ai".into());
+        let summary = ChatMessage::new_with_parts("summary".into(), vec![MessagePart::markdown("summary".into(), 0, "Summary".into())]);
+        let user = ChatMessage::new_with_parts("user".into(), vec![MessagePart::markdown("user".into(), 0, "Question".into())]);
+        let turns = AIMessageManager::getMemoryFromMessages(vec![invalidOld, summary, user.clone()], &historyConfiguration(true, true)).unwrap();
+        assert_eq!(turns[0].kind, PromptTurnKind::SUMMARY);
+        assert_eq!(turns[1].content, "[From user]\nQuestion");
+        let ordinary = AIMessageManager::getMemoryFromMessages(vec![user], &historyConfiguration(false, false)).unwrap();
+        assert_eq!(ordinary[0].content, "Question");
+    }
+
+    /// Rejects missing persisted authors or peer display identities rather than guessing from current names.
+    #[test]
+    fn participant_history_requires_persisted_author_identity() {
+        let configuration = historyConfiguration(true, true);
+        assert!(AIMessageManager::getMemoryFromMessages(vec![ChatMessage::new("ai".into())], &configuration).is_err());
+        let mut peer = authoredHistory("peer", "Peer", vec![MessagePart::markdown("peer".into(), 0, "Reply".into())]);
+        peer.pluginExtensions.remove("host.chat.identity");
+        assert!(AIMessageManager::getMemoryFromMessages(vec![peer], &configuration).is_err());
+    }
+
     #[test]
     fn message_identity_contains_no_execution_settings() {
         let profile = serde_json::json!({
@@ -1383,22 +1508,31 @@ mod tests {
             "ttsConfigId":"current-voice","toolAccess":{"enabled":false,"allowedBuiltinTools":[],"allowedPackages":[],"allowedSkills":[],"allowedMcpServers":[]},"resources":[]
         });
         let mut configuration: ChatConfigurationResult = serde_json::from_value(serde_json::json!({
-            "contextKey":"current","profile":profile,"participants":[profile],
+            "contextKey":"current","historyPolicy":{"isolateParticipants":false,"labelUserMessages":false},"profile":profile,"participants":[profile],
             "executionData":{"profile":profile,"private":"Runtime only"}
         })).unwrap();
         configuration.extensionOwner = "configuration-owner".into();
-        let mut message = ChatMessage::new("ai".into());
-        AIMessageManager::applyConfigurationIdentity(&mut message,&configuration);
-        assert_eq!(serde_json::to_value(&message.pluginExtensions).unwrap(),serde_json::json!({
-            "configuration-owner":{"participantId":"author-id"},
-            "host.chat.identity":{"title":"Display name","avatarUri":null}
-        }));
+        for sender in ["ai", "user"] {
+            let mut message = ChatMessage::new(sender.into());
+            message.pluginExtensions.insert("host.chat.identity".into(),
+                serde_json::json!({"title":"Operit","avatarUri":null}));
+            AIMessageManager::applyConfigurationIdentity(&mut message, &configuration);
+            let mut expected = serde_json::json!({
+                "configuration-owner":{"participantId":"author-id"}
+            });
+            if sender == "ai" {
+                expected["host.chat.identity"] = serde_json::json!({
+                    "title":"Display name","avatarUri":null
+                });
+            }
+            assert_eq!(serde_json::to_value(&message.pluginExtensions).unwrap(), expected);
+        }
     }
 
     #[test]
     fn attachment_markup_keeps_the_source_node_and_portable_tool_path() {
         let mut attachment = AttachmentInfo::new(
-            "/device-b/runtime/temp/clean_on_exit/report.pdf".into(),
+            "/device-b/runtime/data/chat_attachments/chat-a/attachment-a/report.pdf".into(),
             "报价单\".pdf".into(),
             "application/pdf".into(),
             3,
@@ -1407,9 +1541,9 @@ mod tests {
         let tag =
             AIMessageManager::buildAttachmentTag(&attachment, None, false, false, false).unwrap();
         assert!(tag.contains("node_id=\"core-b\""));
-        assert!(tag.contains("path=\"/app/data/temp/clean_on_exit/report.pdf\""));
+        assert!(tag.contains("path=\"/app/data/data/chat_attachments/chat-a/attachment-a/report.pdf\""));
         assert!(tag.contains("filename=\"报价单&quot;.pdf\""));
-        assert!(tag.contains("id=\"/app/data/temp/clean_on_exit/report.pdf\""));
+        assert!(tag.contains("id=\"/app/data/data/chat_attachments/chat-a/attachment-a/report.pdf\""));
         assert!(!tag.contains("/device-b/"));
     }
 
@@ -1417,7 +1551,7 @@ mod tests {
     fn remote_media_never_reads_the_current_file_host() {
         for mimeType in ["image/png", "audio/mpeg", "video/mp4"] {
             let mut attachment = AttachmentInfo::new(
-                "/device-b/runtime/temp/clean_on_exit/media".into(),
+                "/device-b/runtime/data/chat_attachments/chat-a/attachment-a/media".into(),
                 "media".into(),
                 mimeType.into(),
                 3,
@@ -1499,7 +1633,7 @@ mod tests {
             ],
         );
 
-        let turns = AIMessageManager::getMemoryFromMessages(vec![message]);
+        let turns = AIMessageManager::getMemoryFromMessages(vec![message], &historyConfiguration(false, false)).unwrap();
 
         assert_eq!(
             turns

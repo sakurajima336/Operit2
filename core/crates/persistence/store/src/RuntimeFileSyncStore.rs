@@ -26,6 +26,25 @@ pub struct RuntimeFileSyncStore {
     syncOperationStore: SyncOperationStore,
 }
 
+/// The losing side supplies coverage without resending its business contents.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileCoverage {
+    pub owner: crate::Transaction::Owner,
+    pub covered: std::collections::BTreeSet<String>,
+}
+
+/// The winning file plus the losing history coverage it supersedes.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileCorrectionReference {
+    pub source: RuntimeFileSyncReference,
+    pub superseded: Option<RuntimeFileSyncReference>,
+    /// Exact failed originals accepted by this correction, never a time cutoff.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub skipped: std::collections::BTreeSet<String>,
+}
+
 impl RuntimeFileSyncStore {
     /// Creates a runtime file synchronization store over one host and operation root.
     pub fn new(storageHost: Arc<dyn RuntimeStorageHost>, syncRootPath: impl Into<String>) -> Self {
@@ -40,32 +59,55 @@ impl RuntimeFileSyncStore {
     /// Writes a complete Space file snapshot and records its synchronization operation.
     #[allow(non_snake_case)]
     pub fn writeBytes(&self, storagePath: &str, content: &[u8]) -> Result<(), String> {
+        self.writeSnapshot(storagePath, content, false)
+    }
+
+    /// Seeds an unseen file below explicit edits and deletion tombstones in conflict order.
+    pub fn initializeBytes(&self, storagePath: &str, content: &[u8]) -> Result<(), String> {
+        self.writeSnapshot(storagePath, content, true)
+    }
+
+    /// Reports whether this file has synchronized state, even when it has been deleted.
+    pub fn hasSnapshot(&self, storagePath: &str) -> Result<bool, String> {
+        self.syncOperationStore.hasEntityVersion(RUNTIME_FILE_SYNC_DOMAIN, RUNTIME_FILE_SYNC_ENTITY_TYPE, storagePath)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Writes explicit changes and initial seeds through the same file synchronization path.
+    fn writeSnapshot(&self, storagePath: &str, content: &[u8], initial: bool) -> Result<(), String> {
+        if initial && self.hasSnapshot(storagePath)? {
+            return Ok(());
+        }
         requireSpaceFile(storagePath)?;
         if crate::PluginStorage::ownsFile(self.storageHost.clone(),storagePath).map_err(|e|e.to_string())? {
             return Err("Registered database files require record-level storage operations".into());
         }
         if storagePath.starts_with("workspaces/") {
+            // trackPaths re-hashes the overwritten file even when the new content
+            // has the same size as the old, so structured rewrites publish immediately.
             return crate::WorkspaceFileSyncStore::WorkspaceFileSyncStore::new(self.storageHost.clone(), self.syncRootPath.clone())
-                .track(|| self.storageHost.writeBytes(storagePath, content).map_err(|e| e.to_string()));
+                .trackPaths(&[storagePath], || self.storageHost.writeBytes(storagePath, content).map_err(|e| e.to_string()));
         }
         self.storageHost
             .writeBytes(storagePath, content)
             .map_err(|error| error.to_string())?;
-        self.recordSnapshot(storagePath, content)?;
+        self.recordSnapshot(storagePath, content, initial)?;
         Ok(())
     }
 
     /// Records observed bytes without rewriting an externally edited workspace file.
-    pub(crate) fn recordSnapshot(&self, storagePath: &str, content: &[u8]) -> Result<RuntimeFileSyncReference, String> {
+    pub(crate) fn recordSnapshot(&self, storagePath: &str, content: &[u8], initial: bool) -> Result<RuntimeFileSyncReference, String> {
         requireSpaceFile(storagePath)?;
         if crate::PluginStorage::ownsFile(self.storageHost.clone(),storagePath).map_err(|e|e.to_string())? {
             return Err("Registered database files require record-level storage operations".into());
         }
         let reference = self.storeBlob(content)?;
-        let deviceId = self
-            .syncOperationStore
-            .localDeviceId()
-            .map_err(|error| error.to_string())?;
+        let mut deviceId = self.syncOperationStore.localDeviceId().map_err(|error| error.to_string())?;
+        let mut payload = serde_json::to_value(&reference).map_err(|error| error.to_string())?;
+        if initial {
+            deviceId.push_str(":initial");
+            payload["initial"] = true.into();
+        }
         self.syncOperationStore
             .appendLocalOperation(
                 &deviceId,
@@ -75,7 +117,7 @@ impl RuntimeFileSyncStore {
                     entityId: storagePath.to_string(),
                     operation: "upsert".to_string(),
                     semantics: SyncOperationSemantics::EntityState,
-                    payload: serde_json::to_value(&reference).map_err(|error| error.to_string())?,
+                    payload,
                 },
             )
             .map_err(|error| error.to_string())?;
@@ -273,9 +315,17 @@ impl RuntimeFileSyncStore {
     pub fn requiredBlob(
         operation: &SyncOperation,
     ) -> Result<Option<RuntimeFileSyncReference>, String> {
+        if operation.entityType == "initialization" && operation.operation == "initialize" {
+            return operation.payload.get("transactionBlob").map(|reference| {
+                let reference = serde_json::from_value(reference.clone()).map_err(|e|e.to_string())?;
+                validateBlobReference(&reference)?;
+                Ok(reference)
+            }).transpose();
+        }
         if operation.domain != RUNTIME_FILE_SYNC_DOMAIN {
             return Ok(None);
         }
+        if runtimeStorageOwnership(&operation.entityId) != Ok(RuntimeStorageOwnership::Space) { return Ok(None); }
         if operation.entityType != RUNTIME_FILE_SYNC_ENTITY_TYPE {
             return Err(format!(
                 "unsupported runtime file entity type: {}",
@@ -289,6 +339,30 @@ impl RuntimeFileSyncStore {
             "delete" => Ok(None),
             other => Err(format!("unsupported runtime file sync operation: {other}")),
         }
+    }
+
+    /// Initializers use the existing verified blob transport instead of exceeding an operation page.
+    pub fn prepareTransactionForTransport(&self, mut operation: SyncOperation) -> Result<SyncOperation,String> {
+        if operation.operation == "initialize" && operation.entityType == "initialization" {
+            let bytes = serde_json::to_vec(&operation).map_err(|e|e.to_string())?;
+            if bytes.len() > 32 * 1024 {
+                let reference = self.storeBlob(&bytes)?;
+                operation.payload = serde_json::json!({"transactionBlob":reference});
+            }
+        }
+        Ok(operation)
+    }
+
+    pub fn hydrateTransaction(&self, operation: SyncOperation) -> Result<SyncOperation,String> {
+        if operation.operation != "initialize" || operation.entityType != "initialization" { return Ok(operation); }
+        let Some(reference) = Self::requiredBlob(&operation)? else { return Ok(operation); };
+        let original: SyncOperation = serde_json::from_slice(&self.readBlob(&reference)?).map_err(|e|e.to_string())?;
+        let mut envelope = original.clone();
+        envelope.payload = operation.payload.clone();
+        if envelope != operation || crate::Transaction::compaction::Initialization::decode(&original)?.is_none() {
+            return Err("Initialization blob differs from its envelope".into());
+        }
+        Ok(original)
     }
 
     /// Reports whether a verified content-addressed blob is available locally.
@@ -356,7 +430,7 @@ impl RuntimeFileSyncStore {
 
     /// Persists local bytes and returns their verified content identity.
     #[allow(non_snake_case)]
-    fn storeBlob(&self, content: &[u8]) -> Result<RuntimeFileSyncReference, String> {
+    pub fn storeBlob(&self, content: &[u8]) -> Result<RuntimeFileSyncReference, String> {
         let size = i64::try_from(content.len())
             .map_err(|_| "runtime file size does not fit i64".to_string())?;
         let reference = RuntimeFileSyncReference {
@@ -369,7 +443,7 @@ impl RuntimeFileSyncStore {
 
     /// Reads and verifies one complete content-addressed blob.
     #[allow(non_snake_case)]
-    pub(crate) fn readBlob(&self, reference: &RuntimeFileSyncReference) -> Result<Vec<u8>, String> {
+    pub fn readBlob(&self, reference: &RuntimeFileSyncReference) -> Result<Vec<u8>, String> {
         validateBlobReference(reference)?;
         let content = self
             .storageHost
@@ -452,6 +526,13 @@ fn requireSpaceFile(storagePath: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn local_model_files_cannot_enter_space_file_sync() {
+        for path in ["runtime/models/local/chat/llama_cpp/qwen/model.gguf", "runtime/models/local/chat/mnn/qwen/llm.mnn.weight", operit_util::RuntimeStorageLayout::RUNTIME_LOCAL_MODEL_REGISTRY_PATH] {
+            assert!(super::requireSpaceFile(path).is_err(), "{path}");
+        }
+    }
+
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
 
@@ -465,10 +546,23 @@ mod tests {
 
     #[derive(Clone, Default)]
     struct MemoryStorageHost {
+    journalHost: Arc<crate::transaction_test_host::TransactionJournalHost>,
         files: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
     }
 
     impl RuntimeStorageHost for MemoryStorageHost {
+    fn openTransactionDatabase(&self, path: &str) -> operit_host_api::HostResult<Box<dyn operit_host_api::RuntimeSqliteConnection>> {
+        self.journalHost.open(path)
+    }
+
+        /// Confirms synchronous in-memory publication without copying or rewriting bytes.
+        fn flushFile(&self, path: &str) -> operit_host_api::HostResult<()> {
+            if !self.exists(path)? {
+                return Err(operit_host_api::HostError::new("runtime storage entry not found"));
+            }
+            Ok(())
+        }
+
         /// Reports no physical runtime root for the in-memory host.
         fn runtimeRootDir(&self) -> Option<std::path::PathBuf> {
             None
@@ -507,6 +601,11 @@ mod tests {
                 .ok_or_else(|| HostError::new("test range length overflow"))?
                 .min(content.len());
             Ok(content[offset..end].to_vec())
+        }
+
+        /// Atomically publishes one complete in-memory test entry.
+        fn writeBytesAtomically(&self, path: &str, content: &[u8]) -> operit_host_api::HostResult<()> {
+            self.writeBytes(path, content)
         }
 
         /// Writes one in-memory runtime storage object.
@@ -633,4 +732,22 @@ mod tests {
         let store = RuntimeFileSyncStore::new(host, RUNTIME_SYNC_DIR_PATH);
         assert!(store.writeBytes(RUNTIME_CLIENT_LOG_PATH, b"log").is_err());
     }
+    #[test]
+    fn large_initialization_uses_verified_blobs_and_preserves_its_immutable_envelope() {
+        use crate::Transaction::{Backend,Owner,Data,Snapshot,compaction::Initialization};
+        let source = RuntimeFileSyncStore::new(Arc::new(MemoryStorageHost::default()),RUNTIME_SYNC_DIR_PATH);
+        let target = RuntimeFileSyncStore::new(Arc::new(MemoryStorageHost::default()),RUNTIME_SYNC_DIR_PATH);
+        let mut data = Data::empty(Owner {backend:Backend::DataStore,path:"runtime/config/preferences/blob.preferences.json".into(),format:1,layout:1});
+        data.values.insert("large".into(),serde_json::json!("content".repeat(20_000)));
+        let original = Initialization::from_snapshot(&Snapshot {node:"a".into(),data,covered:Default::default(),generation:0}).operation("preferences",false).unwrap();
+        let wire = source.prepareTransactionForTransport(original.clone()).unwrap();
+        assert!(serde_json::to_vec(&wire).unwrap().len() < 1024);
+        let reference = RuntimeFileSyncStore::requiredBlob(&wire).unwrap().unwrap();
+        assert!(target.hydrateTransaction(wire.clone()).is_err());
+        target.writeBlob(&reference,&source.readBlob(&reference).unwrap()).unwrap();
+        assert_eq!(target.hydrateTransaction(wire.clone()).unwrap(),original);
+        let mut forged = wire; forged.createdAt += 1;
+        assert!(target.hydrateTransaction(forged).is_err());
+    }
+
 }

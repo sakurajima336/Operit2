@@ -241,7 +241,7 @@ impl CharacterPluginWriter {
             let schema_version = started["snapshot"]["schemaVersion"].as_u64().ok_or("Preference schema version is missing")? as u32;
             self.request(StorageRequest::PreferencesFinishEdit { handle, token, edits, schema_version })?;
         }
-        if !memory.is_empty() { self.request(StorageRequest::Commit { handle: self.handle.clone(), mutations: memory })?; }
+        if !memory.is_empty() { self.request(StorageRequest::Commit { handle: self.handle.clone(), mutations: memory, guards: Vec::new() })?; }
         Ok(())
     }
 
@@ -253,7 +253,7 @@ impl CharacterPluginWriter {
         }])
     }
 
-    /// Adopts one complete JSON object and verifies its exact source payload.
+    /// Adopts one complete JSON object without replacing a different saved record.
     pub fn adoptRecord(&self, collection: &str, key: &str, value: Value) -> Result<(), String> {
         if let Some(existing) = self.get(collection, key)? {
             if existing["value"] != value {
@@ -262,9 +262,6 @@ impl CharacterPluginWriter {
             return Ok(());
         }
         self.commit(vec![self.mutation(collection, key, value.clone())?])?;
-        if self.get(collection, key)?.ok_or("Imported record missing")?["value"] != value {
-            return Err(format!("Imported JSON verification failed: {collection}/{key}"));
-        }
         Ok(())
     }
 
@@ -377,14 +374,6 @@ impl CharacterPluginWriter {
                 RUNTIME_SYNC_DIR_PATH,
             )
             .writeBytes(&target, &bytes)?;
-            if self
-                .storage
-                .readBytes(&target)
-                .map_err(|error| error.to_string())?
-                != bytes
-            {
-                return Err(format!("Migrated resource verification failed: {target}"));
-            }
         }
         for (owner, bytes) in data.documents {
             let target = format!("{}/{}", self.directory, ownerDocumentPath(&owner));
@@ -393,14 +382,6 @@ impl CharacterPluginWriter {
                 RUNTIME_SYNC_DIR_PATH,
             )
             .writeBytes(&target, &bytes)?;
-            if self
-                .storage
-                .readBytes(&target)
-                .map_err(|error| error.to_string())?
-                != bytes
-            {
-                return Err(format!("Migrated document verification failed: {owner}"));
-            }
         }
         for page in rows.chunks(999) {
             let mut mutations = Vec::new();
@@ -409,16 +390,6 @@ impl CharacterPluginWriter {
             }
             mutations.push(self.mutation(META_COLLECTION, "state", metadata.clone())?);
             self.commit(mutations)?;
-            for (collection, key, expected) in page {
-                let entry = self
-                    .get(collection, key)?
-                    .ok_or("Migrated record is missing")?;
-                if entry["value"] != *expected {
-                    return Err(format!(
-                        "Migrated record verification failed: {collection}/{key}"
-                    ));
-                }
-            }
         }
         metadata["migrationStatus"] = json!("complete");
         self.commit(vec![
@@ -428,7 +399,8 @@ impl CharacterPluginWriter {
                 source,
                 json!({"complete":true,"cleanupPaths":data.cleanup_paths,"cleanupComplete":false,"themeTargets":theme_targets}),
             )?,
-        ])
+        ])?;
+        super::CharacterPluginLayout::prepareMetadata(self.storage.clone(),&format!("{}/meta.preferences.json",self.directory))
     }
 }
 
@@ -522,10 +494,7 @@ pub struct DroppedLegacyRecords {
     pub documentChunks: usize,
 }
 
-/// Removes list references whose tags, shared stores, characters or memories are absent from the snapshot.
-/// Retired deletion paths removed target records without clearing every referring record.
-/// Group identities, retained member order indices and timestamps remain unchanged.
-/// Records with malformed fields stay for validateMigrationData to report precisely.
+/// Removes stale list references while retaining role identities and primary selections for user rebinding.
 pub fn dropUnresolvableRecords(data: &mut CharacterMigrationData) -> DroppedLegacyRecords {
     let mut dropped = DroppedLegacyRecords::default();
     let tags = data
@@ -541,7 +510,7 @@ pub fn dropUnresolvableRecords(data: &mut CharacterMigrationData) -> DroppedLega
     for card in &mut data.cards {
         let card_id = &card.id;
         card.attachedTagIds.retain(|tag_id| {
-            if tag_id.trim().is_empty() || tags.contains(tag_id.as_str()) {
+            if tags.contains(tag_id.as_str()) {
                 return true;
             }
             AppLogger::w(
@@ -552,9 +521,7 @@ pub fn dropUnresolvableRecords(data: &mut CharacterMigrationData) -> DroppedLega
             false
         });
         card.sharedMemoryMounts.retain(|mount| {
-            if mount.sharedMemoryId.trim().is_empty()
-                || stores.contains(mount.sharedMemoryId.as_str())
-            {
+            if stores.contains(mount.sharedMemoryId.as_str()) {
                 return true;
             }
             AppLogger::w(
@@ -576,9 +543,7 @@ pub fn dropUnresolvableRecords(data: &mut CharacterMigrationData) -> DroppedLega
     for group in &mut data.groups {
         let group_id = &group.id;
         group.members.retain(|member| {
-            if member.characterCardId.trim().is_empty()
-                || cards.contains(member.characterCardId.as_str())
-            {
+            if cards.contains(member.characterCardId.as_str()) {
                 return true;
             }
             AppLogger::w(
@@ -654,109 +619,23 @@ fn migrateCharacterModelBinding(card: &mut CharacterCard) {
     }
 }
 
-/// Validates owned records and list references while preserving unresolved primary selections.
+/// Requires only a readable active selection; deleted reference targets are cleaned independently.
 fn validateMigrationData(data: &CharacterMigrationData) -> Result<(), String> {
-    let cards = data
-        .cards
-        .iter()
-        .map(|card| card.id.as_str())
-        .collect::<BTreeSet<_>>();
-    let groups = data
-        .groups
-        .iter()
-        .map(|group| group.id.as_str())
-        .collect::<BTreeSet<_>>();
-    let tags = data
-        .tags
-        .iter()
-        .map(|tag| tag.id.as_str())
-        .collect::<BTreeSet<_>>();
-    let stores = data
-        .stores
-        .iter()
-        .map(|store| store.id.as_str())
-        .collect::<BTreeSet<_>>();
-    let owners = data
-        .owners
-        .iter()
-        .map(|owner| requiredString(owner, "ownerKey"))
-        .collect::<Result<BTreeSet<_>, _>>()?;
-    for card in &data.cards {
-        if !owners.contains(format!("character:{}", card.id).as_str()) {
-            return Err("Imported character owner is missing".to_string());
-        }
-        for tag in &card.attachedTagIds {
-            if !tags.contains(tag.as_str()) {
-                return Err(format!("Missing imported tag: {tag}"));
-            }
-        }
-        // Preserve the exact primary selection for explicit rebinding; execution validates its target.
-        for mount in &card.sharedMemoryMounts {
-            if !stores.contains(mount.sharedMemoryId.as_str()) {
-                return Err("Imported memory mount is missing".to_string());
-            }
-        }
-    }
-    for group in &data.groups {
-        let value = serde_json::to_value(group).map_err(|error| error.to_string())?;
-        for member in value["members"]
-            .as_array()
-            .ok_or("Invalid imported group members")?
-        {
-            if !cards.contains(requiredString(member, "characterCardId")?) {
-                return Err("Imported group character is missing".to_string());
-            }
-        }
-    }
-    for owner in &owners {
-        if !data.documents.contains_key(*owner) {
-            return Err(format!("Imported owner document is missing: {owner}"));
-        }
-    }
-    let mut memories = BTreeSet::new();
-    let mut uuids = BTreeSet::new();
-    for (collection, _, envelope) in &data.records {
-        let owner = requiredString(envelope, "ownerKey")?;
-        if !owners.contains(owner) {
-            return Err("Imported record owner is missing".to_string());
-        }
-        if collection == "memories" {
-            memories.insert((owner, requiredString(&envelope["record"], "id")?));
-            if envelope["record"]["isDocumentNode"] == true {
-                uuids.insert((owner, requiredString(&envelope["record"], "uuid")?));
-            }
-        }
-    }
-    for (collection, _, envelope) in &data.records {
-        let owner = requiredString(envelope, "ownerKey")?;
-        let record = &envelope["record"];
-        if collection == "links" {
-            for field in ["sourceMemoryId", "targetMemoryId"] {
-                if !memories.contains(&(owner, requiredString(record, field)?)) {
-                    return Err("Imported relationship target is missing".to_string());
-                }
-            }
-        }
-        if collection == "chunks"
-            && !uuids.contains(&(owner, requiredString(record, "memoryUuid")?))
-        {
-            return Err("Imported document chunk parent is missing".to_string());
-        }
-    }
     let active = data
         .active
         .as_ref()
         .ok_or("Imported active selection is missing")?;
-    if let Some(card) = active.get("CharacterCard") {
-        if !cards.contains(requiredString(card, "id")?) {
-            return Err("Imported active character is missing".to_string());
-        }
-    } else if let Some(group) = active.get("CharacterGroup") {
-        if !groups.contains(requiredString(group, "id")?) {
-            return Err("Imported active group is missing".to_string());
-        }
-    } else {
+    let active = active.as_object().ok_or("Invalid imported active selection")?;
+    if active.len() != 1 {
         return Err("Invalid imported active selection".to_string());
+    }
+    // Preserve deleted role selections exactly; explicit activation and execution validate their targets.
+    let selection = active
+        .get("CharacterCard")
+        .or_else(|| active.get("CharacterGroup"))
+        .ok_or("Invalid imported active selection")?;
+    if requiredString(selection, "id")?.is_empty() {
+        return Err("Imported active selection identity is empty".to_string());
     }
     Ok(())
 }
@@ -1419,34 +1298,60 @@ fn adoptCoreConfigurationRows(
     Ok(())
 }
 
-/// Migrates released Core preferences and memory exactly once before any character plugin runtime opens.
+/// Migrates available document resources and clears lost attachments without discarding memory text.
+fn migrateMemoryResources(
+    storage: &dyn RuntimeStorageHost,
+    directory: &str,
+    owner: &str,
+    record: &mut Value,
+    resources: &mut BTreeMap<String, Vec<u8>>,
+) -> Result<(), String> {
+    for field in ["documentPath", "chunkIndexFilePath"] {
+        if let Some(source) = record[field].as_str() {
+            let source = legacyResourceStoragePath(source)?;
+            if !storage.exists(&source).map_err(|error| error.to_string())? {
+                record[field] = Value::Null;
+                continue;
+            }
+            if let Some(relative) = legacyResourceRelativePath(&source) {
+                validateResourcePath(relative)?;
+                let destination = format!(
+                    "{}/resources/{relative}",
+                    ownerDocumentPath(owner).trim_end_matches("/USER.md")
+                );
+                let bytes = storage
+                    .readBytes(&source)
+                    .map_err(|error| error.to_string())?;
+                resources.insert(destination.clone(), bytes);
+                record[field] = json!(publicResourcePath(&format!(
+                    "{}/{destination}",
+                    directory
+                ))?);
+            } else {
+                record[field] = json!(publicResourcePath(&source)?);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Migrates released Core data only while its legacy character preference file still exists.
 pub fn migrateLegacyCharacters(paths: RuntimeStorePaths) -> Result<(), String> {
-    let storage = defaultRuntimeStorageHost();
-    let database_path = format!(
-        "{}/meta.preferences.json",
-        operit_store::ExtensionStore::ExtensionStore::spaceDataPath(PLUGIN_ID)?
-    );
-    let source_exists = storage
-        .exists(&runtimeStoragePath(
-            &paths.runtime_storage_path(CHARACTER_CARDS_PREFERENCES_PATH),
-        ))
-        .map_err(|error| error.to_string())?;
-    let database_exists = storage
-        .exists(&database_path)
-        .map_err(|error| error.to_string())?;
-    if !source_exists && !database_exists {
-        let database = operit_store::db::AppDatabase::AppDatabase::getDatabase(paths)
-            .map_err(|error| error.to_string())?;
-        database.store().execute(
-            "UPDATE sync_sql_operations SET schemaVersion=8 WHERE domain='chat' AND schemaVersion=7",
-            Vec::new(),
-        ).map_err(|error| error.to_string())?;
+    migrateLegacyCharactersWithStorage(paths, defaultRuntimeStorageHost())
+}
+
+/// Exits before opening plugin storage or chat history after the final legacy source was removed.
+fn migrateLegacyCharactersWithStorage(
+    paths: RuntimeStorePaths,
+    storage: Arc<dyn RuntimeStorageHost>,
+) -> Result<(), String> {
+    if !storage
+        .exists(CHARACTER_CARDS_PREFERENCES_PATH)
+        .map_err(|error| error.to_string())?
+    {
         return Ok(());
     }
     let writer = CharacterPluginWriter::open(defaultRuntimeSqliteHost(), storage.clone())?;
-    if !source_exists && writer.get("imports", "operit2-v27")?.is_none() {
-        return adoptCoreExtensions(paths, &writer);
-    }
     if writer.get("imports", "operit2-v27")?.is_none() {
         let mut data = legacyPreferences(&paths)?;
         let owners = data
@@ -1492,31 +1397,7 @@ pub fn migrateLegacyCharacters(paths: RuntimeStorePaths) -> Result<(), String> {
                         }
                     }
                     if collection == "memories" {
-                        for field in ["documentPath", "chunkIndexFilePath"] {
-                            if let Some(source) = record[field].as_str() {
-                                let source = legacyResourceStoragePath(source)?;
-                                if let Some(relative) = legacyResourceRelativePath(&source) {
-                                    validateResourcePath(relative)?;
-                                    let destination = format!(
-                                        "{}/resources/{relative}",
-                                        ownerDocumentPath(&owner).trim_end_matches("/USER.md")
-                                    );
-                                    let bytes = storage
-                                        .readBytes(&source)
-                                        .map_err(|error| error.to_string())?;
-                                    data.resources.insert(destination.clone(), bytes);
-                                    record[field] = json!(publicResourcePath(&format!(
-                                        "{}/{destination}",
-                                        writer.directory
-                                    ))?);
-                                } else {
-                                    storage
-                                        .readBytes(&source)
-                                        .map_err(|error| error.to_string())?;
-                                    record[field] = json!(publicResourcePath(&source)?);
-                                }
-                            }
-                        }
+                        migrateMemoryResources(storage.as_ref(), &writer.directory, &owner, &mut record, &mut data.resources)?;
                     }
                     data.records.push(ownerRecord(collection, &owner, record)?);
                 }
@@ -1595,6 +1476,7 @@ fn cleanupLegacyCharacters(writer: &CharacterPluginWriter) -> Result<(), String>
     }
     let api_preferences =
         crate::data::preferences::ApiPreferences::ApiPreferences::store(writer.storage.clone());
+    api_preferences.data().map_err(|error| error.to_string())?;
     api_preferences
         .try_edit_result(
             |saved| -> Result<(), operit_store::PreferencesDataStore::PreferencesDataStoreError> {
@@ -1639,10 +1521,11 @@ fn cleanupLegacyCharacters(writer: &CharacterPluginWriter) -> Result<(), String>
             },
         )
         .map_err(|error| error.to_string())?;
-    if marker["cleanupComplete"] == true {
-        return Ok(());
-    }
+    // Keep the startup trigger until every other cleanup step has completed.
     for (path, memory_owner) in validated_paths {
+        if path == CHARACTER_CARDS_PREFERENCES_PATH {
+            continue;
+        }
         if writer
             .storage
             .exists(path)
@@ -1672,7 +1555,18 @@ fn cleanupLegacyCharacters(writer: &CharacterPluginWriter) -> Result<(), String>
         }
     }
     marker["cleanupComplete"] = json!(true);
-    writer.commit(vec![writer.mutation("imports", "operit2-v27", marker)?])
+    writer.commit(vec![writer.mutation("imports", "operit2-v27", marker)?])?;
+    if writer
+        .storage
+        .exists(CHARACTER_CARDS_PREFERENCES_PATH)
+        .map_err(|error| error.to_string())?
+    {
+        writer
+            .storage
+            .delete(CHARACTER_CARDS_PREFERENCES_PATH, false)
+            .map_err(|error| error.to_string())?;
+    }
+    super::CharacterPluginLayout::prepare(writer.storage.clone())
 }
 
 /// Retains the exact source target and a complete independent theme for restartable adoption.
@@ -1683,12 +1577,11 @@ struct ThemeBinding {
     config: ThemeConfig,
 }
 
-/// Holds exact cleanup inputs and allocated theme identities until migration completes.
+/// Holds allocated theme identities until migration completes.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct ThemeMigrationPlan {
     bindings: Vec<ThemeBinding>,
     activeConfigId: Option<String>,
-    sourceEntries: Vec<(String, Value)>,
     complete: bool,
 }
 
@@ -1704,7 +1597,7 @@ fn themePrefix(collection: &str, id: &str) -> Result<String, String> {
 }
 
 impl CharacterPluginWriter {
-    /// Migrates supported appearance, verifies both owners, then removes all obsolete scoped preferences.
+    /// Imports usable role themes and removes obsolete preferences without blocking on lost bindings.
     pub fn migrateThemes(
         &self,
         source: &str,
@@ -1731,94 +1624,78 @@ impl CharacterPluginWriter {
         if plan.complete {
             return Ok(());
         }
-        let manager = ThemeConfigManager::new(self.storage.clone());
-        let configs = plan
-            .bindings
-            .iter()
-            .map(|binding| binding.config.clone())
-            .collect::<Vec<_>>();
-        manager
-            .importLegacyConfigurations(&configs, plan.activeConfigId.as_deref())
-            .map_err(|error| error.to_string())?;
-        // Validate every retained role before publishing any binding batch.
         let mut rows = Vec::new();
+        let mut configs = Vec::new();
         for binding in &plan.bindings {
-            let entry = self
-                .get(&binding.collection, &binding.key)?
-                .ok_or_else(|| format!("Migrated theme target is missing: {}", binding.key))?;
+            let Some(entry) = self.get(&binding.collection, &binding.key)? else {
+                continue;
+            };
             let mut role = entry["value"].clone();
             match role.get("themeConfigId") {
                 Some(Value::Null) => role["themeConfigId"] = json!(binding.config.id),
                 Some(Value::String(id)) if id == &binding.config.id => {}
-                _ => {
-                    return Err(format!(
-                        "Migration would replace an existing theme binding: {}",
-                        binding.key
-                    ));
-                }
+                _ => continue,
             }
+            configs.push(binding.config.clone());
             rows.push((binding.collection.clone(), binding.key.clone(), role));
         }
+        let retained = configs
+            .iter()
+            .map(|config| config.id.as_str())
+            .collect::<BTreeSet<_>>();
+        let mut abandoned = plan
+            .bindings
+            .iter()
+            .filter(|binding| !retained.contains(binding.config.id.as_str()))
+            .map(|binding| binding.config.clone())
+            .collect::<Vec<_>>();
+        if !abandoned.is_empty() {
+            let mut referenced = BTreeSet::new();
+            for collection in ["cards", "groups"] {
+                for entry in self.list(collection)? {
+                    if let Some(id) = entry["value"]["themeConfigId"].as_str() {
+                        referenced.insert(id.to_string());
+                    }
+                }
+            }
+            abandoned.retain(|config| !referenced.contains(&config.id));
+        }
+        let manager = ThemeConfigManager::new(self.storage.clone());
+        let imported = manager
+            .importLegacyConfigurations(&configs, plan.activeConfigId.as_deref(), &abandoned)
+            .map_err(|error| error.to_string())?;
+        rows.retain(|(_, _, role)| {
+            role["themeConfigId"]
+                .as_str()
+                .is_some_and(|id| imported.contains(id))
+        });
         for page in rows.chunks(1000) {
             let mutations = page
                 .iter()
                 .map(|(collection, key, role)| self.mutation(collection, key, role.clone()))
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|error| error.to_string())?;
+                .collect::<Result<Vec<_>, _>>()?;
             self.commit(mutations)?;
-        }
-        for binding in &plan.bindings {
-            let entry = self
-                .get(&binding.collection, &binding.key)?
-                .ok_or("Migrated theme target disappeared during verification")?;
-            if entry["value"]["themeConfigId"] != binding.config.id
-                || manager
-                    .get(binding.config.id.clone())
-                    .map_err(|error| error.to_string())?
-                    != binding.config
-            {
-                return Err(format!(
-                    "Migrated theme binding verification failed: {}",
-                    binding.key
-                ));
-            }
         }
         if clean_preferences {
             let preferences =
                 crate::data::preferences::UserPreferencesManager::UserPreferencesManager::store(
                     self.storage.clone(),
                 );
-            preferences.try_edit_result(|saved| -> Result<(), operit_store::PreferencesDataStore::PreferencesDataStoreError> {
-                let source_keys = plan.sourceEntries.iter().map(|(key, _)| key.as_str()).collect::<BTreeSet<_>>();
-                for (key, _) in saved.iterEntries() {
-                    if (key.starts_with("character_card_theme_") || key.starts_with("character_group_theme_"))
-                        && !source_keys.contains(key)
-                    {
-                        return Err(operit_store::PreferencesDataStore::PreferencesDataStoreError::Message(
-                            format!("Legacy theme source added a key before cleanup: {key}")));
+            preferences
+                .edit(|saved| {
+                    let keys = saved
+                        .iterEntries()
+                        .filter(|(key, _)| {
+                            key.starts_with("character_card_theme_")
+                                || key.starts_with("character_group_theme_")
+                        })
+                        .map(|(key, _)| key.to_string())
+                        .collect::<Vec<_>>();
+                    for key in keys {
+                        saved.remove(&stringPreferencesKey(&key));
                     }
-                }
-                for (key, expected) in &plan.sourceEntries {
-                    if let Some(actual) = saved.get(&stringPreferencesKey(key)) {
-                        if actual != expected {
-                            return Err(operit_store::PreferencesDataStore::PreferencesDataStoreError::Message(
-                                format!("Legacy theme source changed before cleanup: {key}")));
-                        }
-                    }
-                }
-                for (key, _) in &plan.sourceEntries {
-                    saved.remove(&stringPreferencesKey(key));
-                }
-                Ok(())
-            }).map_err(|error| error.to_string())?;
-            let saved = preferences.data().map_err(|error| error.to_string())?;
-            if plan
-                .sourceEntries
-                .iter()
-                .any(|(key, _)| saved.contains(&stringPreferencesKey(key)))
-            {
-                return Err("Legacy theme preference cleanup verification failed".to_string());
-            }
+                })
+                .map_err(|error| error.to_string())?;
         }
         self.commit(vec![self.mutation(
             "imports",
@@ -1833,59 +1710,50 @@ impl CharacterPluginWriter {
         preferences: &Preferences,
         targets: &[(String, String)],
     ) -> Result<ThemeMigrationPlan, String> {
-        let state = self
-            .get("meta", "state")?
-            .ok_or("Character selection metadata is missing")?;
-        let active = &state["value"]["active"];
+        let state = self.get("meta", "state")?;
+        let active = state.as_ref().map(|entry| &entry["value"]["active"]);
         let mut plan = ThemeMigrationPlan {
             bindings: Vec::new(),
             activeConfigId: None,
-            sourceEntries: preferences
-                .iterEntries()
-                .filter(|(key, _)| {
-                    key.starts_with("character_card_theme_")
-                        || key.starts_with("character_group_theme_")
-                })
-                .map(|(key, value)| (key.to_string(), value.clone()))
-                .collect(),
             complete: false,
         };
         let mut identities = BTreeSet::new();
         for (collection, id) in targets {
             if !identities.insert((collection, id)) {
-                return Err(format!("Duplicate legacy theme target: {collection}/{id}"));
+                continue;
             }
-            let role = self
-                .get(collection, id)?
-                .ok_or_else(|| format!("Legacy theme target is missing: {id}"))?;
-            let role = &role["value"];
-            let prefix = themePrefix(collection, id)?;
-            let (snapshot, _) = readLegacyCharacterThemeSnapshot(preferences, &prefix)
-                .map_err(|error| error.to_string())?;
-            let config = ThemeConfig {
-                // Persist the allocated identity in the plan before publishing either owner.
-                id: uuid::Uuid::new_v4().to_string(),
-                name: requiredString(role, "name")?.to_string(),
-                snapshot,
-                createdAt: role["createdAt"]
-                    .as_i64()
-                    .ok_or("Invalid legacy theme creation time")?,
-                updatedAt: role["updatedAt"]
-                    .as_i64()
-                    .ok_or("Invalid legacy theme update time")?,
+            let Some(entry) = self.get(collection, id)? else {
+                continue;
             };
-            match role.get("themeConfigId") {
-                Some(Value::Null) => {}
-                Some(Value::String(value)) if value == &config.id => {}
-                _ => {
-                    return Err(format!(
-                        "Migration would replace an existing theme binding: {id}"
-                    ));
-                }
+            let role = &entry["value"];
+            if role.get("themeConfigId") != Some(&Value::Null) {
+                continue;
             }
-            if (collection == "cards" && active["CharacterCard"]["id"] == *id)
-                || (collection == "groups" && active["CharacterGroup"]["id"] == *id)
-            {
+            let Ok(prefix) = themePrefix(collection, id) else {
+                continue;
+            };
+            let Ok((snapshot, _)) = readLegacyCharacterThemeSnapshot(preferences, &prefix) else {
+                continue;
+            };
+            let (Some(name), Some(createdAt), Some(updatedAt)) = (
+                role["name"].as_str(),
+                role["createdAt"].as_i64(),
+                role["updatedAt"].as_i64(),
+            ) else {
+                continue;
+            };
+            let config = ThemeConfig {
+                // Persist the allocated identity before publishing either owner.
+                id: uuid::Uuid::new_v4().to_string(),
+                name: name.to_string(),
+                snapshot,
+                createdAt,
+                updatedAt,
+            };
+            if active.is_some_and(|active| {
+                (collection == "cards" && active["CharacterCard"]["id"] == *id)
+                    || (collection == "groups" && active["CharacterGroup"]["id"] == *id)
+            }) {
                 plan.activeConfigId = Some(config.id.clone());
             }
             plan.bindings.push(ThemeBinding {
@@ -1902,9 +1770,9 @@ impl CharacterPluginWriter {
         let marker = self
             .get("imports", "operit2-v27")?
             .ok_or("Core character import is missing")?;
-        let targets: Vec<(String, String)> = serde_json::from_value(
-            marker["value"]["themeTargets"].clone(),
-        ).map_err(|error| error.to_string())?;
+        let targets: Vec<(String, String)> =
+            serde_json::from_value(marker["value"]["themeTargets"].clone())
+                .map_err(|error| error.to_string())?;
         let preferences =
             crate::data::preferences::UserPreferencesManager::UserPreferencesManager::store(
                 self.storage.clone(),

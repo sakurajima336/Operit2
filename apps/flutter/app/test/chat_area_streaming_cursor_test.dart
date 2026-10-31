@@ -19,6 +19,7 @@ import 'package:operit2/ui/common/markdown/StreamMarkdownRendererState.dart';
 import 'package:operit2/ui/features/chat/components/ChatArea.dart';
 import 'package:operit2/ui/features/chat/components/ChatMessageExtent.dart';
 import 'package:operit2/ui/features/chat/components/ChatScrollNavigator.dart';
+import 'package:operit2/ui/features/chat/components/MessageContextMenu.dart';
 import 'package:operit2/ui/features/chat/components/part/StructuredMessagePartRenderer.dart';
 import 'package:operit2/ui/features/chat/components/part/ThinkToolsXmlNodeGrouper.dart';
 import 'package:operit2/ui/features/chat/components/part/ToolDisplayComponents.dart';
@@ -43,6 +44,35 @@ class _PositionPeakController extends ScrollController {
 
 /// Verifies transcript rendering and scroll ownership across asynchronous updates.
 void main() {
+  testWidgets('refreshes cached message actions when chat busy state changes', (
+    tester,
+  ) async {
+    final scrollController = ScrollController();
+    final autoScrollToBottom = ValueNotifier<bool>(false);
+    addTearDown(scrollController.dispose);
+    addTearDown(autoScrollToBottom.dispose);
+    final message = _heightTestMessage(0);
+    for (final busy in [false, true, false]) {
+      await tester.pumpWidget(
+        _chatArea(
+          message: message,
+          isLoading: busy,
+          scrollController: scrollController,
+          autoScrollToBottom: autoScrollToBottom,
+        ),
+      );
+      await tester.pump();
+      expect(
+        tester
+            .widget<MessageContextMenu>(find.byType(MessageContextMenu))
+            .isChatBusy,
+        busy,
+      );
+    }
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
   testWidgets(
     'replacing the chat viewport keeps one origin on the owner controller',
     (tester) async {
@@ -632,12 +662,25 @@ void main() {
             List.filled(80, 'Continued live output').join('\n'),
           ),
         );
-      await _pumpRenderBoundary(tester);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 200));
+      await tester.pump();
       expect(
         scrollController.position.maxScrollExtent,
         greaterThan(initialOffset),
       );
+      // Growth must be visible before the follower catches up, then settle
+      // promptly rather than driving frames for several seconds.
       expect(scrollController.position.extentAfter, greaterThan(1));
+      await tester.pump(const Duration(milliseconds: 120));
+      expect(scrollController.offset, greaterThan(initialOffset));
+      expect(scrollController.position.extentAfter, greaterThan(1));
+      await tester.pump(const Duration(milliseconds: 140));
+      await tester.pump();
+      expect(scrollController.position.extentAfter, lessThanOrEqualTo(1));
+      tester.binding.debugAssertNoTransientCallbacks("Follower should have settled");
+      expect(tester.binding.transientCallbackCount, 0);
+      expect(tester.binding.hasScheduledFrame, isFalse);
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox());
     },
@@ -1531,7 +1574,7 @@ void main() {
       find.byKey(const ValueKey<String>('assistant-markdown-surface')),
       findsOneWidget,
     );
-    expect(find.byType(CompactToolDisplay), findsOneWidget);
+    expect(find.byType(ToolCallRow), findsOneWidget);
   });
 
   testWidgets(
@@ -1987,10 +2030,16 @@ class _ScriptedGeneratedChatBridge extends OperitRuntimeBridge {
     }
   }
 
-  /// Rejects encoded calls because this harness only exercises watch streams.
+  /// Declares an empty plugin catalog while keeping unrelated calls unsupported.
   @override
-  Future<Uint8List> callBytes(CoreCallRequest request) {
-    throw UnimplementedError();
+  Future<Uint8List> callBytes(CoreCallRequest request) async {
+    switch (request.methodName) {
+      case 'getToolPkgNavigationEntries':
+      case 'getToolPkgUiRoutes':
+        return encodeCoreLink([0, const <Object?>[]]);
+      default:
+        throw UnimplementedError();
+    }
   }
 
   /// Rejects client-owned streams because this harness only exercises watches.

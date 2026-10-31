@@ -6,6 +6,9 @@ use tokio::sync::oneshot;
 
 const DISCOVERY_INTERVAL_MS: u64 = 3_000;
 const MAX_CONNECTING_PEERS: usize = 4;
+/// Policy rejections (`PEER_CONNECTION_REVOKED`) are deterministic until an admin
+/// admits the peer again, so probing them at the discovery interval is pure waste.
+const POLICY_REVOKED_BACKOFF_MS: u64 = 60_000;
 
 pub(super) struct AvailabilityWorker {
     stop: oneshot::Sender<()>,
@@ -25,7 +28,7 @@ impl HostRuntimePeerService {
 
     /// Starts bounded, independent connection attempts; established channels monitor themselves.
     pub(super) fn startAvailabilityWorker(&self) -> Result<(), CoreLinkError> {
-        let mut worker = self.state.availability.lock().map_err(|_| error("Peer availability lock poisoned"))?;
+        let mut worker = self.state.availability.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if worker.is_some() { return Ok(()); }
         let scheduler = self.state.host.hostRuntimeTaskSchedulerHost.clone()
             .ok_or_else(|| error("Host scheduler is not installed"))?;
@@ -34,8 +37,11 @@ impl HostRuntimePeerService {
         let (stop, mut stopped) = oneshot::channel();
         let (done, finished) = oneshot::channel();
         scheduler.scheduleHostRuntimeAsyncTask("peer-availability", Box::new(move || Box::pin(async move {
+            // The subscription shares the Host browser with manual scans and lives only as long as this worker.
+            let _discovery = state.upgrade().and_then(|state| HostRuntimePeerService { state }.subscribeDiscovery());
             let mut pending = FuturesUnordered::<LocalBoxFuture<'static, (String, Result<(), CoreLinkError>)>>::new();
             let mut connecting = BTreeSet::new();
+            let mut policyRevokedUntil = BTreeMap::<String, std::time::Instant>::new();
             let mut tick = tasks.waitForHostRuntimeDelay(0);
             let mut lastPeer = None;
             loop {
@@ -46,6 +52,9 @@ impl HostRuntimePeerService {
                         if let Some((node, result)) = result {
                             connecting.remove(&node);
                             if let Err(error) = result {
+                                if error.code == "PEER_CONNECTION_REVOKED" {
+                                    policyRevokedUntil.insert(node.clone(), std::time::Instant::now() + std::time::Duration::from_millis(POLICY_REVOKED_BACKOFF_MS));
+                                }
                                 if let Some(state) = state.upgrade() {
                                     HostRuntimePeerService { state }.refreshPeerAvailability(&node);
                                 }
@@ -64,20 +73,21 @@ impl HostRuntimePeerService {
                                 continue;
                             }
                         };
+                        let now = std::time::Instant::now();
+                        policyRevokedUntil.retain(|_, until| *until > now);
                         // Round-robin admission prevents unreachable peers from monopolizing dial slots.
                         let mut peers = peers;
                         peers.sort_by(|left, right| left.nodeId.cmp(&right.nodeId));
                         let split = peers.partition_point(|peer| lastPeer.as_ref().is_some_and(|last| &peer.nodeId <= last));
                         peers.rotate_left(split);
                         for peer in peers {
+                            if policyRevokedUntil.contains_key(&peer.nodeId) { continue; }
                             if service.requirePeerConnectionAllowed(&peer.nodeId).is_err() {
                                 service.refreshPeerAvailability(&peer.nodeId);
                                 continue;
                             }
                             if connecting.contains(&peer.nodeId) || service.hasLiveChannel(&peer.nodeId) { continue; }
-                            // Dialing is pointless while a return connection already carries calls.
-                            if service.dialSuppressed(&peer.nodeId) { continue; }
-                            if !(peer.outbound || service.spaceOutbound(&peer.nodeId).is_ok()) { continue; }
+                            if !peer.outbound { continue; }
                             if connecting.len() >= MAX_CONNECTING_PEERS.min(service.state.limits.concurrentProbes) { break; }
                             let node = peer.nodeId;
                             lastPeer = Some(node.clone());
@@ -85,7 +95,9 @@ impl HostRuntimePeerService {
                             let service = service.clone();
                             pending.push(Box::pin(async move {
                                 // The acquisition carries its own connect deadline.
-                                let result = service.acquirePooledChannel(&node).await.map(drop);
+                                let result = crate::fault_isolation::link(
+                                    &format!("connect peer={node}"), service.acquireChannel(&node),
+                                ).await.map(drop);
                                 (node, result)
                             }));
                         }
@@ -101,25 +113,10 @@ impl HostRuntimePeerService {
 
     /// Cancels connection establishment and waits without retaining the worker state lock.
     pub(super) async fn stopAvailabilityWorker(&self) {
-        let worker = self.state.availability.lock().unwrap().take();
+        let worker = self.state.availability.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
         if let Some(AvailabilityWorker { stop, done }) = worker {
             let _ = stop.send(());
             let _ = done.await;
         }
     }
-}
-
-/// Established reusable sessions use the channel's own bounded exchange. This
-/// keeps correlation, cancellation safety and close-on-timeout in one place.
-pub(super) async fn probeConnectedSession(channel: &Channel) -> Result<(), CoreLinkError> {
-    if channel.duplex().is_some() {
-        let id = nextCoreRouteRequestId("serial-ping");
-        match channel.exchange(CoreLinkRequest::Call(CoreCallRequest::new(
-            id.clone(), "$peer.keepalive", "ping", CoreValue::Null,
-        ))).await? {
-            CoreLinkResponse::Call(CoreCallResponse { requestId, result: Ok(CoreValue::Null) }) if requestId.0 == id => {},
-            _ => { channel.close().await; return Err(error("Serial keepalive response mismatch")); }
-        }
-    }
-    Ok(())
 }

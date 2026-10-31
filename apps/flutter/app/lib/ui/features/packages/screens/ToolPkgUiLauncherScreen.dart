@@ -1,6 +1,7 @@
 // ignore_for_file: file_names
 
 import 'dart:async';
+import '../../../../core/compose/compose_program_buffer.dart' as compose_buffer;
 import 'ComposeDslImageSource.dart';
 import '../../../../core/application/PluginHotReload.dart';
 import 'dart:math' as math;
@@ -8,8 +9,11 @@ import 'dart:math' as math;
 import 'package:flutter/foundation.dart'
     show listEquals, debugPrintSynchronously;
 import 'package:flutter/material.dart';
+import 'package:operit_ui/operit_ui.dart'
+    show operitDesignBridgeEnabled, OperitDesignSource;
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 import '../../../common/components/PageActivityMixin.dart';
 import '../../../../core/link/CoreLinkProtocol.dart';
 import '../../../../core/logging/ClientLogger.dart';
@@ -18,6 +22,9 @@ import '../../../../core/theme/PluginThemeSnapshot.dart';
 import '../../../../core/proxy/generated/CoreProxyClients.g.dart';
 import '../../../../core/proxy/generated/CoreProxyModels.g.dart' as core_proxy;
 import '../../../common/components/AdaptiveSidePanel.dart';
+import '../../../common/contributions/PluginWorkspacePresentation.dart';
+import '../../chat/components/WorkspaceShell.dart';
+import '../../../theme/OperitGlassSurface.dart';
 import '../../../common/components/M3LoadingIndicator.dart';
 import '../../../common/icons/MaterialIconNameResolver.dart';
 import '../../../common/markdown/StreamMarkdownRenderer.dart';
@@ -30,6 +37,10 @@ import 'compose_dsl/lazy_viewport.dart';
 import 'compose_dsl/action_scheduler.dart';
 import 'compose_dsl/execution_owner.dart';
 import '../../../common/components/SwipeActions.dart';
+import '../../chat/components/workspace/file_preview/syntax/WorkspaceSyntaxLanguage.dart';
+import '../../chat/components/workspace/file_preview/syntax/WorkspaceSyntaxLexer.dart';
+import '../../chat/components/workspace/file_preview/syntax/WorkspaceSyntaxPalette.dart';
+import '../../chat/components/workspace/file_preview/syntax/WorkspaceSyntaxToken.dart';
 
 part 'compose_dsl/compose_host.dart';
 part 'compose_dsl/dialog_host.dart';
@@ -39,7 +50,9 @@ part 'compose_dsl/text_field.dart';
 part 'compose_dsl/canvas_painter.dart';
 part 'compose_dsl/size_reporting.dart';
 part 'compose_dsl/render_models.dart';
-part 'compose_dsl/retained_nodes.dart';
+part 'compose_dsl/program_store.dart';
+part 'compose_dsl/program_executor.dart';
+part 'compose_dsl/program_host.dart';
 part 'compose_dsl/modifiers.dart';
 part 'compose_dsl/value_parsers.dart';
 part 'compose_dsl/renderer.dart';
@@ -51,11 +64,21 @@ part 'compose_dsl/box_layout.dart';
 part 'compose_dsl/flex_layout.dart';
 part 'compose_dsl/desktop_widget.dart';
 part 'compose_dsl/material_controls.dart';
+part 'compose_dsl/selection_controls.dart';
 part 'compose_dsl/navigation_nodes.dart';
 part 'compose_dsl/interactive_nodes.dart';
 part 'compose_dsl/renderer_slots.dart';
 part 'compose_dsl/image.dart';
 part 'compose_dsl/pager.dart';
+part 'compose_dsl/presentation_nodes.dart';
+
+/// Allows a secondary surface to drain its session before destroying its engine.
+class ToolPkgUiSessionController {
+  Future<void> Function()? _close;
+  Future<void> close() async {
+    await _close?.call();
+  }
+}
 
 class ToolPkgUiLauncherScreen extends StatefulWidget {
   /// Creates a routable or embedded screen using the existing Compose host.
@@ -64,6 +87,7 @@ class ToolPkgUiLauncherScreen extends StatefulWidget {
     required this.clients,
     required this.plugin,
     this.initialRouteId,
+    this.sessionController,
     this.embeddedScreenPath,
     this.showLauncherChrome = true,
     this.showLoadingIndicator = true,
@@ -83,6 +107,7 @@ class ToolPkgUiLauncherScreen extends StatefulWidget {
   final String? embeddedScreenPath;
   final bool showLauncherChrome;
   final bool showLoadingIndicator;
+  final ToolPkgUiSessionController? sessionController;
 
   /// Places session-owned content into the embedding surface.
   final ToolPkgUiContentBuilder contentBuilder;
@@ -178,9 +203,10 @@ class _ToolPkgUiLauncherScreenState extends State<ToolPkgUiLauncherScreen> {
   final _actionScheduler = ComposeDslActionScheduler();
   Future<void>? _renderTail;
   Future<void> _reloadTail = Future<void>.value();
+  Future<void> _navigationTail = Future<void>.value();
   int _reloadGeneration = 0;
   bool _reloading = false;
-  final _ComposeDslNodeStore _nodeStore = _ComposeDslNodeStore();
+  final _ComposeProgramStore _programStore = _ComposeProgramStore();
   final Map<String, _ComposeDslPendingCommand> _composePending = {};
   String? _composeSessionId;
   Object? _composeSessionError;
@@ -204,6 +230,7 @@ class _ToolPkgUiLauncherScreenState extends State<ToolPkgUiLauncherScreen> {
     if (const bool.fromEnvironment('OPERIT_PROFILE_PLUGIN_UI')) {
       _firstTreeWatch.start();
     }
+    widget.sessionController?._close = _closeSession;
     ComposeDslWebViewHostRegistry.ensureHostInteractionRegistered();
     PluginHotReload.revision.addListener(_reloadDevelopmentPackage);
   }
@@ -313,6 +340,7 @@ class _ToolPkgUiLauncherScreenState extends State<ToolPkgUiLauncherScreen> {
     );
     try {
       await _dispatchAction(
+        _actionOwnerGeneration,
         '__operit_theme_changed',
         pluginThemeSnapshot(scheme),
       );
@@ -683,18 +711,18 @@ class _ToolPkgUiLauncherScreenState extends State<ToolPkgUiLauncherScreen> {
       final watch = const bool.fromEnvironment('OPERIT_PROFILE_COMPOSE_STAGES')
           ? (Stopwatch()..start())
           : null;
-      _nodeStore.apply(update);
+      _programStore.apply(update);
       if (watch != null) {
         debugPrintSynchronously(
           'event=compose_pipeline_stage stage=dart-node-apply '
           'durationMs=${(watch.elapsedMicroseconds / 1000).toStringAsFixed(3)} '
           'wallMicros=${DateTime.now().microsecondsSinceEpoch} request=${event.requestId} '
-          'revision=${update.revision} nodes=${update.upserts.length}',
+          'bytes=${update.buffer.length}',
         );
       }
     }
     if (oldRoot == null && update == null) return;
-    final root = _nodeStore.root;
+    final root = _programStore.root;
     _renderResult = _ComposeDslRenderResult(
       tree: root,
       actionResult: event.actionResult,
@@ -834,11 +862,25 @@ class _ToolPkgUiLauncherScreenState extends State<ToolPkgUiLauncherScreen> {
     }
   }
 
+  /// Stops new render ownership and awaits stream/engine release before host teardown.
+  Future<void> _closeSession() async {
+    _reloading = true;
+    _routeLoadGeneration++;
+    _actionOwnerGeneration++;
+    await _renderTail;
+    final executionContext = _activeExecutionContext;
+    _activeExecutionContext = null;
+    if (executionContext != null) {
+      await _releaseExecutionContext(executionContext);
+    }
+  }
+
   /// Releases the active ToolPkg context when this page leaves the widget tree.
   @override
   void dispose() {
+    widget.sessionController?._close = null;
     PluginHotReload.revision.removeListener(_reloadDevelopmentPackage);
-    _nodeStore.dispose();
+    _programStore.dispose();
     _routeLoadGeneration += 1;
     final executionContext = _activeExecutionContext;
     _activeExecutionContext = null;
@@ -855,9 +897,12 @@ class _ToolPkgUiLauncherScreenState extends State<ToolPkgUiLauncherScreen> {
     super.dispose();
   }
 
-  /// Waits for text synchronization without serializing ordinary UI actions.
-  Future<Object?> _dispatchAction(String actionId, [Object? payload]) {
-    final routeGeneration = _actionOwnerGeneration;
+  /// Dispatches only actions owned by the renderer that created the callback.
+  Future<Object?> _dispatchAction(
+    int routeGeneration,
+    String actionId, [
+    Object? payload,
+  ]) {
     return _actionScheduler.dispatchAction(() {
       if (!_isCurrentActionOwner(routeGeneration)) return Future.value(null);
       return _dispatchActionCore(
@@ -869,9 +914,12 @@ class _ToolPkgUiLauncherScreenState extends State<ToolPkgUiLauncherScreen> {
     });
   }
 
-  /// Preserves keystroke order across all text fields in this page.
-  Future<Object?> _dispatchTextInput(String actionId, String text) {
-    final routeGeneration = _actionOwnerGeneration;
+  /// Preserves keystroke order for text fields belonging to the current renderer.
+  Future<Object?> _dispatchTextInput(
+    int routeGeneration,
+    String actionId,
+    String text,
+  ) {
     return _actionScheduler.dispatchTextInput(() {
       if (!_isCurrentActionOwner(routeGeneration)) return Future.value(null);
       return _dispatchActionCore(
@@ -883,9 +931,12 @@ class _ToolPkgUiLauncherScreenState extends State<ToolPkgUiLauncherScreen> {
     });
   }
 
-  /// Gives WebView actions the same text barrier while preserving error delivery.
-  Future<Object?> _dispatchWebViewAction(String actionId, [Object? payload]) {
-    final routeGeneration = _actionOwnerGeneration;
+  /// Keeps WebView requests bound to their renderer across the text barrier.
+  Future<Object?> _dispatchWebViewAction(
+    int routeGeneration,
+    String actionId, [
+    Object? payload,
+  ]) {
     return _actionScheduler.dispatchAction(() {
       if (!_isCurrentActionOwner(routeGeneration)) return Future.value(null);
       return _dispatchActionCore(
@@ -958,7 +1009,7 @@ class _ToolPkgUiLauncherScreenState extends State<ToolPkgUiLauncherScreen> {
 
   /// Host input refreshes do not change the owner of actions already running.
   bool _isCurrentActionOwner(int generation) =>
-      mounted && generation == _actionOwnerGeneration;
+      mounted && !_reloading && generation == _actionOwnerGeneration;
 
   /// Delivers results only to the presentation that still owns this route load.
   void _notifyActionResult(Object? result, {required int routeGeneration}) {
@@ -1071,12 +1122,49 @@ class _ToolPkgUiLauncherScreenState extends State<ToolPkgUiLauncherScreen> {
   void _navigateCommands(
     List<({String routeId, Map<String, Object?> args})> commands,
   ) {
-    for (final command in commands) {
-      AppRouterGateway.navigate(
-        routeId: command.routeId,
-        args: command.args,
-        source: RouteEntrySource.script,
-      );
+    if (commands.isEmpty) return;
+    final generation = _actionOwnerGeneration;
+    _navigationTail = _navigationTail.then(
+      (_) => _applyNavigationCommands(commands, generation),
+    );
+  }
+
+  /// Routes through the declared surface without requiring a special action return value.
+  Future<void> _applyNavigationCommands(
+    List<({String routeId, Map<String, Object?> args})> commands,
+    int generation,
+  ) async {
+    try {
+      for (final command in commands) {
+        if (!_isCurrentActionOwner(generation)) return;
+        final hostState = Map<String, Object?>.of(widget.initialState)
+          ..remove('input');
+        final presentation = await PluginWorkspacePresentation.fromNavigation(
+          clients: widget.clients,
+          sourceOwnerPackageName: widget.plugin.packageName,
+          routeId: command.routeId,
+          args: command.args,
+          language: Localizations.localeOf(context).languageCode,
+          hostState: hostState,
+        );
+        if (!_isCurrentActionOwner(generation)) return;
+        if (presentation != null) {
+          WorkspaceShell.session.openPluginPage(presentation);
+        } else {
+          AppRouterGateway.navigate(
+            routeId: command.routeId,
+            args: command.args,
+            source: RouteEntrySource.script,
+          );
+        }
+      }
+    } catch (error, stackTrace) {
+      if (_isCurrentActionOwner(generation)) {
+        _printComposeError('navigate', error, stackTrace);
+        setState(() {
+          _error = error.toString();
+        });
+      }
     }
   }
 
@@ -1149,10 +1237,12 @@ class _ToolPkgUiLauncherScreenState extends State<ToolPkgUiLauncherScreen> {
     );
     final routeGeneration = _actionOwnerGeneration;
     final webViewHostContext = ComposeDslWebViewHostContext(
+      clients: widget.clients,
       packageName: widget.plugin.packageName,
       routeInstanceId: routeInstanceId,
       executionContextKey: executionContextKey,
-      dispatchAction: _dispatchWebViewAction,
+      dispatchAction: (actionId, [payload]) =>
+          _dispatchWebViewAction(routeGeneration, actionId, payload),
       readFileBytes: (path) => readComposeDslVfsBytes(widget.clients, path),
       onActionResultDelivered: (result) =>
           _notifyActionResult(result, routeGeneration: routeGeneration),
@@ -1164,15 +1254,17 @@ class _ToolPkgUiLauncherScreenState extends State<ToolPkgUiLauncherScreen> {
     );
     final content = hasSelectedUi
         ? _ComposeHost(
-            key: ValueKey(_selectedRouteId),
+            key: ValueKey((_selectedRouteId, _reloadGeneration)),
             loading: _loading,
             error: _error,
             renderResult: _renderResult,
             showLoadingIndicator: widget.showLoadingIndicator,
             contentBuilder: widget.contentBuilder,
             dialogTitle: widget.dialogTitle,
-            onAction: _dispatchAction,
-            onTextInput: _dispatchTextInput,
+            onAction: (actionId, [payload]) =>
+                _dispatchAction(routeGeneration, actionId, payload),
+            onTextInput: (actionId, text) =>
+                _dispatchTextInput(routeGeneration, actionId, text),
             webViewHostContext: webViewHostContext,
             splitMarkdownContent: (content) => widget
                 .clients

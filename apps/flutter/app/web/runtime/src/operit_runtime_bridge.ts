@@ -537,6 +537,8 @@ interface RuntimeWorkerStorageBridge {
   readRange(prefix: string, path: string, offset: number, length: number): Uint8Array;
   write(prefix: string, path: string, content: Uint8Array): void;
   append(prefix: string, path: string, content: Uint8Array): void;
+  /** Flushes one existing record through its worker-owned OPFS handles. */
+  flush(prefix: string, path: string): void;
   hasFile(prefix: string, path: string): boolean;
   exists(prefix: string, path: string): boolean;
   delete(prefix: string, path: string, recursive: boolean): void;
@@ -3989,6 +3991,14 @@ self.onmessage = (event) => {
       appendBytes(path: string, content: Uint8Array): void {
         storageAppend(runtimePrefix, path, content);
       },
+      /** Flushes existing OPFS bytes through the runtime worker storage host. */
+      flushFile(path: string): void {
+        const storage = runtimeGlobal.__operitRuntimeWorkerStorage;
+        if (storage === undefined) {
+          throw new Error("runtime worker OPFS storage is not installed");
+        }
+        storage.flush(runtimePrefix, path);
+      },
       delete(path: string, recursive: boolean): void {
         storageDelete(runtimePrefix, path, recursive);
       },
@@ -4476,6 +4486,14 @@ self.onmessage = (event) => {
       },
       toast(message: string): void {
         console.info("[Operit toast]", message);
+      },
+      /** Writes clipboard text and reports the accepted text synchronously. */
+      setClipboardText(text: string) {
+        if (!navigator.clipboard || !navigator.clipboard.writeText) {
+          throw new Error("Browser Clipboard API is unavailable");
+        }
+        void navigator.clipboard.writeText(text);
+        return { text };
       },
       /** Sends a browser system notification and requests the required permission. */
       sendNotification(title: string, message: string, activationJson: string): void {

@@ -38,6 +38,15 @@
   },
   "chatQueueAddMessage": "加入队列",
   "chatQueueAdded": "已加入发送队列",
+  "chatSendOptions": "选择发送方式",
+  "chatQueueAddMessageDescription": "当前回复结束后自动发送（默认）",
+  "chatGuideCurrentTurn": "引导当前对话",
+  "chatGuideCurrentTurnDescription": "不打断当前任务，在后续模型请求中生效",
+  "chatInterruptAndSend": "打断并发送",
+  "chatInterruptAndSendDescription": "停止当前回复，立即发送这条消息",
+  "chatGuidanceAccepted": "已添加引导，将在后续模型请求中生效",
+  "chatGuidanceTextOnly": "引导仅支持文本，请先移除附件和回复目标。",
+  "chatQueueWithdrawToEditor": "撤回到编辑框",
   "chatPleaseCreateNewChat": "请新建对话",
   "cancel": "取消",
   "send": "发送",
@@ -145,6 +154,15 @@
       }
     }
   },
+  "messageLocatorSearchMessages": "搜索消息",
+  "messageLocatorViewFavorites": "查看收藏",
+  "messageLocatorAll": "全部",
+  "messageLocatorFavorites": "收藏",
+  "messageLocatorNoFavorites": "还没有收藏的消息",
+  "messageLocatorLoadFailed": "暂时无法加载消息，请重试",
+  "messageLocatorFavoriteFailed": "收藏更新失败，请重试",
+  "messageLocatorAddFavorite": "收藏消息",
+  "messageLocatorRemoveFavorite": "取消收藏",
   "messageLocatorNoMatches": "没有匹配的消息",
   "messageSenderUser": "用户",
   "messageSenderSummary": "总结",
@@ -196,7 +214,7 @@
   "workspaceAddFolderDescription": "把另一个文件夹挂进当前工作区",
   "workspaceProjectTypeDialogTitle": "选择语言类型",
   "workspaceProjectTypeDialogDescription": "请选择要创建的默认工作区类型",
-  "workspaceUnbindTitle": "解除绑定",
+  "workspaceUnbindTitle": "从当前对话移除项目",
   "workspaceUnbindDescription": "解除当前会话的关联，保留工作区文件",
   "workspaceUnbindConfirmation": "确定解除当前会话与工作区的绑定吗？工作区和文件都会保留，不影响其他会话，之后可以重新绑定工作区。",
   "workspaceUnbindFailed": "解除绑定失败，请重试。",
@@ -262,7 +280,7 @@
       }
     }
   },
-  "desktopWidgetsCount": "桌面组件 {count}",
+  "desktopWidgetsCount": "桌面小部件 {count}",
   "@desktopWidgetsCount": {
     "placeholders": {
       "count": {
@@ -443,7 +461,7 @@
   "settingsCategoryModelSubtitle": "模型、Key、上下文",
   "settingsCategoryModelDescription": "配置模型连接，选择聊天模型，并管理思考、上下文和多模态能力。",
   "settingsCategoryLocalModelsTitle": "本地模型",
-  "settingsCategoryLocalModelsSubtitle": "下载、引擎、STT / TTS",
+  "settingsCategoryLocalModelsSubtitle": "LLM、下载、STT / TTS",
   "settingsCategoryLocalModelsDescription": "管理按需安装的本地模型和推理引擎。",
   "settingsCategoryToolsTitle": "工具与权限",
   "settingsCategoryToolsSubtitle": "AI 能力、系统授权、扩展",
@@ -690,7 +708,6 @@
   "settingsModelProviderTypeDeepseek": "DeepSeek",
   "settingsModelProviderTypeMistral": "Mistral",
   "settingsModelProviderTypeSiliconflow": "硅基流动",
-  "settingsModelProviderTypeIflow": "心流",
   "settingsModelProviderTypeOpenrouter": "OpenRouter",
   "settingsModelProviderTypeOpencode": "OpenCode",
   "settingsModelProviderTypeFourRouter": "4Router",
@@ -1318,7 +1335,8 @@
   "settingsAppearanceClearUserAvatar": "清除用户头像",
   "settingsAppearanceClearAiAvatar": "清除 AI 头像",
   "settingsAppearanceChatDisplaySection": "聊天显示",
-  "settingsAppearanceMessageStyle": "消息样式",
+  "settingsAppearanceUserMessageStyle": "用户消息样式",
+  "settingsAppearanceAiMessageStyle": "AI 消息样式",
   "settingsAppearanceMessageStyleClean": "命令式",
   "settingsAppearanceMessageStyleCard": "气泡式",
   "settingsAppearanceMessageColors": "消息配色",
@@ -2018,9 +2036,9 @@
       }
     }
   },
-  "settingsPeerPortModeHelp": "固定模式使用填写的 IP 和端口，适用于内网穿透和端口映射。固定端口被占用时会报错，不会改变监听地址。",
+  "settingsPeerPortModeHelp": "默认由系统分配可用端口，并通过局域网发现公布。固定模式使用填写的监听地址和端口，端口被占用时会报错。",
   "settingsPeerPortMode": "端口分配方式",
-  "settingsPeerPortModeFixed": "固定 IP 和端口",
+  "settingsPeerPortModeFixed": "固定监听地址和端口",
   "settingsPeerPortModeAutomatic": "自动分配端口",
   "settingsPeerAdvanced": "高级选项",
   "settingsPeerDiscoveryUnavailable": "当前 Host 不支持在局域网广播监听服务。支持的协议仍可通过地址直接连接。",
@@ -2032,14 +2050,13 @@
       }
     }
   },
-  "settingsPeerTransportHelp": "暴露方式（可多选）。HTTP 和 WebSocket 可共用端口；TCP 暂不能与它们共用端口。蓝牙需要平台支持。关闭发现并取消全部选择可停止监听。修改设置会中断现有连接；仅关闭发现不会关闭直接连接。",
+  "settingsPeerTransportHelp": "暴露方式（可多选）。HTTP、WebSocket 和 TCP 共用同一个监听端口，可自由组合。蓝牙需要平台支持。关闭发现并取消全部选择可停止监听。修改设置会中断现有连接；仅关闭发现不会关闭直接连接。",
   "settingsPeerBindAddress": "监听 IP 地址",
   "settingsPeerBindAddressHelp": "例如 0.0.0.0，允许局域网访问；也支持 IPv6 地址。",
   "settingsPeerBindPort": "监听端口",
   "settingsPeerBindPortHelp": "固定模式使用此端口监听。",
-  "settingsPeerBindPortAutomaticHelp": "自动模式会从此端口开始选择空闲端口。",
+  "settingsPeerBindPortAutomaticHelp": "由系统分配可用端口；启动后显示实际端口。",
   "settingsPeerDiscoveryNeedsTransport": "开启允许被搜索前，请至少选择一种暴露方式。",
-  "settingsPeerPortConflict": "当前 TCP 不能与 HTTP/WebSocket 共用监听端口，请选择 TCP 或 HTTP/WebSocket。",
   "settingsPeerAddressRequired": "请输入监听 IP 地址。",
   "settingsPeerPortRequired": "请输入 1 到 65535 之间的端口。",
   "settingsPeerApplied": "监听设置已生效。",
@@ -2114,6 +2131,10 @@
   "deviceSpaceManageDevice": "管理设备",
   "deviceSpaceConnectDirect": "建立直连",
   "deviceSpaceConnectDirectHint": "该设备已是本空间成员。与它配对成功即建立直连，无需重新加入空间；配对需要对方显示、由你输入六位确认码。",
+  "deviceSpaceUpdateEndpoint": "更新直连地址",
+  "deviceSpaceUpdateEndpointLabel": "直连地址",
+  "deviceSpaceUpdateEndpointHint": "例如 ws://主机:端口/link 或 主机:端口 —— 填对方当前的监听端口",
+  "deviceSpaceUpdateEndpointSaved": "直连地址已更新",
   "deviceSpaceDirectLinkEstablished": "已建立直连：{device}",
   "@deviceSpaceDirectLinkEstablished": {
     "placeholders": {
@@ -2127,6 +2148,8 @@
   "deviceSpaceConnectionSettings": "连接设置",
   "deviceSpaceViewRequest": "查看申请",
   "devicePickerNearby": "附近设备",
+  "devicePickerDiscoveryFailed": "附近设备发现失败：{error}",
+  "@devicePickerDiscoveryFailed": {"placeholders": {"error": {"type": "String"}}},
   "devicePickerEmpty": "暂未发现附近设备",
   "devicePickerHint": "请让两台设备连接同一网络，并在对方设备开启允许被搜索。",
   "devicePickerManual": "通过地址连接",
@@ -2215,5 +2238,114 @@
   "backgroundWorkPlan": "正在执行计划",
   "backgroundWorkOpen": "查看会话",
   "backgroundWorkReview": "查看并确认",
-  "backgroundWorkStop": "停止"
+  "backgroundWorkStop": "停止",
+  "localModelsDeviceOnly": "保存在此设备",
+  "localModelsDeviceOnlyDescription": "模型权重、下载进度和安装记录仅保存在当前设备，不参与设备空间同步。聊天可通过路由使用安装了模型的设备。",
+  "localModelsRunChat": "推理与设置",
+  "localModelsUseForChat": "用于聊天",
+  "localModelsChatActivated": "已设为聊天模型",
+  "localModelsPrompt": "输入提示词",
+  "localModelsGenerate": "开始推理",
+  "localModelsGenerating": "正在推理…",
+  "localModelsThreads": "CPU 线程数",
+  "localModelsContextSize": "上下文长度（token）",
+  "localModelsBatchSize": "批次大小",
+  "localModelsUnload": "释放模型内存",
+  "localModelsCpuBackend": "本机 CPU 推理",
+  "localModelsLlmDescription": "下载 GGUF 模型使用 llama.cpp，或下载 MNN 模型包。安装后可在这里试运行，或设为聊天模型。",
+  "localModelsInvalidSettings": "请检查线程数、上下文长度和批次大小。",
+  "localModelsFilterAll": "全部模型",
+  "localModelsFilterInstalled": "仅已安装",
+  "localModelsSearchCatalog": "搜索名称或推理引擎",
+  "deviceSpaceSyncPeer": "空间设备",
+  "deviceSpaceSyncActive": "正在与 {device} 同步",
+  "@deviceSpaceSyncActive": {
+    "placeholders": {
+      "device": {
+        "type": "String"
+      }
+    }
+  },
+  "deviceSpaceSyncCompleted": "与 {device} 同步完成",
+  "@deviceSpaceSyncCompleted": {
+    "placeholders": {
+      "device": {
+        "type": "String"
+      }
+    }
+  },
+  "deviceSpaceSyncChecking": "正在检查数据差异",
+  "deviceSpaceSyncRecords": "正在交换数据记录",
+  "deviceSpaceSyncRecordProgress": "{completed} / {total} 条 · {percent}%",
+  "@deviceSpaceSyncRecordProgress": {"placeholders": {"completed": {"type": "int"}, "total": {"type": "int"}, "percent": {"type": "int"}}},
+  "deviceSpaceSyncPendingCount": "待应用 {count} 条",
+  "@deviceSpaceSyncPendingCount": {"placeholders": {"count": {"type": "int"}}},
+  "deviceSpaceSyncCounting": "正在统计总量 · 已处理 {count} 条",
+  "@deviceSpaceSyncCounting": {"placeholders": {"count": {"type": "int"}}},
+  "deviceSpaceSyncFiles": "正在传输并校验文件",
+  "deviceSpaceSyncRetrying": "同步暂时中断，稍后自动重试",
+  "deviceSpaceSyncPending": "部分数据尚未处理完成，稍后自动重试",
+  "deviceSpaceSyncCurrentFile": "当前文件：{done} / {total}",
+  "@deviceSpaceSyncCurrentFile": {
+    "placeholders": {
+      "done": {
+        "type": "String"
+      },
+      "total": {
+        "type": "String"
+      }
+    }
+  },
+  "deviceSpaceSyncTransferred": "已交换 {count} 条记录 · 已传输 {bytes}",
+  "@deviceSpaceSyncTransferred": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      },
+      "bytes": {
+        "type": "String"
+      }
+    }
+  },
+  "deviceSpaceSyncBackground": "可以继续使用，同步会在后台完成",
+  "runtimeActivityTitle": "后台任务",
+  "runtimeActivitySyncing": "正在同步",
+  "runtimeActivitySyncCompleted": "同步完成",
+  "runtimeActivityWaiting": "等待重试",
+  "runtimeActivityExpand": "查看后台任务",
+  "runtimeActivityLoadingPackages": "加载扩展",
+  "peerQrTitle": "二维码连接",
+  "peerQrScan": "扫码连接",
+  "peerQrShow": "出示连接码",
+  "peerQrShowHint": "让另一台设备扫描此码，连接到这台设备。",
+  "peerQrScanHint": "扫描另一台设备的 Operit 连接码。",
+  "peerQrTrustHint": "二维码只提供连接地址。连接仍需对方显示的配对码，加入空间仍需审批。",
+  "peerQrListenerRequired": "请先在连接设置中开启接收连接，并连接到可用的网络。",
+  "peerQrCopy": "复制连接信息",
+  "peerQrCopied": "已复制",
+  "peerQrImport": "从图片识别",
+  "peerQrPaste": "或粘贴连接信息",
+  "peerQrRead": "识别连接信息",
+  "peerQrWrongDevice": "此连接码属于其他设备，请扫描当前所选设备的连接码。",
+  "peerQrImageInvalid": "未能从图片中识别二维码。请选择清晰的二维码图片（不超过 16 MB）。",
+  "peerQrCameraUnavailable": "此设备暂时无法使用相机扫码，你可以导入二维码图片或粘贴连接信息。",
+  "peerQrCameraPermission": "需要相机权限才能扫码。请在系统设置中允许相机访问，也可导入图片。",
+  "peerQrDevice": "连接设备",
+  "peerQrScanAgain": "重新扫码",
+  "peerQrMethodsHint": "发现不到设备？也可以使用连接码。",
+  "toolParametersLabel": "参数",
+  "toolResultLabel": "执行结果",
+  "toolGroupThinkingCount": "{count} 次思考",
+  "toolGroupCallCount": "{count} 次调用",
+  "toolGroupSearchCount": "{count} 次搜索",
+  "toolEditedFileCount": "已编辑 {count} 个文件",
+  "toolViewChanges": "查看变更",
+  "toolViewFileDiff": "查看 {fileName} 的变更",
+  "@toolEditedFileCount": {"placeholders": {"count": {"type": "int"}}},
+  "@toolViewFileDiff": {"placeholders": {"fileName": {"type": "String"}}},
+  "toolGroupCompleted": "已完成",
+  "toolGroupExecuting": "正在执行",
+  "@toolGroupThinkingCount": {"placeholders": {"count": {"type": "int"}}},
+  "@toolGroupCallCount": {"placeholders": {"count": {"type": "int"}}},
+  "@toolGroupSearchCount": {"placeholders": {"count": {"type": "int"}}}
 }

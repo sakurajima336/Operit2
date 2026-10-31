@@ -28,6 +28,10 @@ impl AndroidRuntimeStorageHost {
 }
 
 impl RuntimeStorageHost for AndroidRuntimeStorageHost {
+    fn openTransactionDatabase(&self, path: &str) -> operit_host_api::HostResult<Box<dyn operit_host_api::RuntimeSqliteConnection>> {
+        RuntimeSqliteHost::openSqliteDatabase(self, path)
+    }
+
     /// Returns the Android runtime files root directory.
     #[allow(non_snake_case)]
     fn runtimeRootDir(&self) -> Option<PathBuf> {
@@ -57,6 +61,10 @@ impl RuntimeStorageHost for AndroidRuntimeStorageHost {
 
     fn writeBytesAtomically(&self, path: &str, content: &[u8]) -> HostResult<()> {
         self.inner.writeBytesAtomically(path, content)
+    }
+
+    fn flushFile(&self, path: &str) -> HostResult<()> {
+        self.inner.flushFile(path)
     }
 
     /// Appends bytes to Android runtime storage.

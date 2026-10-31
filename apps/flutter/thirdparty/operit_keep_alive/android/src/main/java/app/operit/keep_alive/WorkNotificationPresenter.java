@@ -66,6 +66,15 @@ final class WorkNotificationPresenter {
         render();
     }
 
+    /** Reposts the retained foreground state when notification authorization changes. */
+    void refresh() throws JSONException {
+        if (latest == null) {
+            manager.notify(notificationId, idle);
+            return;
+        }
+        render();
+    }
+
     /** Creates an immutable action intent whose identity includes the exact execution. */
     private PendingIntent serviceAction(String action, String workId) {
         Intent intent = new Intent(service, service.getClass()).setAction(action)

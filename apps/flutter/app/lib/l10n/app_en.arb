@@ -38,6 +38,15 @@
   },
   "chatQueueAddMessage": "Queue message",
   "chatQueueAdded": "Added to queue",
+  "chatSendOptions": "Choose how to send",
+  "chatQueueAddMessageDescription": "Send after the current reply finishes (default)",
+  "chatGuideCurrentTurn": "Guide current conversation",
+  "chatGuideCurrentTurnDescription": "Apply in a later model request without interrupting this turn",
+  "chatInterruptAndSend": "Interrupt and send",
+  "chatInterruptAndSendDescription": "Stop the current reply and send this message now",
+  "chatGuidanceAccepted": "Guidance added for a later model request",
+  "chatGuidanceTextOnly": "Guidance supports text only. Remove attachments and the reply target first.",
+  "chatQueueWithdrawToEditor": "Withdraw to editor",
   "chatPleaseCreateNewChat": "Please create a chat",
   "cancel": "Cancel",
   "send": "Send",
@@ -145,6 +154,15 @@
       }
     }
   },
+  "messageLocatorSearchMessages": "Search messages",
+  "messageLocatorViewFavorites": "View favorites",
+  "messageLocatorAll": "All",
+  "messageLocatorFavorites": "Favorites",
+  "messageLocatorNoFavorites": "No favorite messages yet",
+  "messageLocatorLoadFailed": "Could not load messages. Please try again.",
+  "messageLocatorFavoriteFailed": "Could not update favorite. Please try again.",
+  "messageLocatorAddFavorite": "Favorite message",
+  "messageLocatorRemoveFavorite": "Remove favorite",
   "messageLocatorNoMatches": "No matching messages",
   "messageSenderUser": "User",
   "messageSenderSummary": "Summary",
@@ -196,7 +214,7 @@
   "workspaceAddFolderDescription": "Mount another folder into the current workspace",
   "workspaceProjectTypeDialogTitle": "Choose project type",
   "workspaceProjectTypeDialogDescription": "Choose the default workspace type to create",
-  "workspaceUnbindTitle": "Unbind workspace",
+  "workspaceUnbindTitle": "Remove project from this chat",
   "workspaceUnbindDescription": "Detach this chat without deleting workspace files",
   "workspaceUnbindConfirmation": "Unbind the workspace from this chat? The workspace and its files will be kept, and other chats will not be affected. You can bind a workspace again later.",
   "workspaceUnbindFailed": "Failed to unbind workspace. Please try again.",
@@ -443,7 +461,7 @@
   "settingsCategoryModelSubtitle": "Models, keys, context",
   "settingsCategoryModelDescription": "Configure model connections, choose the chat model, and manage thinking, context, and multimodal abilities.",
   "settingsCategoryLocalModelsTitle": "Local Models",
-  "settingsCategoryLocalModelsSubtitle": "Downloads, engines, STT / TTS",
+  "settingsCategoryLocalModelsSubtitle": "LLMs, downloads, STT / TTS",
   "settingsCategoryLocalModelsDescription": "Manage local models and inference engines installed on demand.",
   "settingsCategoryToolsTitle": "Tools & Permissions",
   "settingsCategoryToolsSubtitle": "AI capability, system authorization, extensions",
@@ -697,7 +715,6 @@
   "settingsModelProviderTypeDeepseek": "DeepSeek",
   "settingsModelProviderTypeMistral": "Mistral",
   "settingsModelProviderTypeSiliconflow": "SiliconFlow",
-  "settingsModelProviderTypeIflow": "iFlow",
   "settingsModelProviderTypeOpenrouter": "OpenRouter",
   "settingsModelProviderTypeOpencode": "OpenCode",
   "settingsModelProviderTypeFourRouter": "4Router",
@@ -1325,7 +1342,8 @@
   "settingsAppearanceClearUserAvatar": "Clear user avatar",
   "settingsAppearanceClearAiAvatar": "Clear AI avatar",
   "settingsAppearanceChatDisplaySection": "Chat display",
-  "settingsAppearanceMessageStyle": "Message style",
+  "settingsAppearanceUserMessageStyle": "User message style",
+  "settingsAppearanceAiMessageStyle": "AI message style",
   "settingsAppearanceMessageStyleClean": "Command",
   "settingsAppearanceMessageStyleCard": "Bubble",
   "settingsAppearanceMessageColors": "Message colors",
@@ -2025,9 +2043,9 @@
       }
     }
   },
-  "settingsPeerPortModeHelp": "Fixed mode keeps the entered IP and port for tunnels and port forwarding. A busy fixed port reports an error without changing the address.",
+  "settingsPeerPortModeHelp": "By default, the system assigns an available port and LAN discovery advertises it. Fixed mode uses the entered listen address and port and reports an error if the port is busy.",
   "settingsPeerPortMode": "Port allocation",
-  "settingsPeerPortModeFixed": "Fixed address and port",
+  "settingsPeerPortModeFixed": "Fixed listen address and port",
   "settingsPeerPortModeAutomatic": "Automatic port",
   "settingsPeerAdvanced": "Advanced options",
   "settingsPeerDiscoveryUnavailable": "This Host cannot advertise listeners on the local network. Direct connections remain available for supported transports.",
@@ -2039,14 +2057,13 @@
       }
     }
   },
-  "settingsPeerTransportHelp": "Listener transports (multiple selections). HTTP and WebSocket can share a port; TCP cannot share that port with them. Bluetooth requires platform support. Clear all selections and disable discovery to stop listening. Changing settings interrupts existing connections. Disabling discovery alone does not stop direct connections.",
+  "settingsPeerTransportHelp": "Listener transports (multiple selections). HTTP, WebSocket and TCP share one listening port and can be combined freely. Bluetooth requires platform support. Clear all selections and disable discovery to stop listening. Changing settings interrupts existing connections. Disabling discovery alone does not stop direct connections.",
   "settingsPeerBindAddress": "Listen IP address",
   "settingsPeerBindAddressHelp": "Example: 0.0.0.0 for LAN access; IPv6 addresses are also supported.",
   "settingsPeerBindPort": "Listen port",
   "settingsPeerBindPortHelp": "The port used by fixed listener mode.",
-  "settingsPeerBindPortAutomaticHelp": "Automatic mode selects a free port starting from this value.",
+  "settingsPeerBindPortAutomaticHelp": "The system assigns an available port. The actual port appears after startup.",
   "settingsPeerDiscoveryNeedsTransport": "Select at least one transport before enabling discovery.",
-  "settingsPeerPortConflict": "TCP cannot currently share a listen port with HTTP/WebSocket. Select TCP or HTTP/WebSocket.",
   "settingsPeerAddressRequired": "Enter a listen IP address.",
   "settingsPeerPortRequired": "Enter a port from 1 to 65535.",
   "settingsPeerApplied": "Listener settings applied.",
@@ -2121,6 +2138,10 @@
   "deviceSpaceManageDevice": "Manage device",
   "deviceSpaceConnectDirect": "Connect directly",
   "deviceSpaceConnectDirectHint": "This device is already a Space member. Pairing it adds a direct link without joining again; pairing shows a six-digit code on the other device for you to enter.",
+  "deviceSpaceUpdateEndpoint": "Update direct address",
+  "deviceSpaceUpdateEndpointLabel": "Direct address",
+  "deviceSpaceUpdateEndpointHint": "e.g. ws://host:port/link or host:port — use the peer's current listen port",
+  "deviceSpaceUpdateEndpointSaved": "Direct address updated",
   "deviceSpaceDirectLinkEstablished": "Direct link established: {device}",
   "@deviceSpaceDirectLinkEstablished": {
     "placeholders": {
@@ -2134,6 +2155,8 @@
   "deviceSpaceConnectionSettings": "Connection settings",
   "deviceSpaceViewRequest": "View request",
   "devicePickerNearby": "Nearby devices",
+  "devicePickerDiscoveryFailed": "Nearby device discovery failed: {error}",
+  "@devicePickerDiscoveryFailed": {"placeholders": {"error": {"type": "String"}}},
   "devicePickerEmpty": "No nearby devices found",
   "devicePickerHint": "Connect both devices to the same network and enable discovery on the other device.",
   "devicePickerManual": "Connect using an address",
@@ -2222,5 +2245,114 @@
   "backgroundWorkPlan": "Executing a plan",
   "backgroundWorkOpen": "View conversation",
   "backgroundWorkReview": "Review",
-  "backgroundWorkStop": "Stop"
+  "backgroundWorkStop": "Stop",
+  "localModelsDeviceOnly": "Stored on this device",
+  "localModelsDeviceOnlyDescription": "Weights, download progress and installation records stay on this device and are excluded from Space sync. Chats can route inference to the device with the model.",
+  "localModelsRunChat": "Run and configure",
+  "localModelsUseForChat": "Use for chat",
+  "localModelsChatActivated": "Selected as the chat model",
+  "localModelsPrompt": "Enter a prompt",
+  "localModelsGenerate": "Generate",
+  "localModelsGenerating": "Generating…",
+  "localModelsThreads": "CPU threads",
+  "localModelsContextSize": "Context size (tokens)",
+  "localModelsBatchSize": "Batch size",
+  "localModelsUnload": "Unload model",
+  "localModelsCpuBackend": "On-device CPU inference",
+  "localModelsLlmDescription": "Download a GGUF model for llama.cpp or an MNN model bundle. After installation, try it here or select it for chat.",
+  "localModelsInvalidSettings": "Check the thread count, context size and batch size.",
+  "localModelsFilterAll": "All models",
+  "localModelsFilterInstalled": "Installed only",
+  "localModelsSearchCatalog": "Search by name or inference engine",
+  "deviceSpaceSyncPeer": "a space device",
+  "deviceSpaceSyncActive": "Syncing with {device}",
+  "@deviceSpaceSyncActive": {
+    "placeholders": {
+      "device": {
+        "type": "String"
+      }
+    }
+  },
+  "deviceSpaceSyncCompleted": "Synced with {device}",
+  "@deviceSpaceSyncCompleted": {
+    "placeholders": {
+      "device": {
+        "type": "String"
+      }
+    }
+  },
+  "deviceSpaceSyncChecking": "Checking for changes",
+  "deviceSpaceSyncRecords": "Exchanging records",
+  "deviceSpaceSyncRecordProgress": "{completed} / {total} records · {percent}%",
+  "@deviceSpaceSyncRecordProgress": {"placeholders": {"completed": {"type": "int"}, "total": {"type": "int"}, "percent": {"type": "int"}}},
+  "deviceSpaceSyncPendingCount": "{count} records pending application",
+  "@deviceSpaceSyncPendingCount": {"placeholders": {"count": {"type": "int"}}},
+  "deviceSpaceSyncCounting": "Counting total · {count} records processed",
+  "@deviceSpaceSyncCounting": {"placeholders": {"count": {"type": "int"}}},
+  "deviceSpaceSyncFiles": "Transferring and verifying files",
+  "deviceSpaceSyncRetrying": "Sync interrupted. Retrying automatically.",
+  "deviceSpaceSyncPending": "Some data is still pending. Retrying automatically.",
+  "deviceSpaceSyncCurrentFile": "Current file: {done} / {total}",
+  "@deviceSpaceSyncCurrentFile": {
+    "placeholders": {
+      "done": {
+        "type": "String"
+      },
+      "total": {
+        "type": "String"
+      }
+    }
+  },
+  "deviceSpaceSyncTransferred": "{count} records exchanged · {bytes} transferred",
+  "@deviceSpaceSyncTransferred": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      },
+      "bytes": {
+        "type": "String"
+      }
+    }
+  },
+  "deviceSpaceSyncBackground": "You can keep using the app while syncing continues.",
+  "runtimeActivityTitle": "Background tasks",
+  "runtimeActivitySyncing": "Syncing",
+  "runtimeActivitySyncCompleted": "Sync complete",
+  "runtimeActivityWaiting": "Waiting to retry",
+  "runtimeActivityExpand": "Show background tasks",
+  "runtimeActivityLoadingPackages": "Loading extensions",
+  "peerQrTitle": "QR connection",
+  "peerQrScan": "Scan code",
+  "peerQrShow": "My code",
+  "peerQrShowHint": "Scan this code on another device to connect to this device.",
+  "peerQrScanHint": "Scan the Operit connection code on the other device.",
+  "peerQrTrustHint": "The code shares connection addresses only. Pairing still requires the code shown on the other device; joining a space still requires approval.",
+  "peerQrListenerRequired": "Enable receiving connections in connection settings and connect to a network first.",
+  "peerQrCopy": "Copy connection info",
+  "peerQrCopied": "Copied",
+  "peerQrImport": "Import QR image",
+  "peerQrPaste": "Or paste connection info",
+  "peerQrRead": "Read connection info",
+  "peerQrWrongDevice": "This code belongs to a different device. Scan the code for the selected device.",
+  "peerQrImageInvalid": "No QR code could be read. Choose a clear QR image smaller than 16 MB.",
+  "peerQrCameraUnavailable": "Camera scanning is unavailable. Import a QR image or paste connection info instead.",
+  "peerQrCameraPermission": "Camera access is required. Allow it in system settings, or import a QR image.",
+  "peerQrDevice": "Connect device",
+  "peerQrScanAgain": "Scan another code",
+  "peerQrMethodsHint": "Can’t find the device? Connect with a QR code.",
+  "toolParametersLabel": "Parameters",
+  "toolResultLabel": "Result",
+  "toolGroupThinkingCount": "{count} thinking",
+  "toolGroupCallCount": "{count, plural, one{{count} call} other{{count} calls}}",
+  "toolGroupSearchCount": "{count} search",
+  "toolEditedFileCount": "{count, plural, one{Edited {count} file} other{Edited {count} files}}",
+  "toolViewChanges": "View changes",
+  "toolViewFileDiff": "View diff for {fileName}",
+  "@toolEditedFileCount": {"placeholders": {"count": {"type": "int"}}},
+  "@toolViewFileDiff": {"placeholders": {"fileName": {"type": "String"}}},
+  "toolGroupCompleted": "Completed",
+  "toolGroupExecuting": "Executing",
+  "@toolGroupThinkingCount": {"placeholders": {"count": {"type": "int"}}},
+  "@toolGroupCallCount": {"placeholders": {"count": {"type": "int"}}},
+  "@toolGroupSearchCount": {"placeholders": {"count": {"type": "int"}}}
 }

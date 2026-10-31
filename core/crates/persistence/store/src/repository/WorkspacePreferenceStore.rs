@@ -1,5 +1,5 @@
 use crate::PreferencesDataStore::{
-    stringPreferencesKey, Flow, Preferences, PreferencesDataStore, PreferencesDataStoreError,
+    stringPreferencesKey, Flow, PreferencesDataStore, PreferencesDataStoreError,
     PreferencesKey,
 };
 use crate::RuntimeStorePaths::RuntimeStorePaths;
@@ -15,11 +15,17 @@ pub struct WorkspacePreferenceStore {
 impl WorkspacePreferenceStore {
     const PREFERENCES_VERSION: u32 = 2;
 
+    /// Opens the same versioned workspace owner for background synchronization.
+    pub fn openStore(storage: std::sync::Arc<dyn operit_host_api::RuntimeStorageHost>, path: &str) -> PreferencesDataStore {
+        PreferencesDataStore::newWithStorage(storage, path)
+            .withMigration(Self::PREFERENCES_VERSION, Self::migration)
+    }
+
     /// Creates a workspace preference store from explicit runtime paths.
     pub fn new(paths: RuntimeStorePaths) -> Self {
         Self {
             dataStore: PreferencesDataStore::new(paths.workspaces_preferences_path())
-                .withSchema(Self::PREFERENCES_VERSION, Self::migratePreferences),
+                .withMigration(Self::PREFERENCES_VERSION, Self::migration),
         }
     }
 
@@ -135,11 +141,18 @@ impl WorkspacePreferenceStore {
     }
 
     /// Keeps existing record keys readable without creating a separately synchronized index.
-    fn migratePreferences(
-        version: u32,
-        preferences: &mut Preferences,
+    fn migration(
+        from: u32,
+        context: &mut crate::Transaction::migration::Context,
     ) -> Result<(), PreferencesDataStoreError> {
-        match version {
+        if from == 1 {
+            crate::Transaction::Rule::DropKey {
+                key: "workspace_list".into(),
+            }
+            .apply(context)
+            .map_err(PreferencesDataStoreError::Message)?;
+        }
+        context.map_preferences(from, &|version, preferences| match version {
             0 => Ok(()),
             1 => {
                 let records = preferences
@@ -155,11 +168,10 @@ impl WorkspacePreferenceStore {
                     Self::decodeWorkspace(&id, &value)?;
                     preferences.set(&stringPreferencesKey(&key), value);
                 }
-                preferences.remove(&stringPreferencesKey("workspace_list"));
                 Ok(())
             }
             from => Err(PreferencesDataStoreError::MissingMigration { from, to: from + 1 }),
-        }
+        })
     }
 }
 

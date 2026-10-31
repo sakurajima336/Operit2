@@ -17,6 +17,7 @@ export 'src/render/chat_input_surface.dart';
 export 'src/render/theme_background.dart';
 export 'src/render/theme_data.dart';
 export 'src/render/theme_glass_surface.dart';
+export 'src/render/theme_glass_scroll_behavior.dart';
 export 'src/render/liquid_glass.dart';
 export 'src/render/theme_render_root.dart';
 export 'src/render/theme_layout_metrics.dart';
@@ -29,3 +30,9 @@ export 'src/render/top_bar_chrome.dart';
 export 'src/render/composer_chrome.dart';
 export 'src/render/composer_surface.dart';
 export 'src/render/prepared_theme_visual.dart';
+
+export 'src/design/design_capture.dart';
+export 'src/design/design_dom_capture.dart';
+export 'src/design/design_scenarios.dart';
+
+export 'src/design/design_dom_runtime.dart';

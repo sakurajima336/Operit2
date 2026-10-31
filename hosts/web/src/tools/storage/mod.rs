@@ -38,6 +38,10 @@ impl WebRuntimeStorageHost {
 }
 
 impl RuntimeStorageHost for WebRuntimeStorageHost {
+    fn openTransactionDatabase(&self, path: &str) -> operit_host_api::HostResult<Box<dyn operit_host_api::RuntimeSqliteConnection>> {
+        RuntimeSqliteHost::openSqliteDatabase(self, path)
+    }
+
     fn runtimeRootDir(&self) -> Option<PathBuf> {
         Some(Self::defaultRuntimeRoot())
     }
@@ -89,6 +93,12 @@ impl RuntimeStorageHost for WebRuntimeStorageHost {
             "appendBytes",
             &[JsValue::from_str(path), bytes_to_js(content)],
         )?;
+        Ok(())
+    }
+
+    /// Flushes the worker-owned OPFS data and index without copying the record.
+    fn flushFile(&self, path: &str) -> HostResult<()> {
+        call_storage("flushFile", &[JsValue::from_str(path)])?;
         Ok(())
     }
 

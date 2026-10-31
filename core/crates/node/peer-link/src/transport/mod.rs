@@ -1,7 +1,9 @@
 //! 只按 transport 选择 Host 适配，不处理鉴权或配对。
 mod bluetooth;
 mod http;
+mod http_outbox;
 mod inbox;
+mod network;
 mod serial;
 mod stream;
 mod tcp;
@@ -15,12 +17,12 @@ use operit_host_api::HostManager::HostManager;
 use std::sync::Arc;
 
 pub struct HostPeerLink {
-    webServers: http::ServerRegistry,
+    networkServers: network::ServerRegistry,
     maxMessageBytes: usize,
 }
 
 impl Default for HostPeerLink {
-    fn default() -> Self { Self { webServers: Default::default(), maxMessageBytes: crate::DEFAULT_MAX_PEER_MESSAGE_BYTES } }
+    fn default() -> Self { Self { networkServers: Default::default(), maxMessageBytes: crate::DEFAULT_MAX_PEER_MESSAGE_BYTES } }
 }
 
 impl HostPeerLink {
@@ -69,13 +71,6 @@ impl HostPeerLink {
 
 #[async_trait]
 impl PeerLink for HostPeerLink {
-    fn exclusiveEndpointKey(&self, target: &PeerEndpoint, transport: PeerTransport) -> Option<String> {
-        match transport {
-            PeerTransport::Serial => Some(format!("serial:{}", serial::endpointKey(&target.address))),
-            _ => None,
-        }
-    }
-
     async fn connect(
         &self,
         host: Arc<HostManager>,
@@ -107,10 +102,10 @@ impl PeerLink for HostPeerLink {
             ));
         }
         match transport {
-            PeerTransport::Tcp => tcp::listen(&host, source, self.maxMessageBytes).await,
+            PeerTransport::Tcp => tcp::listen(&self.networkServers, &host, source, self.maxMessageBytes).await,
             PeerTransport::Serial => serial::listen(&host, source, self.maxMessageBytes).await,
-            PeerTransport::Http => http::listen(&self.webServers, &host, source, self.maxMessageBytes).await,
-            PeerTransport::WebSocket => websocket::listen(&self.webServers, &host, source, self.maxMessageBytes).await,
+            PeerTransport::Http => http::listen(&self.networkServers, &host, source, self.maxMessageBytes).await,
+            PeerTransport::WebSocket => websocket::listen(&self.networkServers, &host, source, self.maxMessageBytes).await,
             PeerTransport::Bluetooth => bluetooth::listen(&host, source, self.maxMessageBytes).await,
         }
     }

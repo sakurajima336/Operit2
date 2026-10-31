@@ -37,7 +37,14 @@ vec2 computeSdfNormal(vec2 pos, vec2 halfSize, vec4 r) {
 
 /// Maps local lens coordinates through the source's actual affine transform.
 vec2 sourceUv(vec2 p) {
-  return (uBackground.xy + uBasis.xy * p.x + uBasis.zw * p.y) / uBackground.zw;
+  vec2 uv = (uBackground.xy + uBasis.xy * p.x + uBasis.zw * p.y) / uBackground.zw;
+  // Scene.toImageSync produces a render-target texture. Impeller's GLES target
+  // stores those rows bottom-up; keep geometry and refraction in logical space
+  // and convert only the final source UV using Flutter's shader backend define.
+#ifdef IMPELLER_TARGET_OPENGLES
+  uv.y = 1.0 - uv.y;
+#endif
+  return uv;
 }
 
 /// Samples the clear source at the refracted coordinate without spatial blur.

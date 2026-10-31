@@ -9,6 +9,8 @@ export namespace ToolPkg {
   export const ipc: IpcApi;
   /** Exposes the host registry WASM service. */
   export const wasm: WasmApi;
+  /** Groups runtime presentation services for plugin-owned user interfaces. */
+  export const ui: UiApi;
   /**
    * Stores localized strings keyed by language tag.
    */
@@ -588,7 +590,7 @@ export namespace ToolPkg {
   /**
    * Enumerates every hook event that a ToolPkg plugin may register.
    */
-  export type HookEventName = AppLifecycleEvent | HookEventNameVariant2 | HookEventNameVariant3 | HookEventNameVariant4 | ChatInputEventName | ChatViewEventName | ChatMessageEventName | ChatLifecycleEventName | ChatMessageMenuItemEventName | ChatRuntimeEventName | HookEventNameVariant7 | ToolLifecycleEventName | PromptInputEventName | PromptHistoryEventName | SystemPromptComposeEventName | ToolPromptComposeEventName | PromptFinalizeEventName | SummaryGenerateEventName | CoreCommandEventName | HostEventName | HookEventNameVariant20;
+  export type HookEventName = AppLifecycleEvent | HookEventNameVariant2 | HookEventNameVariant3 | HookEventNameVariant4 | ChatInputEventName | ChatViewEventName | ChatMessageEventName | ChatLifecycleEventName | ChatMessageMenuItemEventName | ChatRuntimeEventName | ChatResponseEventName | HookEventNameVariant7 | ToolLifecycleEventName | PromptInputEventName | PromptHistoryEventName | SystemPromptComposeEventName | ToolPromptComposeEventName | PromptFinalizeEventName | SummaryGenerateEventName | CoreCommandEventName | HostEventName | HookEventNameVariant20;
 
   /**
    * Accepts a JSON result, no result, or asynchronous completion from a generic hook.
@@ -728,6 +730,87 @@ export namespace ToolPkg {
    * Names chat message persistence notifications.
    */
   export type ChatMessageEventName = "message_persisted";
+
+  /**
+   * Names the lifecycle of a plugin-owned native response presentation.
+   */
+  export type ChatResponseEventName = "started" | "snapshot" | "finished" | "closed";
+
+  /**
+   * Supplies native identity and semantic parts to the selected response presenter.
+   */
+  export interface ChatResponseEventPayload {
+    /**
+     * Identifies the real conversation.
+     */
+    chatId: string;
+    /**
+     * Identifies the canonical assistant message.
+     */
+    messageTimestamp: number;
+    /**
+     * Identifies the selected message revision.
+     */
+    variantIndex: number;
+    /**
+     * Contains the complete, ordered semantic snapshot.
+     */
+    parts: Chat.MessagePart[];
+  }
+
+  /**
+   * Contains one independently displayed bubble and its delay before delivery.
+   */
+  export interface ResponseBubble {
+    /**
+     * Contains semantic display parts without replacing canonical model history.
+     */
+    parts: Chat.MessagePart[];
+    /**
+     * Waits up to 3000 milliseconds before publishing this bubble.
+     */
+    delayMs: number;
+  }
+
+  /**
+   * Appends only newly stable response bubbles.
+   */
+  export interface ResponsePresentationDelta {
+    /**
+     * Contains append-only display work, limited to 256 bubbles per response.
+     */
+    bubbles: ResponseBubble[];
+  }
+
+  /**
+   * Combines lifecycle metadata with the native semantic response snapshot.
+   */
+  export interface ChatResponseHookEvent extends HookEventBase<ChatResponseEventName, ChatResponseEventPayload> {
+  }
+
+  /**
+   * Describes synchronous results of response presentation hooks.
+   */
+  export type ChatResponseHookOutput = boolean | ResponsePresentationDelta | void;
+
+  /**
+   * Supports synchronous or asynchronous response presentation lifecycle callbacks.
+   */
+  export type ChatResponseHookReturn = boolean | ResponsePresentationDelta | void | Promise<ChatResponseHookOutput>;
+
+  /**
+   * Registers a generic presenter independent from message persistence notifications.
+   */
+  export interface ChatResponseHookRegistration {
+    /**
+     * Identifies the response hook within its actual package owner.
+     */
+    id: string;
+    /**
+     * Activates on started, emits deltas on snapshot and finished, and releases on closed.
+     */
+    function: (arg0: ChatResponseHookEvent) => ChatResponseHookReturn;
+  }
 
   /**
    * Names the click event dispatched for a chat message context-menu item.
@@ -2676,7 +2759,7 @@ export namespace ToolPkg {
   /**
    * Enumerates supported navigation surface values.
    */
-  export type NavigationSurface = "toolbox" | "main_sidebar_plugins" | "app_bar" | "chat_attachments" | "chat_sidebar_tabs" | "chat_input_menu" | "chat_input_menu_sections";
+  export type NavigationSurface = "toolbox" | "main_sidebar_plugins" | "app_bar" | "chat_attachments" | "chat_sidebar_tabs" | "chat_input_menu" | "chat_input_menu_sections" | "chat_message_after" | "workspace" | "workspace_home";
 
   /**
    * Describes a plugin action exposed through a host navigation surface.
@@ -2687,8 +2770,8 @@ export namespace ToolPkg {
      */
     id: string;
     /**
-     * Provides this package's registered UI route; required for chat_attachments, chat_sidebar_tabs, chat_input_menu and chat_input_menu_sections.
-     * Embedded sidebar and input-menu surfaces require one owned Compose DSL route registered before the navigation entry.
+     * Provides this package's registered UI route; required for attachment and embedded UI surfaces.
+     * Embedded surfaces require one owned Compose DSL route registered before the navigation entry.
      */
     route?: string;
     /**
@@ -2700,7 +2783,7 @@ export namespace ToolPkg {
      */
     surface: NavigationSurface;
     /**
-     * Supplies navigation callbacks on other surfaces; action is unsupported for chat_attachments, chat_sidebar_tabs, chat_input_menu and chat_input_menu_sections.
+     * Supplies navigation callbacks on other surfaces; attachment and embedded UI surfaces require routes instead.
      */
     action?: NavigationEntryActionHookHandler;
     /**
@@ -3829,11 +3912,49 @@ export namespace ToolPkg {
   }
 
   /**
+   * Owns a persistent WASM instance in the current JavaScript realm.
+   */
+  export interface WasmInstance {
+    /**
+     * Calls a declared export without crossing the host bridge; i64 results use decimal strings.
+     */
+    call(exportName: string, args?: WasmArg[]): WasmScalarValue;
+    /**
+     * Returns a live byte view; obtain a fresh view after growing WASM memory.
+     */
+    memory(memoryName?: string): Uint8Array;
+    /**
+     * Copies a bounded memory range into an independent byte array.
+     */
+    readMemory(offset: number, length: number, memoryName?: string): Uint8Array;
+    /**
+     * Copies a byte batch into bounded linear memory.
+     */
+    writeMemory(offset: number, bytes: Uint8Array, memoryName?: string): void;
+    /**
+     * Releases this handle; later calls fail explicitly.
+     */
+    close(): void;
+  }
+
+  /**
    * Represents the WASM API exposed on a ToolPkg registry.
    */
   export interface WasmApi {
     /**
-     * Calls one WASM export and resolves with its scalar result.
+     * Reads declared module bytes for a library's own WASM loader.
+     */
+    read(moduleId: string): Promise<Uint8Array>;
+    /**
+     * Creates an independent instance using a realm-cached compiled module and optional JS imports.
+     */
+    open(moduleId: string, imports?: object): Promise<WasmInstance>;
+    /**
+     * Evicts module bytes and the default scalar instance; explicit instances remain owned by their callers.
+     */
+    unload(moduleId: string): void;
+    /**
+     * Calls a declared export on the module's persistent default instance.
      */
     call(moduleId: string, exportName: string, args?: WasmArg[]): Promise<WasmScalarValue>;
   }
@@ -3867,9 +3988,149 @@ export namespace ToolPkg {
   }
 
   /**
-   * Provides IPC and registration services for the current ToolPkg package.
+   * Window geometry in logical pixels; position uses the host desktop's top-left origin.
+   */
+  export interface FloatingWindowOptions {
+    /**
+     * Sets the left coordinate, when positioning is supported.
+     */
+    x?: number;
+    /**
+     * Sets the top coordinate, when positioning is supported.
+     */
+    y?: number;
+    /**
+     * Sets content width (16 through 4096 logical pixels).
+     */
+    width?: number;
+    /**
+     * Sets content height (16 through 4096 logical pixels).
+     */
+    height?: number;
+    /**
+     * Keeps the surface above ordinary application windows; defaults to true.
+     */
+    alwaysOnTop?: boolean;
+    /**
+     * Passes pointer input through the entire surface; defaults to false.
+     */
+    clickThrough?: boolean;
+    /**
+     * Allows the surface to accept keyboard focus; defaults to false.
+     */
+    focusable?: boolean;
+    /**
+     * Moves directly in the host using pointer-down screen/window anchors; defaults to false.
+     */
+    draggable?: boolean;
+  }
+
+  /**
+   * Opens a transparent live UI surface owned by the executing plugin.
+   */
+  export interface FloatingWindowOpenOptions {
+    /**
+     * Identifies the window within this plugin; opening an existing ID fails.
+     */
+    id: string;
+    /**
+     * Selects one of this plugin's registered Compose UI routes.
+     */
+    route: string;
+    /**
+     * Supplies the UI session's initial state.
+     */
+    state?: JsonObject;
+    /**
+     * Configures geometry and interaction flags.
+     */
+    options?: FloatingWindowOptions;
+  }
+
+  /**
+   * Reports the actual presentation scope and host capabilities.
+   */
+  export interface FloatingWindowCapabilities {
+    /**
+     * "system", "application", or "unsupported". Application scope stays inside Operit.
+     */
+    scope: string;
+    systemOverlay: boolean;
+    applicationOverlay: boolean;
+    supported: boolean;
+    permissionGranted: boolean;
+    positioning: boolean;
+    alwaysOnTop: boolean;
+    clickThrough: boolean;
+    focusable: boolean;
+  }
+
+  /**
+   * Describes a live window owned by the executing plugin.
+   */
+  export interface FloatingWindowInfo {
+    id: string;
+    route: string;
+    visible: boolean;
+    options: FloatingWindowOptions;
+  }
+
+  /**
+   * Controls general floating windows independently of launcher widgets.
+   */
+  export interface FloatingWindowApi {
+    /**
+     * Queries capabilities without opening a window or displaying a permission prompt.
+     */
+    capabilities(): Promise<FloatingWindowCapabilities>;
+    /**
+     * Opens the host's overlay permission settings when required; query capabilities again afterwards.
+     */
+    requestPermission(): Promise<boolean>;
+    /**
+     * Creates a transparent live route session. IDs are local to the executing plugin.
+     */
+    open(options: FloatingWindowOpenOptions): Promise<FloatingWindowInfo>;
+    /**
+     * Applies partial window options and shallow-merges optional UI state without recreating the session.
+     */
+    update(id: string, options: FloatingWindowOptions, state?: JsonObject): Promise<FloatingWindowInfo>;
+    /**
+     * Shows an owned window without resetting its UI session.
+     */
+    show(id: string): Promise<FloatingWindowInfo>;
+    /**
+     * Hides an owned window while retaining its UI session.
+     */
+    hide(id: string): Promise<FloatingWindowInfo>;
+    /**
+     * Closes an owned window and releases its UI session and engine.
+     */
+    close(id: string): Promise<void>;
+    /**
+     * Lists only the executing plugin's live windows.
+     */
+    list(): Promise<FloatingWindowInfo[]>;
+  }
+
+  /**
+   * Groups runtime presentation services for plugin-owned user interfaces.
+   */
+  export interface UiApi {
+    /**
+     * Controls live floating windows independently of launcher widgets.
+     */
+    floatingWindows: FloatingWindowApi;
+  }
+
+  /**
+   * Provides runtime and registration services for the current ToolPkg package.
    */
   export interface Registry {
+    /**
+     * Groups runtime presentation services for plugin-owned user interfaces.
+     */
+    ui: UiApi;
     /**
      * Exposes inter-context messaging for this ToolPkg registry.
      */
@@ -3952,6 +4213,10 @@ export namespace ToolPkg {
      * @since ToolPkg API 2.0.0
      */
     registerChatRuntimeHook(definition: ChatRuntimeHookRegistration): void;
+    /**
+     * Registers native timed reply presentation without taking ownership of model execution.
+     */
+    registerChatResponseHook(definition: ChatResponseHookRegistration): void;
     /**
      * Registers a typed timer, interval, or broadcast hook.
      */
@@ -4093,6 +4358,10 @@ export namespace ToolPkg {
    * @since ToolPkg API 2.0.0
    */
   function registerChatMessageMenuItem(definition: ChatMessageMenuItemRegistration): void;
+  /**
+   * Registers native timed reply presentation without taking ownership of model execution.
+   */
+  function registerChatResponseHook(definition: ChatResponseHookRegistration): void;
   /**
    * Registers a callback for chat runtime state changes.
    * @since ToolPkg API 2.0.0

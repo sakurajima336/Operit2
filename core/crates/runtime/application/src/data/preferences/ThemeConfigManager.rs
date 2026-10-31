@@ -1,5 +1,4 @@
-use operit_host_api::PluginStorage::{StoragePreferencesMergeCatalog, StoragePreferencesMergeDescriptor, StoragePreferencesMergeKey, StoragePreferencesMergeReference, StoragePreferencesMergeProjection};
-use operit_store::PreferenceMerge::PreferenceMergeStore;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -19,7 +18,7 @@ use super::ThemePreferenceSnapshot::{
 };
 
 pub(super) const THEME_CONFIG_PREFIX: &str = "theme_config_";
-const ACTIVE_THEME_CONFIG_ID_KEY: &str = "active_theme_config_id";
+pub(super) const ACTIVE_THEME_CONFIG_ID_KEY: &str = "active_theme_config_id";
 
 /// Stores one independent named appearance configuration with a complete Flutter snapshot.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -47,37 +46,7 @@ pub struct ThemeConfigManager {
 }
 
 impl ThemeConfigManager {
-    /// Declares this owner's catalog and references using the shared merge contract.
-    pub(crate) fn spaceMergeStore() -> PreferenceMergeStore {
-        let path = operit_util::RuntimeStorageLayout::USER_PREFERENCES_PATH;
-        PreferenceMergeStore {
-            path: path.to_string(),
-            encrypted: false,
-            merge: StoragePreferencesMergeDescriptor {
-                version: 1,
-                catalog: Some(StoragePreferencesMergeCatalog {
-                    key_prefix: THEME_CONFIG_PREFIX.to_string(),
-                    key_suffix: "".to_string(),
-                    identity_field: "id".to_string(),
-                    name_field: "name".to_string(),
-                    ignored_fields: vec!["createdAt".to_string(), "updatedAt".to_string()],
-                    retired_keys: vec![],
-                }),
-                references: vec![StoragePreferencesMergeReference {
-                    key: StoragePreferencesMergeKey::Exact { key: ACTIVE_THEME_CONFIG_ID_KEY.to_string() },
-                    path: vec![],
-                    target: path.to_string(),
-                }],
-                projection: Some(StoragePreferencesMergeProjection {
-                    selection_key: ACTIVE_THEME_CONFIG_ID_KEY.to_string(),
-                    source_field: "snapshot".to_string(),
-                    fields: super::ThemePreferenceSnapshot::snapshotFields()
-                        .map(|field| (field.json_key.to_string(), field.preference_key.to_string())).collect(),
-                    retired_keys: vec!["use_system_theme".to_string()],
-                }),
-            },
-        }
-    }
+
 
     /// Opens ordinary user preferences through the owning runtime's actual storage host.
     pub fn new(storageHost: Arc<dyn RuntimeStorageHost>) -> Self {
@@ -130,46 +99,51 @@ impl ThemeConfigManager {
         })
     }
 
-    /// Adopts verified legacy configurations with stable identities in one ordinary preference transaction.
+    /// Imports usable legacy themes, preserves edited targets and removes unreferenced migration artifacts.
     pub(crate) fn importLegacyConfigurations(
         &self,
         configs: &[ThemeConfig],
         active_id: Option<&str>,
-    ) -> Result<(), PreferencesDataStoreError> {
-        for config in configs {
-            validateConfig(config)?;
-        }
+        abandoned: &[ThemeConfig],
+    ) -> Result<BTreeSet<String>, PreferencesDataStoreError> {
         self.dataStore.try_edit_result(|preferences| {
-            let mut state = readState(preferences)?;
-            for config in configs {
-                match state.configs.iter().find(|saved| saved.id == config.id) {
-                    Some(saved) if saved != config => {
-                        return Err(PreferencesDataStoreError::Message(format!(
-                            "Legacy theme identity already stores different data: {}", config.id
-                        )));
+            let active_key = stringPreferencesKey(ACTIVE_THEME_CONFIG_ID_KEY);
+            for config in abandoned {
+                let key = stringPreferencesKey(&format!("{THEME_CONFIG_PREFIX}{}", config.id));
+                if preferences.get(&key) == Some(&serde_json::to_value(config)?) {
+                    preferences.remove(&key);
+                    if preferences.get(&active_key).and_then(Value::as_str)
+                        == Some(config.id.as_str())
+                    {
+                        preferences.set(&active_key, Value::Null);
                     }
-                    Some(_) => {}
-                    None => state.configs.push(config.clone()),
                 }
             }
+            let mut imported = BTreeSet::new();
+            for config in configs {
+                if validateConfig(config).is_err() {
+                    continue;
+                }
+                let key = stringPreferencesKey(&format!("{THEME_CONFIG_PREFIX}{}", config.id));
+                let value = serde_json::to_value(config)?;
+                match preferences.get(&key) {
+                    Some(saved) if saved != &value => continue,
+                    Some(_) => {}
+                    None => preferences.set(&key, value),
+                }
+                imported.insert(config.id.clone());
+            }
             // An explicit new-domain selection belongs to the user, including custom appearance.
-            if let (false, Some(active_id)) = (
-                preferences.contains(&stringPreferencesKey(ACTIVE_THEME_CONFIG_ID_KEY)), active_id,
-            ) {
-                let active = findConfig(&state, active_id)?;
-                writeThemePreferenceSnapshot(preferences, &active.snapshot)?;
-                state.activeThemeConfigId = Some(active_id.to_string());
+            if !preferences.contains(&active_key) {
+                if let Some(config) = configs.iter().find(|config| {
+                    Some(config.id.as_str()) == active_id && imported.contains(&config.id)
+                }) {
+                    writeThemePreferenceSnapshot(preferences, &config.snapshot)?;
+                    preferences.set(&active_key, serde_json::to_value(&config.id)?);
+                }
             }
-            writeState(preferences, &state)
-        })?;
-        for config in configs {
-            if self.get(config.id.clone())? != *config {
-                return Err(PreferencesDataStoreError::Message(format!(
-                    "Legacy theme verification failed: {}", config.id
-                )));
-            }
-        }
-        Ok(())
+            Ok(imported)
+        })
     }
 
     /// Updates a named theme and its active ordinary appearance in one preference commit.

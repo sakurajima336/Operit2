@@ -19,6 +19,7 @@ pub mod compose_dsl_material3_generated;
 pub mod core;
 pub mod files;
 pub mod material_icons;
+pub mod media;
 pub mod network;
 pub mod results;
 pub mod runtime_bindings;
@@ -32,6 +33,7 @@ pub mod storage;
 pub mod storage_facade;
 pub mod system;
 pub mod tool_types;
+pub mod tool_display;
 pub mod toolpkg;
 pub mod ui;
 

@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import 'package:operit2/l10n/generated/app_localizations.dart';
 import 'style/MessageHeaderMetadata.dart';
 
+import '../../../../core/logging/ClientLogger.dart';
 import '../../../../core/proxy/generated/CoreProxyClients.g.dart';
 import '../../../../core/proxy/generated/CoreProxyModels.g.dart' as core_proxy;
 import '../../../common/interactions/MessagePressShield.dart';
@@ -28,6 +29,7 @@ typedef MessageFavoriteAction =
 typedef MessageVoiceAction = Future<void> Function(ChatUiMessage message);
 
 class MessageContextMenu extends StatefulWidget {
+  /// Creates message actions with the owning chat's current execution state.
   const MessageContextMenu({
     super.key,
     required this.message,
@@ -44,6 +46,7 @@ class MessageContextMenu extends StatefulWidget {
     this.onRollbackToMessage,
     this.onSelectMessageToEdit,
     this.onRegenerateMessage,
+    this.isChatBusy = false,
     this.onInsertSummary,
     this.onCreateBranch,
     this.onReplyToMessage,
@@ -65,6 +68,7 @@ class MessageContextMenu extends StatefulWidget {
   final MessageTimestampSelectionAction? onRollbackToMessage;
   final MessageSelectionAction? onSelectMessageToEdit;
   final MessageTimestampAction? onRegenerateMessage;
+  final bool isChatBusy;
   final ValueChanged<ChatUiMessage>? onInsertSummary;
   final MessageTimestampAction? onCreateBranch;
   final ValueChanged<ChatUiMessage>? onReplyToMessage;
@@ -225,6 +229,18 @@ class _MessageContextMenuState extends State<MessageContextMenu> {
         label: '复制消息',
       ),
     ];
+    final l10n = AppLocalizations.of(context);
+    items.add(
+      _menuItem(
+        value: _MessageMenuAction.favorite,
+        icon: message.isFavorite
+            ? Icons.star_rounded
+            : Icons.star_outline_rounded,
+        label: message.isFavorite
+            ? (l10n?.messageLocatorRemoveFavorite ?? '取消收藏')
+            : (l10n?.messageLocatorAddFavorite ?? '收藏消息'),
+      ),
+    );
     if (message.sender == 'user') {
       items.addAll(<PopupMenuEntry<_MessageMenuSelection>>[
         _menuItem(
@@ -245,6 +261,7 @@ class _MessageContextMenuState extends State<MessageContextMenu> {
           value: _MessageMenuAction.regenerate,
           icon: Icons.refresh,
           label: '重新生成',
+          enabled: !widget.isChatBusy && widget.onRegenerateMessage != null,
         ),
         _menuItem(
           value: _MessageMenuAction.modifyMemory,
@@ -334,15 +351,26 @@ class _MessageContextMenuState extends State<MessageContextMenu> {
     required _MessageMenuAction value,
     required IconData icon,
     required String label,
+    bool enabled = true,
   }) {
     return PopupMenuItem<_MessageMenuSelection>(
       value: _MessageMenuSelection.builtIn(value),
+      enabled: enabled,
       height: 36,
       child: Row(
         children: <Widget>[
-          Icon(icon, size: 16),
+          Icon(
+            icon,
+            size: 16,
+            color: enabled ? null : Theme.of(context).disabledColor,
+          ),
           const SizedBox(width: 12),
-          Text(label, style: Theme.of(context).textTheme.bodyMedium),
+          Text(
+            label,
+            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+              color: enabled ? null : Theme.of(context).disabledColor,
+            ),
+          ),
         ],
       ),
     );
@@ -367,6 +395,32 @@ class _MessageContextMenuState extends State<MessageContextMenu> {
           ),
         );
         break;
+      case _MessageMenuAction.favorite:
+        try {
+          await widget.onToggleFavoriteMessage(
+            widget.message.timestamp,
+            !widget.message.isFavorite,
+          );
+          await widget.onRefresh?.call();
+        } catch (error, stackTrace) {
+          ClientLogger.e(
+            'Failed to update message favorite',
+            tag: 'MessageContextMenu',
+            error: error,
+            stackTrace: stackTrace,
+          );
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(
+                  AppLocalizations.of(context)?.messageLocatorFavoriteFailed ??
+                      '收藏更新失败，请重试',
+                ),
+              ),
+            );
+          }
+        }
+        break;
       case _MessageMenuAction.editAndResend:
       case _MessageMenuAction.modifyMemory:
         widget.onSelectMessageToEdit?.call(widget.message);
@@ -375,8 +429,23 @@ class _MessageContextMenuState extends State<MessageContextMenu> {
         widget.onRollbackToMessage?.call(widget.message.timestamp);
         break;
       case _MessageMenuAction.regenerate:
-        await widget.onRegenerateMessage?.call(widget.message.timestamp);
-        await widget.onRefresh?.call();
+        if (widget.isChatBusy) return;
+        try {
+          await widget.onRegenerateMessage?.call(widget.message.timestamp);
+          await widget.onRefresh?.call();
+        } catch (error, stackTrace) {
+          ClientLogger.e(
+            'Failed to regenerate message',
+            tag: 'MessageContextMenu',
+            error: error,
+            stackTrace: stackTrace,
+          );
+          if (mounted) {
+            ScaffoldMessenger.of(
+              context,
+            ).showSnackBar(SnackBar(content: Text(error.toString())));
+          }
+        }
         break;
       case _MessageMenuAction.deleteVariant:
         await widget.onDeleteMessageVariant?.call(
@@ -462,6 +531,7 @@ class _MessageContextMenuState extends State<MessageContextMenu> {
       'id': item.itemId,
       'runtime': 'compose_dsl',
       'screen': dialog.screen,
+      if (dialog.screenExport != null) 'screenExport': dialog.screenExport,
       'title': dialog.title,
       'toolPkgId': item.containerPackageName,
       'menuItemId': item.itemId,
@@ -646,6 +716,7 @@ class _MessageContextMenuState extends State<MessageContextMenu> {
 
 enum _MessageMenuAction {
   copy,
+  favorite,
   editAndResend,
   modifyMemory,
   rollback,

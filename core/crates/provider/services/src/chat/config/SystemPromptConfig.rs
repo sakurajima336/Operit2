@@ -481,9 +481,8 @@ impl SystemPromptConfig {
                 model_parameters: Vec::new(),
                 available_tools: Vec::new(),
                 metadata,
-                on_hook_timeout: None,
             })
-            .await;
+            .await?;
 
         let base_prompt = match before_context.system_prompt.clone() {
             Some(prompt) => prompt,
@@ -497,7 +496,7 @@ impl SystemPromptConfig {
                 system_prompt: Some(composed_prompt),
                 ..before_context
             })
-            .await;
+            .await?;
         let after_compose_prompt = compose_context.system_prompt.clone().unwrap_or_default();
         let after_context =
             PromptHookRegistry::dispatchSystemPromptComposeHooks(PromptHookContext {
@@ -505,7 +504,7 @@ impl SystemPromptConfig {
                 system_prompt: Some(after_compose_prompt),
                 ..compose_context
             })
-            .await;
+            .await?;
         Ok(after_context.system_prompt.unwrap_or_default())
     }
 }
@@ -534,13 +533,13 @@ fn buildWorkspaceRuleFileSection(
     }
 }
 
-/// Attachment files remain node-local and ephemeral; metadata does not copy their bytes.
+/// Attachment files persist node-locally across restarts; metadata does not copy their bytes.
 #[allow(non_snake_case)]
 fn getAttachmentGuidelines(use_english: bool) -> &'static str {
     if use_english {
-        "ATTACHMENT LOCATIONS:\n- An attachment's `node_id` identifies the CoreNode that actually holds its file; it is not necessarily the current execution node. Node metadata does not transfer or synchronize the file.\n- Use content already embedded in the message directly. To access a file, use `list_core_nodes` to check the current node and source reachability. If the source differs, call `switch_core` with the exact `node_id` and wait for continuation on that node before using file tools; switching changes this chat's execution node. Use the attachment's `path` VFS locator for file tools. Client-local physical paths are not exposed in attachment metadata. If no `path` is provided, use embedded content or request re-upload; do not guess a physical path or search for a mapping. Do not search the current device for another device's file.\n- Files under `/app/data/temp/clean_on_exit` are temporary, not Space-synchronized, and may have been cleaned. If the source is unreachable or the file has been cleaned, explain this and request reconnection or re-upload instead of searching unrelated directories. Legacy attachments without `node_id` have an unknown source; do not invent one."
+        "ATTACHMENT LOCATIONS:\n- An attachment's `node_id` identifies the CoreNode that actually holds its file; it is not necessarily the current execution node. Node metadata does not transfer or synchronize the file.\n- Use content already embedded in the message directly. To access a file, use `list_core_nodes` to check the current node and source reachability. If the source differs, call `switch_core` with the exact `node_id` and wait for continuation on that node before using file tools; switching changes this chat's execution node. Use the attachment's `path` VFS locator for file tools. Client-local physical paths are not exposed in attachment metadata. If no `path` is provided, use embedded content or request re-upload; do not guess a physical path or search for a mapping. Do not search the current device for another device's file.\n- Files under `/app/data/data/chat_attachments` are persistent and remain readable across restarts on the node that holds them; they are not Space-synchronized. Attachments without a `path` may be legacy or missing; ask the user to re-upload instead of searching unrelated directories. Legacy attachments without `node_id` have an unknown source; do not invent one."
     } else {
-        "附件位置：\n- 附件的 `node_id` 是文件实际所在的 CoreNode，不一定是当前执行节点；携带节点信息不代表文件已传输或同步。\n- 消息中已经内嵌的内容可直接使用。需要访问文件时，先用 `list_core_nodes` 确认当前节点和来源节点是否可达；来源不同则用精确的 `node_id` 调用 `switch_core`，等待在目标节点继续执行后再调用文件工具。切换会改变这段聊天的执行节点。文件工具使用附件的 `path` VFS 地址；附件元数据不暴露客户端物理路径。没有 `path` 时，使用内嵌内容或请用户重新上传，不要猜测物理路径或搜索映射。不要在当前设备搜索另一台设备的文件。\n- `/app/data/temp/clean_on_exit` 下的文件是临时附件，不参与 Space 文件同步，可能已经清理。来源不可达或文件已清理时，明确说明并请用户重连或重新上传，不要搜索无关目录。旧附件没有 `node_id` 时来源未知，不得猜测补成当前节点。"
+        "附件位置：\n- 附件的 `node_id` 是文件实际所在的 CoreNode，不一定是当前执行节点；携带节点信息不代表文件已传输或同步。\n- 消息中已经内嵌的内容可直接使用。需要访问文件时，先用 `list_core_nodes` 确认当前节点和来源节点是否可达；来源不同则用精确的 `node_id` 调用 `switch_core`，等待在目标节点继续执行后再调用文件工具。切换会改变这段聊天的执行节点。文件工具使用附件的 `path` VFS 地址；附件元数据不暴露客户端物理路径。没有 `path` 时，使用内嵌内容或请用户重新上传，不要猜测物理路径或搜索映射。不要在当前设备搜索另一台设备的文件。\n- `/app/data/data/chat_attachments` 下的文件持久保存，重启后仍可在持有它的节点上读取；不参与 Space 文件同步。没有 `path` 的附件可能是旧格式或已缺失，请用户重新上传，不要搜索无关目录。旧附件没有 `node_id` 时来源未知，不得猜测补成当前节点。"
     }
 }
 
@@ -570,11 +569,11 @@ fn getWorkspaceGuidelines(
         .join("\n");
     let base_guidelines = if use_english {
         format!(
-            "WORKSPACE GUIDELINES:\n- The current workspace root is `{workspace_path}`.\n- This workspace contains these mounted folders; every listed path belongs to the same workspace:\n{mounted_folders}\n- Treat every listed VFS path as an allowed workspace root; do not limit workspace operations to the first path.\n- File tools accept VFS paths only. Use absolute paths rooted at the relevant listed workspace folder.\n- The workspace collection is under `/app/workspaces`; each workspace must be addressed by its full VFS path.\n- Within the same Space, ordinary files in the workspace body under `/app/workspaces/<workspace-id>/...` are automatically replicated bidirectionally between devices running supported Core versions. Synchronization is eventual and needs connectivity; membership, pairing, or an identical path does not prove a file has arrived. Verify availability on the execution node.\n- External mounted folders (such as `/mnt/...` and `/data/...`), symlinks, and temporary attachments are not automatically included in workspace synchronization. To retain and share such a file, copy it into the workspace body; a mount or symlink alone is not enough.\n- Root listing always shows `/app`; `/mnt` is listed when this host has mounted external entries.\n- `/sdcard` and `/data` are hidden Android aliases that can be opened directly on Android hosts.\n- Relative paths are allowed in project-internal references and terminal commands after selecting the working directory, but not in file-tool path parameters.\n- **Best Practice for Code Modifications**: Before modifying any file, use `grep_code` and `grep_context` to locate and understand relevant code with surrounding context. This ensures you understand the codebase structure before making changes."
+            "WORKSPACE GUIDELINES:\n- The current workspace root is `{workspace_path}`.\n- This workspace contains these mounted folders; every listed path belongs to the same workspace:\n{mounted_folders}\n- Treat every listed VFS path as an allowed workspace root; do not limit workspace operations to the first path.\n- File tools accept VFS paths only. Use absolute paths rooted at the relevant listed workspace folder.\n- Within the device space, `nodeName:path` (names from `list_core_nodes`) addresses files on another device; the operation runs on that device. `copy_file` and `move_file` stream files between devices directly with SHA-256 verification, which may take time for large files.\n- The workspace collection is under `/app/workspaces`; each workspace must be addressed by its full VFS path.\n- Within the same Space, ordinary files in the workspace body under `/app/workspaces/<workspace-id>/...` are automatically replicated bidirectionally between devices running supported Core versions. Synchronization is eventual and needs connectivity; membership, pairing, or an identical path does not prove a file has arrived. Verify availability on the execution node.\n- External mounted folders (such as `/mnt/...` and `/data/...`), symlinks, and temporary attachments are not automatically included in workspace synchronization. To retain and share such a file, copy it into the workspace body; a mount or symlink alone is not enough.\n- Root listing always shows `/app`; `/mnt` is listed when this host has mounted external entries.\n- `/sdcard` and `/data` are hidden Android aliases that can be opened directly on Android hosts.\n- Relative paths are allowed in project-internal references and terminal commands after selecting the working directory, but not in file-tool path parameters.\n- **Best Practice for Code Modifications**: Before modifying any file, use `grep_code` and `grep_context` to locate and understand relevant code with surrounding context. This ensures you understand the codebase structure before making changes."
         )
     } else {
         format!(
-            "工作区指南：\n- 当前工作区根目录是 `{workspace_path}`。\n- 当前工作区包含以下挂载文件夹，所有列出的路径都属于同一个工作区：\n{mounted_folders}\n- 每个列出的 VFS 路径都是允许访问的工作区根目录，不能只使用第一个路径。\n- 文件工具只接受 VFS 路径；操作文件时，请使用以对应工作区文件夹为根的绝对路径。\n- 工作区集合位于 `/app/workspaces`；每个工作区都必须用完整 VFS 路径访问。\n- 同一 Space 内，`/app/workspaces/<workspace-id>/...` 工作区本体中的普通文件，会在运行支持版本 Core 的设备间自动双向复制。同步是最终一致的，需要设备连通；仅配对、成员关系或路径相同不代表文件已到达，使用前应确认当前执行节点的文件已就绪。\n- 外部挂载目录（如 `/mnt/...`、`/data/...`）、软链接和临时附件，不会自动纳入工作区文件同步。需要长期保留并跨端共享的文件，应实际复制进工作区本体；只挂载目录或创建软链接不够。\n- 根目录列表固定展示 `/app`；当前 Host 存在外部挂载项时才展示 `/mnt`。\n- `/sdcard` 和 `/data` 是 Android 隐藏别名，只在 Android Host 上可直接访问。\n- 项目内部引用和已切换工作目录的终端命令可以使用相对路径，但文件工具的路径参数必须使用 VFS 绝对路径。\n- **代码修改最佳实践**：修改任何文件之前，建议组合使用 `grep_code` 与 `grep_context` 定位并理解相关代码及其上下文，避免在未理解项目结构时盲改。"
+            "工作区指南：\n- 当前工作区根目录是 `{workspace_path}`。\n- 当前工作区包含以下挂载文件夹，所有列出的路径都属于同一个工作区：\n{mounted_folders}\n- 每个列出的 VFS 路径都是允许访问的工作区根目录，不能只使用第一个路径。\n- 文件工具只接受 VFS 路径；操作文件时，请使用以对应工作区文件夹为根的绝对路径。\n- 在设备空间内，`nodeName:path`（名字来自 `list_core_nodes`）指向其他设备上的文件，操作在该设备上执行。`copy_file` 与 `move_file` 会在设备间直接流式传输文件并做 SHA-256 校验，大文件可能耗时较长。\n- 工作区集合位于 `/app/workspaces`；每个工作区都必须用完整 VFS 路径访问。\n- 同一 Space 内，`/app/workspaces/<workspace-id>/...` 工作区本体中的普通文件，会在运行支持版本 Core 的设备间自动双向复制。同步是最终一致的，需要设备连通；仅配对、成员关系或路径相同不代表文件已到达，使用前应确认当前执行节点的文件已就绪。\n- 外部挂载目录（如 `/mnt/...`、`/data/...`）、软链接和临时附件，不会自动纳入工作区文件同步。需要长期保留并跨端共享的文件，应实际复制进工作区本体；只挂载目录或创建软链接不够。\n- 根目录列表固定展示 `/app`；当前 Host 存在外部挂载项时才展示 `/mnt`。\n- `/sdcard` 和 `/data` 是 Android 隐藏别名，只在 Android Host 上可直接访问。\n- 项目内部引用和已切换工作目录的终端命令可以使用相对路径，但文件工具的路径参数必须使用 VFS 绝对路径。\n- **代码修改最佳实践**：修改任何文件之前，建议组合使用 `grep_code` 与 `grep_context` 定位并理解相关代码及其上下文，避免在未理解项目结构时盲改。"
         )
     };
     let terminal_section =
@@ -682,6 +681,17 @@ mod tests {
         assert!(!prompt.contains("<param"));
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn native_package_guidelines_advertise_json_objects_in_both_languages() {
+        for english in [true, false] {
+            let mut options = packagePromptOptions(true);
+            options.use_english = english;
+            let prompt = SystemPromptConfig::getSystemPrompt(options).await.unwrap();
+            assert!(prompt.contains("JSON"));
+            assert!(!prompt.contains("YAML"));
+        }
+    }
+
     /// Verifies text-protocol prompts retain the XML package invocation syntax.
     #[tokio::test(flavor = "current_thread")]
     async fn xmlToolPromptIncludesPackageInvocationSyntax() {
@@ -702,7 +712,7 @@ mod tests {
             .await.expect("Tool-prompt policies must succeed in this test");
             assert!(prompt.contains("node_id"));
             assert!(prompt.contains("switch_core"));
-            assert!(prompt.contains("/app/data/temp/clean_on_exit"));
+            assert!(prompt.contains("/app/data/data/chat_attachments"));
             assert!(!prompt.contains("resolve `id`"));
             assert!(!prompt.contains("物理路径 `id`"));
             assert!(prompt.contains(if use_english {

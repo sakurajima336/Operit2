@@ -64,6 +64,18 @@ public final class KeepAliveServiceHost {
         workPresenter.dismiss(workId);
     }
 
+    /** Reposts current work after authorization changes and publishes actual notification visibility. */
+    static void refreshNotifications() {
+        requireMainThread();
+        if (workPresenter != null) {
+            try { workPresenter.refresh(); }
+            catch (org.json.JSONException error) {
+                throw new IllegalArgumentException("Invalid retained Core work snapshot", error);
+            }
+        }
+        publish();
+    }
+
     /** Reports native ownership and the actual Android promotion permission. */
     static Map<String, Object> workCapabilities() {
         Map<String, Object> value = new LinkedHashMap<>();

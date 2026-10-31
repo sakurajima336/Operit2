@@ -16,7 +16,7 @@ async function environment(t) {
     /** Records tool reads so execution tests can reject unnecessary catalog loads. */
     async readToolCatalog() { calls.push("tools"); return plain(directories.toolCatalog); },
   });
-  const service = loadModule("src/service.ts", disk.globals).createCharacterCardsService(repository);
+  const service = loadModule("src/service-runtime.ts", disk.globals).createCharacterCardsService(repository);
   /** Discards setup reads while retaining the actual database and all service state. */
   function reset() { disk.clearCalls(); calls.length = 0; }
   /** Resolves through the real service dispatcher and its live privacy check. */
@@ -247,6 +247,31 @@ test("missing primary memory libraries stay editable and require explicit valid 
     const store = await h.service.dispatchDomain("memory.shared.create", { name: "Explicitly selected library" });
     const repaired = await h.service.dispatchDomain("character.update", { id: "default", changes: { sharedMemoryId: store.id } });
     assert.equal(repaired.memoryBindingMode, "SHARED"); assert.equal(repaired.sharedMemoryId, store.id);
+    assert.equal((await h.resolve(request("card:default"))).profile.id, "default");
+  }
+});
+
+/** Keeps unavailable active choices readable while requiring explicit valid selection before execution. */
+test("deleted active roles allow repository reopen and edits without choosing a replacement", async t => {
+  for (const active of [{ CharacterCard: { id: "deleted-character" } }, { CharacterGroup: { id: "deleted-group" } }]) {
+    const h = await environment(t);
+    h.disk.storage.inspectPreferences("meta", values => { values.state.active = structuredClone(active); });
+    const before = h.disk.stateBytes();
+    await loadModule("src/storage/database.ts", h.disk.globals).DatabaseCharacterRepository.open();
+    assert.deepEqual(plain(await h.service.dispatchDomain("activePrompt.get", {})), active);
+    assert.deepEqual(h.disk.stateBytes(), before);
+    const edited = await h.service.dispatchDomain("character.update", { id: "default", changes: { description: "Editable before reselection" } });
+    assert.equal(edited.description, "Editable before reselection");
+    assert.deepEqual(plain(await h.service.dispatchDomain("activePrompt.get", {})), active);
+    const selection = "CharacterCard" in active ? "card:deleted-character" : "group:deleted-group";
+    await assert.rejects(h.resolve(request(selection)), /Character not found|Group not found/);
+    const unchanged = h.disk.stateBytes();
+    await assert.rejects(h.service.dispatchDomain("activePrompt.setCard", { id: "deleted-character" }), /character does not identify exactly one record/);
+    await assert.rejects(h.service.dispatchDomain("activePrompt.setGroup", { id: "deleted-group" }), /group does not identify exactly one record/);
+    await assert.rejects(h.service.dispatchDomain("activePrompt.resolvedCard", {}), /character does not identify exactly one record|requires an explicit execution participant/);
+    assert.deepEqual(h.disk.stateBytes(), unchanged);
+    await h.service.dispatchDomain("activePrompt.setCard", { id: "default" });
+    assert.deepEqual(plain(await h.service.dispatchDomain("activePrompt.get", {})), { CharacterCard: { id: "default" } });
     assert.equal((await h.resolve(request("card:default"))).profile.id, "default");
   }
 });

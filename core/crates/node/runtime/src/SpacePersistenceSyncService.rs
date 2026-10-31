@@ -1,4 +1,7 @@
-use crate::PeerSync::{PeerSyncMethod, NODE_SYNC_TARGET};
+#[path = "SyncConsistency.rs"]
+mod consistency;
+
+use crate::PeerSync::{PeerSyncMethod, SyncRequest, NODE_SYNC_TARGET};
 use operit_host_api::HostManager::defaultHostRuntimeTaskSchedulerHost;
 use operit_host_api::TimeUtils::currentTimeMillis;
 use operit_link::{fromCoreValue, toCoreValue, CoreCallRequest, CorePushRequest, CoreValue};
@@ -7,25 +10,26 @@ use operit_store::NetworkControlStore::NetworkControlStore;
 use operit_store::WorkspaceFileSyncStore::WorkspaceFileSyncStore;
 use operit_util::RuntimeStorageLayout::RUNTIME_SYNC_DIR_PATH;
 use operit_store::RuntimeFileSyncStore::{RuntimeFileSyncReference, RuntimeFileSyncStore};
-use operit_store::SyncOperationStore::{subscribeSyncMutations, syncMutationRevision, SyncMutationSubscription, SyncOperation};
+use operit_store::SyncOperationStore::{subscribeSyncMutations, syncMutationRevision, SyncMutationSubscription, SyncOperation, SyncOperationKnowledge};
 use serde::de::DeserializeOwned;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use operit_store::PreferencesDataStore::StateFlow;
+use crate::SpaceSyncProgress::{SpaceSyncProgress, SyncProgressTracker};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use crate::CoreNodeRouter::{CoreNodeLocalRuntime, CoreNodeRouter};
 
-const SYNC_DOMAINS: [&str; 5] = [
+const SYNC_DOMAINS: [&str; 6] = [
     "preferences",
     "chat",
     "binding",
     "runtime_file",
     "network_control",
+    "plugin_storage",
 ];
-const PLUGIN_SYNC_DOMAINS: [&str; 1] = ["plugin_storage"];
-const SPACE_SYNC_PREPARATION_DELAY_MS: u64 = 0;
 const SYNC_BLOB_CHUNK_BYTES: i64 = 64 * 1024;
 /// Wire reservation for the Link request envelope, AEAD tag and frame prefix.
 /// One operation above this reservation cannot travel in any single message.
@@ -40,10 +44,27 @@ const MAX_SYNC_PAGES_PER_PASS: usize = 64;
 const PEER_FULL_SYNC_BACKOFF_BASE_MS: i64 = 2_000;
 /// Ceiling for the exponential retry delay of one peer's full synchronization pass.
 const PEER_FULL_SYNC_BACKOFF_MAX_MS: i64 = 60_000;
+/// Fast workspace-scan polling while scans keep finding changes. App writes and
+/// incoming batches scan inline, so this only bounds discovery latency for
+/// writes made by terminals and external editors while activity continues.
+const WORKSPACE_SCAN_ACTIVE_INTERVAL_MS: u64 = 2_000;
+/// Idle ceiling for the adaptive workspace-scan backoff. Steady-state scans are
+/// metadata-only (unchanged sizes reuse inventory references), so one listing
+/// comparison per minute is the worst idle cost.
+const WORKSPACE_SCAN_IDLE_INTERVAL_MS: u64 = 60_000;
+
+/// Only verified exchange boundaries may become a caller's scheduling baseline.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct PeerSyncStatus {
+    local: Option<String>,
+    remote: Option<String>,
+    pending: bool,
+    progress: Option<SpaceSyncProgress>,
+}
 
 /// Per-peer scheduling state behind the change-gated synchronization floor.
 ///
-/// Every cycle probes each storage-granted member with the cheap `syncClock`
+/// Every cycle probes each storage-granted member with the cheap `syncClockDigest`
 /// RPC and runs the expensive exchanges (Space projection, control log,
 /// business replication, blobs) only when something actually changed for that
 /// peer: the remote clock moved, the local synchronized-state summary moved
@@ -56,17 +77,18 @@ const PEER_FULL_SYNC_BACKOFF_MAX_MS: i64 = 60_000;
 /// without creating business operations.
 #[derive(Clone, Default)]
 struct PeerSyncGate {
+    /// Every caller uses the same peer pass, including route changes.
+    execution: Arc<tokio::sync::Mutex<()>>,
     /// Summarized remote clock observed at the last completed full pass.
     lastRemoteClockSummary: Option<String>,
-    /// Local synchronized-state summary captured right after the last
-    /// completed pass (journal clock, projected operations and device preferences).
+    /// Local summary captured before the last verified empty-export boundary.
     lastLocalStateSummary: Option<String>,
-    /// Probe clock from the most recent decision, promoted on pass completion.
-    probedClockSummary: Option<String>,
     /// Consecutive failed full passes; drives the exponential retry delay.
     consecutiveFailures: u32,
     /// Earliest wall-clock time the next full pass may run after a failure.
     nextFullSyncAllowedAt: i64,
+    /// Business failures keep receiving new data without arming connection failure backoff.
+    pendingWork: bool,
 }
 
 impl PeerSyncGate {
@@ -87,7 +109,7 @@ fn peerFullSyncBackoffMs(consecutiveFailures: u32) -> i64 {
     )
 }
 
-static SPACE_SYNC_SERVICES: OnceLock<Mutex<BTreeMap<String, Arc<SpacePersistenceSyncState>>>> =
+static SPACE_SYNC_SERVICES: OnceLock<Mutex<BTreeMap<String, Weak<SpacePersistenceSyncState>>>> =
     OnceLock::new();
 
 /// Stores the runtime state owned by one CoreNode persistence worker.
@@ -100,22 +122,16 @@ struct SpacePersistenceSyncState {
     mutationSubscription: Mutex<Option<SyncMutationSubscription>>,
     peerChangesStop: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
     synchronizationRequested: AtomicBool,
+    synchronizationReasons: Mutex<BTreeSet<&'static str>>,
     workspaceScanStop: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
     peerGates: Mutex<BTreeMap<String, PeerSyncGate>>,
+    progress: SyncProgressTracker,
 }
 
 /// 通过 Router 与可达的 Space 成员同步持久化数据，不拥有配对、发现或传输。
 #[derive(Clone)]
 pub struct SpacePersistenceSyncService {
     state: Arc<SpacePersistenceSyncState>,
-}
-
-#[derive(Deserialize)]
-struct SyncOperationOrder {
-    opId: String,
-    originDeviceId: String,
-    sequence: i64,
-    createdAt: i64,
 }
 
 impl SpacePersistenceSyncService {
@@ -125,20 +141,37 @@ impl SpacePersistenceSyncService {
         nodeRouter: CoreNodeRouter,
             spaceStore: CoreSpaceStore,
     ) -> Self {
-        Self {
-            state: Arc::new(SpacePersistenceSyncState {
-                localRuntime,
-                nodeRouter,
-                spaceStore,
-                synchronizationScheduled: AtomicBool::new(false),
-                active: AtomicBool::new(false),
-                mutationSubscription: Mutex::new(None),
-                peerChangesStop: Mutex::new(None),
-                synchronizationRequested: AtomicBool::new(false),
-                workspaceScanStop: Mutex::new(None),
-                peerGates: Mutex::new(BTreeMap::new()),
-            }),
+        let mut services = persistenceServices().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let nodeId = nodeRouter.localNodeId();
+        if let Some(state) = services.get(&nodeId).and_then(Weak::upgrade)
+            .filter(|state| state.localRuntime.sharesApplicationWith(&localRuntime)) {
+            return Self { state };
         }
+        services.retain(|_, state| state.strong_count() > 0);
+        let state = Arc::new(SpacePersistenceSyncState {
+            localRuntime, nodeRouter, spaceStore,
+            synchronizationScheduled: AtomicBool::new(false),
+            active: AtomicBool::new(false),
+            mutationSubscription: Mutex::new(None),
+            peerChangesStop: Mutex::new(None),
+            synchronizationRequested: AtomicBool::new(false),
+            synchronizationReasons: Mutex::new(BTreeSet::new()),
+            workspaceScanStop: Mutex::new(None),
+            peerGates: Mutex::new(BTreeMap::new()),
+            progress: SyncProgressTracker::default(),
+        });
+        services.insert(nodeId, Arc::downgrade(&state));
+        Self { state }
+    }
+
+    /// Returns the shared local progress without rebuilding topology projections.
+    pub(crate) fn progressFlow(&self) -> StateFlow<Vec<SpaceSyncProgress>> {
+        self.state.progress.flow()
+    }
+
+    /// Returns this peer's current visible coordinator session.
+    pub(crate) fn peerProgress(&self, peer: &str) -> Option<SpaceSyncProgress> {
+        self.state.progress.peer(peer)
     }
 
     /// Starts the unique change-triggered persistence synchronizer for this CoreNode.
@@ -146,7 +179,6 @@ impl SpacePersistenceSyncService {
         let startedAt = currentTimeMillis();
         self.state.nodeRouter.nodeServices()?;
         self.state.spaceStore.initialize()?;
-        let localNodeId = self.state.nodeRouter.localNodeId();
         operit_util::AppLogger::AppLogger::v(
             "SpacePersistenceSyncService",
             &format!(
@@ -154,15 +186,8 @@ impl SpacePersistenceSyncService {
                 currentTimeMillis() - startedAt
             ),
         );
-        {
-            let mut services = persistenceServices()
-                .lock()
-                .map_err(|error| format!("Space sync registry lock poisoned: {error}"))?;
-            if services.contains_key(&localNodeId) {
-                return Ok(());
-            }
-            self.state.active.store(true, Ordering::Release);
-            services.insert(localNodeId.clone(), self.state.clone());
+        if self.state.active.swap(true, Ordering::AcqRel) {
+            return Ok(());
         }
         let registrationStartedAt = currentTimeMillis();
 
@@ -172,7 +197,7 @@ impl SpacePersistenceSyncService {
                 return;
             };
             let service = SpacePersistenceSyncService { state };
-            if let Err(error) = service.scheduleSynchronization() {
+            if let Err(error) = service.scheduleSynchronization("sync_mutation") {
                 operit_util::AppLogger::AppLogger::e(
                     "SpacePersistenceSyncService",
                     &format!("Space persistence sync scheduling failed: {error}"),
@@ -186,9 +211,13 @@ impl SpacePersistenceSyncService {
             .map_err(|error| format!("Space sync subscription lock poisoned: {error}"))? =
             Some(subscription);
 
-        if let Err(error) = self.startWorkspaceScanner().and_then(|_| self.startPeerChangeWatcher()) {
-            let _ = self.stop();
-            return Err(error);
+        for (context, result) in [
+            ("workspace scanner", self.startWorkspaceScanner()),
+            ("peer change watcher", self.startPeerChangeWatcher()),
+        ] {
+            if let Err(error) = result {
+                operit_util::AppLogger::AppLogger::w("SpacePersistenceSyncService", &format!("{context}: {error}"));
+            }
         }
         operit_util::AppLogger::AppLogger::v(
             "SpacePersistenceSyncService",
@@ -199,7 +228,7 @@ impl SpacePersistenceSyncService {
         );
         let synchronizationStartedAt = currentTimeMillis();
 
-        if let Err(error) = self.scheduleSynchronization() {
+        if let Err(error) = self.scheduleSynchronization("service_start") {
             let _ = self.stop();
             return Err(error);
         }
@@ -228,16 +257,7 @@ impl SpacePersistenceSyncService {
             .lock()
             .map_err(|error| format!("Space sync subscription lock poisoned: {error}"))?
             .take();
-        let localNodeId = self.state.nodeRouter.localNodeId();
-        let mut services = persistenceServices()
-            .lock()
-            .map_err(|error| format!("Space sync registry lock poisoned: {error}"))?;
-        if services
-            .get(&localNodeId)
-            .is_some_and(|state| Arc::ptr_eq(state, &self.state))
-        {
-            services.remove(&localNodeId);
-        }
+        self.state.progress.clear();
         Ok(())
     }
 
@@ -249,22 +269,31 @@ impl SpacePersistenceSyncService {
         defaultHostRuntimeTaskSchedulerHost().scheduleHostRuntimeAsyncTask(
             "core-node-workspace-file-scan",
             Box::new(move || Box::pin(async move {
+                let mut intervalMs = WORKSPACE_SCAN_ACTIVE_INTERVAL_MS;
                 loop {
                     tokio::select! {
                         _ = &mut stopped => break,
-                        result = defaultHostRuntimeTaskSchedulerHost().waitForHostRuntimeDelay(2000) => {
+                        result = defaultHostRuntimeTaskSchedulerHost().waitForHostRuntimeDelay(intervalMs) => {
                             if result.is_err() { break; }
                         }
                     }
                     let Some(state) = weakState.upgrade() else { break; };
                     if !state.active.load(Ordering::Acquire) { break; }
                     let service = SpacePersistenceSyncService { state };
-                    if let Err(error) = service.workspaceFiles().scan() {
+                    let mut changes = 0;
+                    if let Err(error) = crate::fault_isolation::run("workspace file scanner", || service.workspaceFiles().scan().map(|scanned| changes = scanned)) {
                         operit_util::AppLogger::AppLogger::w("SpacePersistenceSyncService",
                             &format!("Workspace scan failed; no missing-file deletions published: {error}"));
                     }
+                    // A productive round pulls the scanner back to fast polling;
+                    // quiet rounds double the interval up to the idle ceiling.
+                    intervalMs = if changes > 0 {
+                        WORKSPACE_SCAN_ACTIVE_INTERVAL_MS
+                    } else {
+                        (intervalMs * 2).min(WORKSPACE_SCAN_IDLE_INTERVAL_MS)
+                    };
                     // Also retry interrupted transfers even when no new edits occur.
-                    let _ = service.scheduleSynchronization();
+                    let _ = service.scheduleSynchronization(if changes > 0 { "workspace_changed" } else { "workspace_retry_poll" });
                 }
             })),
         ).map_err(|e| e.to_string())?;
@@ -297,7 +326,7 @@ impl SpacePersistenceSyncService {
                     }
                     let Some(state) = weakState.upgrade() else { break; };
                     if !state.active.load(Ordering::Acquire) { break; }
-                    if let Err(error) = (SpacePersistenceSyncService { state }).scheduleSynchronization() {
+                    if let Err(error) = (SpacePersistenceSyncService { state }).scheduleSynchronization("peer_connection_changed") {
                         operit_util::AppLogger::AppLogger::w(
                             "SpacePersistenceSyncService", &format!("Peer change sync scheduling failed: {error}"));
                     }
@@ -310,7 +339,8 @@ impl SpacePersistenceSyncService {
 
     /// Exchanges Space projections through direct pairings, then synchronizes every reachable member.
     pub async fn synchronizeOnce(&self) -> Result<(), String> {
-        self.state.spaceStore.initialize()?;
+        let space = self.state.spaceStore.initialize()?;
+        self.state.progress.retain(&space.spaceId, &space.members);
         // A shared removal takes effect before any exchange: when the replayed
         // policy no longer admits this device it retires itself here, and a
         // duplicate delivery of the same command is a no-op.
@@ -324,7 +354,10 @@ impl SpacePersistenceSyncService {
                 );
             }
         }
-        self.workspaceFiles().scan()?;
+        let mut errors = Vec::new();
+        if let Err(error) = crate::fault_isolation::run("scan workspace files", || self.workspaceFiles().scan().map(|_| ())) {
+            errors.push(error);
+        }
         let services = self.state.nodeRouter.nodeServices()?;
         let activePeers = services.peers().activePeerNodeIds().map_err(|error| error.to_string())?;
         let localNodeId = self.state.nodeRouter.localNodeId();
@@ -357,13 +390,17 @@ impl SpacePersistenceSyncService {
         }
         let service = crate::RuntimeRemoteLinkService::RuntimeRemoteLinkService::newWithRouter(
             (*self.state.localRuntime).clone(), self.state.nodeRouter.clone());
-        let mut errors = crate::NodeSpaceService::space_departure::synchronize(&service).await.err().into_iter().collect::<Vec<_>>();
+        if let Err(error) = crate::fault_isolation::operation("deliver Space departures",
+            crate::NodeSpaceService::space_departure::synchronize(&service)).await { errors.push(error); }
         let localStateSummary = self.localStateSummary().await?;
         let mut cycleDecisions = BTreeMap::<String, bool>::new();
         let membershipBeforeExchange = self.state.spaceStore.space()?.members.into_iter().collect::<BTreeSet<_>>();
         for peerNodeId in services.peers().outboundPeerNodeIds().map_err(|error| error.to_string())? {
-            if !activePeers.contains(&peerNodeId) || control.nodeIsDisconnected(&peerNodeId)? {
-                continue;
+            if !activePeers.contains(&peerNodeId) { continue; }
+            match control.nodeIsDisconnected(&peerNodeId) {
+                Ok(false) => {},
+                Ok(true) => continue,
+                Err(error) => { errors.push(format!("Peer {peerNodeId} connection policy: {error}")); continue; }
             }
             if !self
                 .peerPassRequired(&peerNodeId, &localStateSummary, &mut cycleDecisions)
@@ -371,24 +408,31 @@ impl SpacePersistenceSyncService {
             {
                 continue;
             }
-            if let Err(error) = self.exchangePairedDeviceSpaceProjection(&peerNodeId).await {
+            if let Err(error) = crate::fault_isolation::operation(&format!("Peer {peerNodeId} Space projection"),
+                self.exchangePairedDeviceSpaceProjection(&peerNodeId)).await {
                 self.recordPeerPassFailed(&peerNodeId);
+                cycleDecisions.insert(peerNodeId.clone(), false);
                 errors.push(format!("CoreNode {peerNodeId} Space projection exchange: {error}"));
                 continue;
             }
             // A paired peer outside the Space membership has no business
             // replication pass; the projection exchange was its whole pass.
             if !membershipBeforeExchange.contains(&peerNodeId) {
-                self.recordPeerPassCompleted(&peerNodeId).await;
+                self.recordPeerPassCompleted(&peerNodeId, false).await?;
             }
         }
         let space = self.state.spaceStore.space()?;
+        self.state.progress.retain(&space.spaceId, &space.members);
         for targetNodeId in space.members {
             if targetNodeId == localNodeId {
                 continue;
             }
-            let reachable = self.state.nodeRouter.nodeIsReachable(&targetNodeId)?;
+            let reachable = match self.state.nodeRouter.nodeIsReachable(&targetNodeId) {
+                Ok(reachable) => reachable,
+                Err(error) => { errors.push(format!("Peer {targetNodeId} reachability: {error}")); continue; }
+            };
             if !reachable {
+                self.state.progress.remove(&targetNodeId);
                 continue;
             }
             if !self
@@ -398,17 +442,15 @@ impl SpacePersistenceSyncService {
                 continue;
             }
             if let Err(error) = self
-                .synchronizeReachablePeer(targetNodeId.clone(), 512)
+                .synchronizeReachablePeerForReason(targetNodeId.clone(), 512, "change_gate")
                 .await
             {
-                self.recordPeerPassFailed(&targetNodeId);
                 errors.push(format!(
                     "CoreNode {} reachable persistence sync: {error}",
                     targetNodeId
                 ));
                 continue;
             }
-            self.recordPeerPassCompleted(&targetNodeId).await;
         }
         if !errors.is_empty() {
             return Err(errors.join(" | "));
@@ -416,34 +458,145 @@ impl SpacePersistenceSyncService {
         Ok(())
     }
 
-    /// Exchanges persisted operations with one reachable Space member selected by node id.
-    #[allow(non_snake_case)]
+    /// Test entry point for an explicit peer pass.
+    #[cfg(test)]
     pub(crate) async fn synchronizeReachablePeer(
         &self,
         targetNodeId: String,
         limit: usize,
     ) -> Result<(), String> {
-        if limit == 0 {
-            return Err("sync limit must be greater than 0".to_string());
-        }
-        if targetNodeId == self.state.nodeRouter.localNodeId() {
+        self.synchronizeReachablePeerForReason(targetNodeId, limit, "direct_request").await
+    }
+
+    /// All entry points share serialization, progress, completion and retry state.
+    /// Keeps the caller visible even when it bypasses the background change gate.
+    pub(crate) async fn synchronizeReachablePeerForReason(
+        &self,
+        targetNodeId: String,
+        limit: usize,
+        trigger: &str,
+    ) -> Result<(), String> {
+        if limit == 0 { return Err("sync limit must be greater than 0".into()); }
+        if targetNodeId == self.state.nodeRouter.localNodeId() { return Ok(()); }
+        let execution = self.state.peerGates.lock().map_err(|error| error.to_string())?
+            .entry(targetNodeId.clone()).or_default().execution.clone();
+        let requestedAt = currentTimeMillis();
+        let _pass = execution.lock().await;
+        if matches!(trigger, "change_gate" | "peer_request") && !self.peerPassRequired(
+            &targetNodeId, &self.localStateSummary().await?, &mut BTreeMap::new()).await {
             return Ok(());
         }
-        if !self.state.nodeRouter.nodeIsReachable(&targetNodeId)? {
+        let startedAt = currentTimeMillis();
+        operit_util::AppLogger::AppLogger::i("SpacePersistenceSyncService", &format!(
+            "sync_pass.start target={targetNodeId} trigger={trigger} limit={limit} queuedMs={}",
+            startedAt - requestedAt));
+        let space = self.state.spaceStore.space()?;
+        self.state.progress.retain(&space.spaceId, &space.members);
+        self.state.progress.begin(&targetNodeId, &space.spaceId);
+        let context = format!("Peer {targetNodeId} persistence synchronization");
+        let pass = crate::fault_isolation::operation(&context, self.synchronizePeer(&targetNodeId, limit,
+            !matches!(trigger, "change_gate" | "peer_request")));
+        tokio::pin!(pass);
+        let result = if let Some(delayMs) = self.state.progress.revealDelayMs(&targetNodeId) {
+            tokio::select! {
+                biased;
+                result = &mut pass => result,
+                delay = defaultHostRuntimeTaskSchedulerHost().waitForHostRuntimeDelay(delayMs) => {
+                    if delay.is_ok() { self.state.progress.reveal(&targetNodeId); }
+                    pass.await
+                }
+            }
+        } else { pass.await };
+        match &result {
+            Ok(allowed) => {
+                self.recordPeerPassCompleted(&targetNodeId, *allowed).await?;
+                let pending = self.state.peerGates.lock().map_err(|error| error.to_string())?
+                    .get(&targetNodeId).is_some_and(|gate| gate.pendingWork);
+                operit_util::AppLogger::AppLogger::i("SpacePersistenceSyncService", &format!(
+                    "sync_pass.done target={targetNodeId} trigger={trigger} businessReplication={allowed} pending={pending} elapsedMs={}",
+                    currentTimeMillis() - startedAt));
+                if *allowed {
+                    self.state.progress.finish(&targetNodeId, pending, None, None);
+                } else {
+                    self.state.progress.remove(&targetNodeId);
+                }
+            }
+            Err(error) => {
+                self.recordPeerPassFailed(&targetNodeId);
+                let retryAt = self.state.peerGates.lock().map_err(|error| error.to_string())?
+                    .get(&targetNodeId).map(|gate| gate.nextFullSyncAllowedAt);
+                operit_util::AppLogger::AppLogger::w("SpacePersistenceSyncService", &format!(
+                    "sync_pass.failed target={targetNodeId} trigger={trigger} retryAt={retryAt:?} elapsedMs={} error={error}",
+                    currentTimeMillis() - startedAt));
+                self.state.progress.finish(&targetNodeId, false, retryAt, Some(error.clone()));
+            }
+        }
+        // A pass can revoke membership or storage authority while it is running.
+        let space = self.state.spaceStore.space()?;
+        self.state.progress.retain(&space.spaceId, &space.members);
+        result.map(|_| ())
+    }
+
+    /// Executes authority, preferences and authorized business replication in order.
+    async fn synchronizePeer(&self, targetNodeId: &str, limit: usize, force: bool) -> Result<bool, String> {
+        if !self.state.nodeRouter.nodeIsReachable(targetNodeId)? {
             return Err(format!(
                 "synchronization target is not reachable in the current device space: {targetNodeId}"
             ));
         }
+        if self.storageReplicationAllowed(targetNodeId)? && self.state.nodeRouter.localNodeId().as_str() > targetNodeId {
+            let request = callRemote::<PeerSyncStatus>(&self.state.nodeRouter, targetNodeId,
+                PeerSyncMethod::SyncRequest, json!(SyncRequest { limit, force }));
+            tokio::pin!(request);
+            let status = loop {
+                tokio::select! { biased;
+                    result = &mut request => break result?,
+                    delay = defaultHostRuntimeTaskSchedulerHost().waitForHostRuntimeDelay(3_000) => {
+                        delay.map_err(|e|e.to_string())?;
+                        let progress = tokio::select! { biased;
+                            result = &mut request => break result?,
+                            progress = callRemote::<Option<SpaceSyncProgress>>(&self.state.nodeRouter,
+                                targetNodeId,PeerSyncMethod::SyncProgress,Value::Null) => progress?,
+                        };
+                        if let Some(progress) = progress {
+                            self.state.progress.mirror(targetNodeId,&progress);
+                        }
+                    }
+                }
+            };
+            if let Some(progress) = status.progress { self.state.progress.mirror(targetNodeId, &progress); }
+            let mut gates = self.state.peerGates.lock().map_err(|e|e.to_string())?;
+            let gate = gates.entry(targetNodeId.to_owned()).or_default();
+            gate.lastLocalStateSummary = status.remote;
+            gate.lastRemoteClockSummary = status.local;
+            gate.pendingWork = status.pending;
+            drop(gates);
+            return self.storageReplicationAllowed(targetNodeId);
+        }
         // Authority updates must still reach non-storage members (including
         // grants/revocations); they do not advance business replication clocks.
+        let protocol = projectionProtocol(&self.state.nodeRouter, targetNodeId).await?;
         let control = NetworkControlStore::new(self.state.localRuntime.runtimeStorageHost())?;
-        let request = serviceCallRequest(&self.state.nodeRouter,
-            crate::NodeSpaceService::NODE_SPACE_CONTROL_TARGET, "exchange",
-            serde_json::to_value(control.currentSpaceOperations()?).map_err(|error| error.to_string())?)?;
-        let response = self.state.nodeRouter.callNode(targetNodeId.clone(), request).await;
-        let remote = crate::NodeSpaceService::decodeControlExchange(response.result)?;
-        control.projectPeerControlOperations(&targetNodeId, &remote)?;
-        self.applyRemovedMemberEffects(&remote)?;
+        if protocol.as_ref().is_some_and(|protocol| protocol.snapshotPaging) {
+            // The endpoint already provides a bounded authority export. Use it
+            // for reachable-member passes too; requesting the entire log again
+            // forces a second full reply into its constrained heap. Projection
+            // observation still validates all authority before preference sync.
+            Box::pin(self.exchangePairedDeviceSpaceProjection(targetNodeId)).await?;
+        } else {
+            let request = serviceCallRequest(&self.state.nodeRouter,
+                crate::NodeSpaceService::NODE_SPACE_CONTROL_TARGET, "exchange",
+                serde_json::to_value(control.currentSpaceOperations()?).map_err(|error| error.to_string())?)?;
+            if let Some(protocol) = &protocol {
+                crate::NodeSpaceService::space_projection::requireRoutedRequestFits(&request,
+                    &self.state.spaceStore.space()?.spaceId, &self.state.nodeRouter.localNodeId(),
+                    targetNodeId, 4, protocol.maxMessageBytes)?;
+            }
+            let response = self.state.nodeRouter.callNode(targetNodeId.to_string(), request).await;
+            let remote = crate::NodeSpaceService::decodeControlExchange(response.result)?;
+            control.projectPeerControlOperations(targetNodeId, &remote)?;
+            self.applyRemovedMemberEffects(&remote)?;
+        }
         // Small device-owned preferences are available to every admitted member;
         // their clocks and payloads are separate from business replica clocks.
         let preferenceStore = operit_store::DevicePreferencesStore::DevicePreferencesStore::new(self.state.localRuntime.runtimeStorageHost());
@@ -451,8 +604,8 @@ impl SpacePersistenceSyncService {
         // Every member receives its own configuration. Storage providers also
         // exchange the local device's configuration as a backup; lightweight
         // endpoints must not accumulate other devices' preference files.
-        let mut preferenceNodes = vec![targetNodeId.clone()];
-        if self.storageReplicationAllowed(&targetNodeId)? {
+        let mut preferenceNodes = vec![targetNodeId.to_string()];
+        if self.storageReplicationAllowed(targetNodeId)? {
             preferenceNodes.push(self.state.nodeRouter.localNodeId());
         }
         for preferenceNodeId in preferenceNodes {
@@ -460,21 +613,20 @@ impl SpacePersistenceSyncService {
             let request = serviceCallRequest(&self.state.nodeRouter,
                 crate::NodeSpaceService::NODE_SPACE_CONTROL_TARGET, "exchangePreferences",
                 serde_json::to_value(preferences).map_err(|e| e.to_string())?)?;
-            let response = self.state.nodeRouter.callNode(targetNodeId.clone(), request).await;
+            let response = self.state.nodeRouter.callNode(targetNodeId.to_string(), request).await;
             let preferences: operit_store::DevicePreferencesStore::DevicePreferences = decodeCoreResponse(response.result.map_err(|e| e.to_string())?)?;
             if preferences.spaceId != preferenceScope || preferences.nodeId != preferenceNodeId
                 || self.state.spaceStore.space()?.spaceId != preferenceScope
-                || !control.currentState()?.memberNodeIds.contains(&targetNodeId)
-                || control.nodeIsDisconnected(&targetNodeId)? {
+                || !control.currentState()?.memberNodeIds.iter().any(|node| node == targetNodeId)
+                || control.nodeIsDisconnected(targetNodeId)? {
                 return Err("Device preference response scope changed".into());
             }
             preferenceStore.merge(&preferences)?;
         }
         // Admission is not a storage grant. Business replication requires both endpoints to provide storage.
-        if !self.storageReplicationAllowed(&targetNodeId)? { return Ok(()); }
-        self.validateReachableDeviceSpace(&targetNodeId).await?;
-        self.synchronizeNodeOperations(&targetNodeId, limit).await?;
-        Ok(())
+        if !self.storageReplicationAllowed(targetNodeId)? { return Ok(false); }
+        self.validateReachableDeviceSpace(targetNodeId).await?;
+        self.synchronizeDomains(targetNodeId, limit, &SYNC_DOMAINS).await
     }
 
     /// Applies the local effects of removals that just reached this device
@@ -499,59 +651,12 @@ impl SpacePersistenceSyncService {
         }
     }
 
-    /// Summarizes this device's synchronized state for the local-change
-    /// trigger: the replication journal clock (journal plus chat storage,
-    /// mirroring the application clock), projected operations and preferences.
-    /// Projected operations advance neither clock, so their count is what
-    /// makes this device push relayed authority to its peers. Read through
-    /// local stores directly: gating must never enter the application
-    /// backend, which non-storage peers are not permitted to reach.
+    /// Publishes local outboxes before comparing the same boundary advertised to peers.
     async fn localStateSummary(&self) -> Result<String, String> {
-        let storageHost = self.state.localRuntime.runtimeStorageHost();
-        let mut clock = operit_store::SyncOperationStore::SyncOperationStore::new(
-            storageHost.clone(),
-            RUNTIME_SYNC_DIR_PATH.to_string(),
-        )
-        .localClock()
-        .map_err(|error| error.to_string())?;
-        // The chat storage belongs to the process default store root. A root
-        // that was never registered means this process holds no chat state
-        // at all, so an empty chat clock is the correct contribution; a real
-        // storage failure is logged but must not disable the gate.
-        if operit_util::RuntimeStoreRoot::default_runtime_store_root_config().is_some() {
-            match operit_store::sync::SqlChatSyncStore::SqlChatSyncStore::default() {
-                Ok(sqlStore) => match sqlStore.localClock() {
-                    Ok(sqlClock) => {
-                        for (deviceId, sequence) in sqlClock.sequences {
-                            if sequence > clock.sequenceFor(&deviceId) {
-                                clock.setSequence(deviceId, sequence);
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        operit_util::AppLogger::AppLogger::w(
-                            "SpacePersistenceSyncService",
-                            &format!("chat sync clock unavailable for gate summary: {error}"),
-                        );
-                    }
-                },
-                Err(error) => {
-                    operit_util::AppLogger::AppLogger::w(
-                        "SpacePersistenceSyncService",
-                        &format!("chat sync storage unavailable for gate summary: {error}"),
-                    );
-                }
-            }
-        }
-        let control = NetworkControlStore::new(storageHost)?;
-        Ok(format!(
-            "{}#{}#{}",
-            summarizeSyncClock(
-                &serde_json::to_value(&clock).map_err(|error| error.to_string())?
-            ),
-            control.projectionEntryCount()?,
-            operit_store::DevicePreferencesStore::devicePreferencesMutationRevision()
-        ))
+        let store = operit_store::SyncOperationStore::SyncOperationStore::new(
+            self.state.localRuntime.runtimeStorageHost(), RUNTIME_SYNC_DIR_PATH);
+        store.publishPreferenceOutboxes().map_err(|e|e.to_string())?;
+        store.synchronizationSummary().map(|digest|format!("digest:{digest}")).map_err(|e|e.to_string())
     }
 
     /// Decides once per cycle whether this cycle must run a full synchronization
@@ -577,10 +682,15 @@ impl SpacePersistenceSyncService {
                     .ok_or_else(|| "peer sync gate absent".to_string())
             })
             .unwrap_or_default();
+        let mut reasons = Vec::new();
         let decision = if !gate.backoffElapsed(currentTimeMillis()) {
             false
+        } else if gate.pendingWork {
+            reasons.push("pending_work");
+            true
         } else if gate.consecutiveFailures > 0 {
             // Retry the failed exchange after the backoff has elapsed.
+            reasons.push("failure_retry");
             true
         } else if !self
             .storageReplicationAllowed(targetNodeId)
@@ -588,54 +698,78 @@ impl SpacePersistenceSyncService {
         {
             // Non-storage members never enter replication traffic: probing
             // them would only draw a denial, so keep exchanging directly.
+            reasons.push("authority_only");
             true
         } else {
             match self.probeRemoteClockSummary(targetNodeId).await {
                 Ok(summary) => {
-                    if let Ok(mut gates) = self.state.peerGates.lock() {
-                        gates
-                            .entry(targetNodeId.to_string())
-                            .or_default()
-                            .probedClockSummary = Some(summary.clone());
-                    }
-                    gate.lastRemoteClockSummary.as_deref() != Some(summary.as_str())
-                        || gate.lastLocalStateSummary.as_deref() != Some(localStateSummary)
+                    if gate.lastRemoteClockSummary.is_none() { reasons.push("no_remote_baseline"); }
+                    else if gate.lastRemoteClockSummary.as_deref() != Some(summary.as_str()) { reasons.push("remote_clock_changed"); }
+                    if gate.lastLocalStateSummary.is_none() { reasons.push("no_local_baseline"); }
+                    else if gate.lastLocalStateSummary.as_deref() != Some(localStateSummary) { reasons.push("local_state_changed"); }
+                    !reasons.is_empty()
                 }
-                // The clock is unobservable (the probe was lost): fall back to
-                // exchanging, as before.
-                Err(_) => true,
+                // The clock is unobservable (the probe was lost). Forcing the
+                // full exchange from here made every cycle re-export the whole
+                // operation journal against an unreachable peer — seconds of
+                // serialization per attempt, indefinitely. Record the failed
+                // pass instead so the exponential backoff governs the retry;
+                // once the peer answers again, the retry converges and the
+                // gate returns to probing.
+                Err(error) => {
+                    self.recordPeerPassFailed(targetNodeId);
+                    operit_util::AppLogger::AppLogger::w("SpacePersistenceSyncService", &format!(
+                        "sync_gate.probe_failed target={targetNodeId} failures={} retryDelayMs={} error={error}",
+                        gate.consecutiveFailures.saturating_add(1),
+                        peerFullSyncBackoffMs(gate.consecutiveFailures.saturating_add(1))));
+                    false
+                }
             }
         };
+        if decision {
+            operit_util::AppLogger::AppLogger::i("SpacePersistenceSyncService", &format!(
+                "sync_gate.required target={targetNodeId} reasons={} failures={} pending={}",
+                reasons.join(","), gate.consecutiveFailures, gate.pendingWork));
+        }
         cycleDecisions.insert(targetNodeId.to_string(), decision);
         decision
     }
 
-    /// Reads one peer's synchronization clock through the cheap probe RPC and
-    /// returns its comparable summary.
+    /// Reads the constant-size clock digest used by the peer change gate.
     async fn probeRemoteClockSummary(&self, targetNodeId: &str) -> Result<String, String> {
-        let clock: Value = callRemote(
+        let value: Value = callRemote(
             &self.state.nodeRouter,
             targetNodeId,
-            PeerSyncMethod::SyncClock,
+            PeerSyncMethod::SyncClockDigest,
             Value::Null,
-        )
-        .await?;
-        Ok(summarizeSyncClock(&clock))
+        ).await?;
+        value.get("digest")
+            .and_then(Value::as_str)
+            .filter(|digest| !digest.is_empty())
+            .map(|digest| format!("digest:{digest}"))
+            .ok_or_else(|| "remote synchronization clock digest is missing".to_string())
     }
 
-    /// Records one completed full pass: the freshly probed clock and the
-    /// current local-state summary become the pass baseline.
-    async fn recordPeerPassCompleted(&self, targetNodeId: &str) {
-        let localStateSummary = self.localStateSummary().await.unwrap_or_default();
-        if let Ok(mut gates) = self.state.peerGates.lock() {
-            let gate = gates.entry(targetNodeId.to_string()).or_default();
-            if let Some(probed) = gate.probedClockSummary.take() {
-                gate.lastRemoteClockSummary = Some(probed);
-            }
-            gate.lastLocalStateSummary = Some(localStateSummary);
-            gate.consecutiveFailures = 0;
-            gate.nextFullSyncAllowedAt = 0;
-        }
+    /// Resets retry state without promoting an unverified or pre-pass change probe.
+    async fn recordPeerPassCompleted(&self, targetNodeId: &str, businessReplication: bool) -> Result<(), String> {
+        let mut gates = self.state.peerGates.lock().map_err(|error| error.to_string())?;
+        let gate = gates.entry(targetNodeId.to_string()).or_default();
+        if !businessReplication { gate.lastLocalStateSummary = None; gate.lastRemoteClockSummary = None; }
+        gate.consecutiveFailures = 0;
+        gate.nextFullSyncAllowedAt = 0;
+        Ok(())
+    }
+
+    /// Coalesces an authenticated peer's wakeup on the same pair coordinator and local gate.
+    pub(crate) async fn synchronizeRequestedPeer(&self, target: String, limit: usize, force: bool) -> Result<PeerSyncStatus, String> {
+        if self.state.nodeRouter.localNodeId() >= target { return Err("Synchronization request targets the wrong coordinator".into()); }
+        Box::pin(self.synchronizeReachablePeerForReason(target.clone(), limit,
+            if force { "peer_request_force" } else { "peer_request" })).await?;
+        let gates = self.state.peerGates.lock().map_err(|e|e.to_string())?;
+        let gate = gates.get(&target).ok_or("Synchronization gate missing")?;
+        if gate.consecutiveFailures > 0 { return Err("Peer synchronization is waiting for retry".into()); }
+        Ok(PeerSyncStatus { local: gate.lastLocalStateSummary.clone(), remote: gate.lastRemoteClockSummary.clone(), pending: gate.pendingWork,
+            progress: self.peerProgress(&target) })
     }
 
     /// Records one failed full pass and arms the exponential retry backoff.
@@ -659,39 +793,31 @@ impl SpacePersistenceSyncService {
         }
     }
 
-    /// Exchanges persistent operations with one already reachable CoreNode.
-    #[allow(non_snake_case)]
-    async fn synchronizeNodeOperations(
-        &self,
-        targetNodeId: &str,
-        limit: usize,
-    ) -> Result<bool, String> {
-        let localVersion: String = self.callLocal("coreVersion", Value::Null).await?;
-        let remoteVersion: String = callRemote(
-            &self.state.nodeRouter,
-            targetNodeId,
-            PeerSyncMethod::CoreVersion,
-            Value::Null,
-        )
-        .await?;
-        if localVersion != remoteVersion {
-            return Err(format!(
-                "core version mismatch: local={localVersion}, remote={remoteVersion}. sync blocked"
-            ));
-        }
-
-        let mut errors = Vec::new();
-        for domains in [&SYNC_DOMAINS[..], &PLUGIN_SYNC_DOMAINS[..]] {
-            match self.synchronizeDomains(targetNodeId, limit, domains).await {
-                Ok(false) => return Ok(false),
-                Ok(true) => {}
-                Err(error) => errors.push(format!("domains={} {error}", domains.join(","))),
+    /// Keeps partially materialized work eligible without delaying healthy data behind it.
+    fn recordPendingWork(&self, targetNodeId: &str, stage: &str, report: &Value) {
+        let pending = report.get("pending").and_then(Value::as_u64).unwrap_or(0);
+        let errors = report.get("errors").and_then(Value::as_array);
+        let side = match stage {
+            "local receipt" | "local apply" => "local",
+            "remote receipt" | "remote apply" => "remote",
+            _ => stage,
+        };
+        self.state.progress.report(targetNodeId, side,
+            pendingOperationIds(report), if side == "local" || side == "remote" { pending } else { 0 },
+            errors.into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect());
+        if pending > 0 || errors.is_some_and(|errors| !errors.is_empty()) {
+            if let Ok(mut gates) = self.state.peerGates.lock() {
+                gates
+                    .entry(targetNodeId.to_owned())
+                    .or_default()
+                    .pendingWork = true;
             }
-        }
-        if errors.is_empty() {
-            Ok(true)
-        } else {
-            Err(errors.join("; "))
+            operit_util::AppLogger::AppLogger::w(
+                "SpacePersistenceSyncService",
+                &format!(
+                    "sync_exchange.partial target={targetNodeId} stage={stage} pending={pending} errors={errors:?}"
+                ),
+            );
         }
     }
 
@@ -710,17 +836,56 @@ impl SpacePersistenceSyncService {
         let mut pages = 0usize;
         let mut seenOperationIds = BTreeSet::new();
         loop {
-            if !self.storageReplicationAllowed(targetNodeId)? { return Ok(false); }
-            let localClock: Value = self.callLocal("syncClock", Value::Null).await?;
+            if !self.storageReplicationAllowed(targetNodeId)? {
+                return Ok(false);
+            }
+            let (remoteClock, localClock) = tokio::join!(
+                biased;
+                callRemote::<Value>(
+                    &self.state.nodeRouter,
+                    targetNodeId,
+                    PeerSyncMethod::SyncClock,
+                    Value::Null,
+                ),
+                self.callLocal::<Value>("syncClock", Value::Null),
+            );
+            let mut localClock = localClock?;
             validateDomainClock(&localClock, domains, "local")?;
-            let remoteClock: Value = callRemote(
-                &self.state.nodeRouter,
-                targetNodeId,
-                PeerSyncMethod::SyncClock,
-                Value::Null,
-            )
-            .await?;
+            let mut remoteClock = remoteClock?;
             validateDomainClock(&remoteClock, domains, "remote")?;
+            consistency::requireConsistencySupport(&localClock, &remoteClock)?;
+            if let Ok(mut gates) = self.state.peerGates.lock() {
+                gates.entry(targetNodeId.to_owned()).or_default().pendingWork = false;
+            }
+            self.recordPendingWork(targetNodeId, "local receipt", &localClock);
+            self.recordPendingWork(targetNodeId, "remote receipt", &remoteClock);
+            let sharedPending = if pages == 0 {
+                let local: operit_store::SyncOperationStore::SyncReceipt = serde_json::from_value(localClock.clone())
+                    .map_err(|error| error.to_string())?;
+                let remote: operit_store::SyncOperationStore::SyncReceipt = serde_json::from_value(remoteClock.clone())
+                    .map_err(|error| error.to_string())?;
+                pendingOperationIds(&localClock).union(&pendingOperationIds(&remoteClock))
+                    .filter(|id| id.rsplit_once(':').is_some_and(|(origin, sequence)| sequence.parse::<i64>().is_ok_and(|sequence|
+                        local.containsSequence(origin, sequence) && remote.containsSequence(origin, sequence))))
+                    .count()
+            } else { 0 };
+            localClock["includeProgress"] = json!(pages == 0);
+            remoteClock["includeProgress"] = json!(pages == 0);
+            let mut pendingBlobs: Vec<RuntimeFileSyncReference> =
+                serde_json::from_value(localClock["pendingBlobs"].clone())
+                    .map_err(|error| format!("invalid local pending blobs: {error}"))?;
+            pendingBlobs.extend(
+                serde_json::from_value::<Vec<RuntimeFileSyncReference>>(
+                    remoteClock["pendingBlobs"].clone(),
+                )
+                .map_err(|error| format!("invalid remote pending blobs: {error}"))?,
+            );
+            if let Err(error) = self
+                .synchronizeBlobReferences(targetNodeId, pendingBlobs)
+                .await
+            {
+                self.recordPendingWork(targetNodeId, "pending blobs", &json!({"errors": [error]}));
+            }
             operit_util::AppLogger::AppLogger::trace(
                 "CoreSyncTrace",
                 &format!(
@@ -730,40 +895,58 @@ impl SpacePersistenceSyncService {
                     summarizeSyncClock(&remoteClock)
                 ),
             );
-            let localOperations: Value = self
-                .callLocal(
-                    "syncOperationsSince",
+            let (remoteOperations, localOperations) = tokio::join!(
+                biased;
+                callRemote::<Value>(
+                    &self.state.nodeRouter,
+                    targetNodeId,
+                    PeerSyncMethod::SyncOperationsSince,
                     json!({
-                        "clock": remoteClock,
+                        "clock": localClock,
                         "domains": domains,
                         "limit": limit,
                     }),
-                )
-                .await?;
-            let remoteOperations: Value = callRemote(
-                &self.state.nodeRouter,
-                targetNodeId,
-                PeerSyncMethod::SyncOperationsSince,
-                json!({
-                    "clock": localClock,
-                    "domains": domains,
-                    "limit": limit,
-                }),
-            )
-            .await?;
-            if !self.storageReplicationAllowed(targetNodeId)? { return Ok(false); }
-            let operations = mergeSyncOperations(localOperations, remoteOperations)?;
+                ),
+                self.callLocal::<Value>("syncOperationsSince", json!({"clock":remoteClock,"domains":domains,"limit":limit})),
+            );
+            let localOperations = localOperations?;
+            let remoteOperations = remoteOperations?;
+            if pages == 0 {
+                let remaining = localOperations.get("remaining").and_then(Value::as_u64)
+                    .zip(remoteOperations.get("remaining").and_then(Value::as_u64))
+                    .map(|(local, remote)| local.saturating_add(remote));
+                self.state.progress.backlog(targetNodeId, remaining, sharedPending);
+            }
+            if !self.storageReplicationAllowed(targetNodeId)? {
+                return Ok(false);
+            }
+            self.recordPendingWork(targetNodeId, "local export", &localOperations);
+            self.recordPendingWork(targetNodeId, "remote export", &remoteOperations);
+            let operations = mergeSyncOperations(
+                localOperations["operations"].clone(),
+                remoteOperations["operations"].clone(),
+            )?;
             if operations.is_empty() {
                 if !self
-                    .applySynchronizedOperationBatch(targetNodeId, &operations, &[], true)
+                    .applySynchronizedOperationBatch(targetNodeId, &operations, &[])
                     .await?
                 {
                     return Ok(false);
                 }
+                if !self.synchronizeConsistency(targetNodeId, &localClock, &remoteClock).await? {
+                    // A concurrent edit invalidates the captured file, not the synchronization service.
+                    self.state.peerGates.lock().map_err(|error| error.to_string())?
+                        .entry(targetNodeId.to_owned()).or_default().pendingWork = true;
+                } else {
+                    let mut gates = self.state.peerGates.lock().map_err(|e|e.to_string())?;
+                    let gate = gates.entry(targetNodeId.to_owned()).or_default();
+                    gate.lastLocalStateSummary = Some(clockStateSummary(&localClock)?);
+                    gate.lastRemoteClockSummary = Some(clockStateSummary(&remoteClock)?);
+                }
                 operit_util::AppLogger::AppLogger::trace(
                     "CoreSyncTrace",
                     &format!(
-                        "sync_exchange.idle target={} reason=clocks_equal pages={}",
+                        "sync_exchange.idle target={} reason=no_exported_operations pages={}",
                         targetNodeId, pages
                     ),
                 );
@@ -773,6 +956,7 @@ impl SpacePersistenceSyncService {
             // the same page forever. Stop after the first page that adds no new
             // operation instead of burning the whole pass cap.
             if !pageAddsNewOperations(&mut seenOperationIds, &operations) {
+                self.recordPendingWork(targetNodeId, "remaining pages", &json!({"pending": 1}));
                 operit_util::AppLogger::AppLogger::trace(
                     "CoreSyncTrace",
                     &format!(
@@ -785,6 +969,7 @@ impl SpacePersistenceSyncService {
                 break;
             }
             if pages >= MAX_SYNC_PAGES_PER_PASS {
+                self.recordPendingWork(targetNodeId, "remaining pages", &json!({"pending": 1}));
                 operit_util::AppLogger::AppLogger::trace(
                     "CoreSyncTrace",
                     &format!(
@@ -809,7 +994,7 @@ impl SpacePersistenceSyncService {
                 ),
             );
             if !self
-                .applySynchronizedOperationBatch(targetNodeId, &operations, &sizes, false)
+                .applySynchronizedOperationBatch(targetNodeId, &operations, &sizes)
                 .await?
             {
                 return Ok(false);
@@ -817,7 +1002,7 @@ impl SpacePersistenceSyncService {
             operit_util::AppLogger::AppLogger::trace(
                 "CoreSyncTrace",
                 &format!(
-                    "sync_exchange.batch_applied target={} {}",
+                    "sync_exchange.batch_received target={} {}",
                     targetNodeId,
                     summarizeSyncOperations(&operations)
                 ),
@@ -827,46 +1012,55 @@ impl SpacePersistenceSyncService {
     }
 
     /// Applies one transport page on both peers, split into messages that fit
-    /// the connection ceiling, with an explicit current-history completion boundary.
+    /// the connection ceiling, preserving every original operation boundary.
     #[allow(non_snake_case)]
     async fn applySynchronizedOperationBatch(
         &self,
         targetNodeId: &str,
         operations: &[Value],
         sizes: &[usize],
-        complete: bool,
     ) -> Result<bool, String> {
-        self.synchronizeRequiredBlobs(targetNodeId, operations).await?;
+        if let Err(error) = self
+            .synchronizeRequiredBlobs(targetNodeId, operations)
+            .await
+        {
+            self.recordPendingWork(targetNodeId, "blobs", &json!({"errors": [error]}));
+        }
         if !self.storageReplicationAllowed(targetNodeId)? {
             return Ok(false);
         }
-        // The empty page still travels: it is the explicit "clocks are equal"
-        // boundary that finalizes preference history on both peers.
+        self.state.progress.records(targetNodeId, 0);
+        // Empty pages retry durable pending operations on both peers.
         let chunks = if operations.is_empty() {
             vec![operations]
         } else {
-            syncPageChunks(operations, sizes, self.state.nodeRouter.maxPeerMessageBytes())?
+            syncPageChunks(
+                operations,
+                sizes,
+                self.state.nodeRouter.maxPeerMessageBytes(),
+            )?
         };
-        for (index, chunk) in chunks.iter().copied().enumerate() {
-            // A split page only closes the history boundary on its final
-            // message; an earlier one must not finalize the same history.
-            let chunkComplete = chunkCompletesPage(complete, index, chunks.len());
-            let remote: Result<Value, String> = callRemote(
-                &self.state.nodeRouter,
-                targetNodeId,
-                PeerSyncMethod::SyncApplyOperations,
-                json!({ "operations": chunk, "complete": chunkComplete }),
-            )
-            .await;
+        for chunk in chunks.iter().copied() {
+            let (remote, local) = tokio::join!(
+                callRemote::<Value>(
+                    &self.state.nodeRouter,
+                    targetNodeId,
+                    PeerSyncMethod::SyncApplyOperations,
+                    json!({ "operations": chunk }),
+                ),
+                self.callLocal::<Value>(
+                    "syncApplyOperations",
+                    json!({ "operations": chunk }),
+                ),
+            );
             if !self.storageReplicationAllowed(targetNodeId)? {
                 return Ok(false);
             }
-            let local: Result<Value, String> = self
-                .callLocal(
-                    "syncApplyOperations",
-                    json!({ "operations": chunk, "complete": chunkComplete }),
-                )
-                .await;
+            for (side, result) in [("remote apply", &remote), ("local apply", &local)] {
+                if let Ok(report) = result {
+                    self.recordPendingWork(targetNodeId, side, report);
+                }
+            }
             let errors = [("remote", remote), ("local", local)]
                 .into_iter()
                 .filter_map(|(side, result)| result.err().map(|error| format!("{side} apply: {error}")))
@@ -874,6 +1068,10 @@ impl SpacePersistenceSyncService {
             if !errors.is_empty() {
                 return Err(errors.join("; "));
             }
+            self.state.progress.records(targetNodeId, chunk.len());
+            self.state.progress.confirmRecords(targetNodeId, &chunk.iter()
+                .filter_map(|operation| operation.get("opId").and_then(Value::as_str).map(str::to_owned))
+                .collect::<Vec<_>>());
         }
         Ok(true)
     }
@@ -884,21 +1082,59 @@ impl SpacePersistenceSyncService {
         &self,
         peerNodeId: &str,
     ) -> Result<bool, String> {
-        let remote: crate::RuntimeRemoteLinkService::PeerSpaceSnapshot = callRemoteService(
-            &self.state.nodeRouter, peerNodeId,
-            crate::RuntimeRemoteLinkService::NODE_SPACE_TARGET, "snapshot", Value::Null,
-        ).await?;
+        let protocol = projectionProtocol(&self.state.nodeRouter, peerNodeId).await?;
+        let mut referenceRevision = None;
+        let remote = if protocol.as_ref().is_some_and(|protocol| protocol.snapshotPaging) {
+            use crate::NodeSpaceService::space_projection::{SnapshotHeader, SnapshotCollector};
+            let header: SnapshotHeader = callRemoteService(&self.state.nodeRouter, peerNodeId,
+                crate::NodeSpaceService::NODE_SPACE_TARGET, "snapshotHeader", Value::Null).await?;
+            referenceRevision = Some(header.controlRevision.clone());
+            let mut collector = SnapshotCollector::new(header)?;
+            loop {
+                let page = callRemoteService(&self.state.nodeRouter, peerNodeId,
+                    crate::NodeSpaceService::NODE_SPACE_TARGET, "snapshotControlPage",
+                    serde_json::to_value(collector.request()).map_err(|error| error.to_string())?).await?;
+                if collector.push(page)? { break; }
+            }
+            let current: SnapshotHeader = callRemoteService(&self.state.nodeRouter, peerNodeId,
+                crate::NodeSpaceService::NODE_SPACE_TARGET, "snapshotHeader", Value::Null).await?;
+            collector.finish(current)?
+        } else {
+            callRemoteService(&self.state.nodeRouter, peerNodeId,
+                crate::NodeSpaceService::NODE_SPACE_TARGET, "snapshot", Value::Null).await?
+        };
+        let remoteSpaceId = remote.space.spaceId.clone();
+        let remoteHasDepartures = !remote.departures.is_empty();
         let snapshotControlOperations = remote.controlOperations.clone();
         let service = crate::RuntimeRemoteLinkService::RuntimeRemoteLinkService::newWithRouter(
             (*self.state.localRuntime).clone(), self.state.nodeRouter.clone());
         service.observePeerSpaceSnapshot(peerNodeId, remote)?;
         self.applyRemovedMemberEffects(&snapshotControlOperations)?;
         let local = crate::NodeSpaceService::peerSpaceSnapshotForPeer(&service, peerNodeId)?;
-        let remoteSpace: CoreSpace = callRemoteService(
-            &self.state.nodeRouter, peerNodeId,
-            crate::RuntimeRemoteLinkService::NODE_SPACE_TARGET, "observeSpaceSnapshot",
-            serde_json::to_value(local).map_err(|error| error.to_string())?,
-        ).await?;
+        let useReference = protocol.as_ref().is_some_and(|protocol| protocol.projectionReference)
+            && referenceRevision.is_some() && local.space.spaceId == remoteSpaceId
+            && !remoteHasDepartures && local.departures.is_empty()
+            && crate::NodeSpaceService::space_projection::sameControlOperations(
+                &local.controlOperations, &snapshotControlOperations);
+        drop(snapshotControlOperations);
+        let (method, arguments) = if useReference {
+            use crate::NodeSpaceService::space_projection::ProjectionObservation;
+            let observation = ProjectionObservation { controlRevision: referenceRevision.unwrap(),
+                space: local.space, deviceProfiles: local.deviceProfiles, topology: local.topology };
+            ("observeSpaceProjection", serde_json::to_value(observation))
+        } else {
+            ("observeSpaceSnapshot", serde_json::to_value(local))
+        };
+        let request = serviceCallRequest(&self.state.nodeRouter,
+            crate::NodeSpaceService::NODE_SPACE_TARGET, method,
+            arguments.map_err(|error| error.to_string())?)?;
+        if let Some(protocol) = &protocol {
+            crate::NodeSpaceService::space_projection::requireRoutedRequestFits(&request,
+                &self.state.spaceStore.space()?.spaceId, &self.state.nodeRouter.localNodeId(),
+                peerNodeId, 0, protocol.maxMessageBytes)?;
+        }
+        let response = self.state.nodeRouter.callNode(peerNodeId.to_owned(), request).await;
+        let remoteSpace: CoreSpace = decodeCoreResponse(response.result.map_err(|error| error.to_string())?)?;
         Ok(self.state.spaceStore.space()?.spaceId == remoteSpace.spaceId)
     }
 
@@ -948,151 +1184,119 @@ impl SpacePersistenceSyncService {
         targetNodeId: &str,
         operations: &[Value],
     ) -> Result<(), String> {
-        let mut references = BTreeMap::<String, RuntimeFileSyncReference>::new();
-        for operation in operations {
-            let operation: SyncOperation = serde_json::from_value(operation.clone())
-                .map_err(|error| format!("invalid sync operation: {error}"))?;
-            let Some(reference) = RuntimeFileSyncStore::requiredBlob(&operation)? else {
-                continue;
-            };
-            if let Some(existing) = references.get(&reference.contentHash) {
-                if existing.size != reference.size {
-                    return Err(format!(
-                        "synchronization blob {} has conflicting declared sizes",
-                        reference.contentHash
-                    ));
-                }
-            }
-            references.insert(reference.contentHash.clone(), reference);
-        }
-        for reference in references.into_values() {
-            self.state.nodeRouter.requirePeerStorageProviders(&self.state.nodeRouter.localNodeId(), targetNodeId)
-                .map_err(|error| error.to_string())?;
-            let localHasBlob = self.localHasBlob(&reference).await?;
-            let remoteHasBlob =
-                remoteHasBlob(&self.state.nodeRouter, targetNodeId, &reference).await?;
-            match (localHasBlob, remoteHasBlob) {
-                (true, true) => {}
-                (true, false) => self.pushLocalBlobToRemote(targetNodeId, &reference).await?,
-                (false, true) => self.pushRemoteBlobToLocal(targetNodeId, &reference).await?,
-                (false, false) => {
-                    return Err(format!(
-                        "synchronization blob {} is missing from both direct peers",
-                        reference.contentHash
-                    ));
-                }
+        let mut references = Vec::new();
+        let mut errors = Vec::new();
+        for value in operations {
+            let result = serde_json::from_value::<SyncOperation>(value.clone())
+                .map_err(|error| error.to_string())
+                .and_then(|operation| RuntimeFileSyncStore::requiredBlob(&operation));
+            match result {
+                Ok(Some(reference)) => references.push(reference),
+                Ok(None) => {}
+                Err(error) => errors.push(error),
             }
         }
-        Ok(())
-    }
-
-    /// Reports whether the local CoreNode owns one verified synchronization blob.
-    async fn localHasBlob(&self, reference: &RuntimeFileSyncReference) -> Result<bool, String> {
-        self.callLocal(
-            "syncBlobExists",
-            json!({
-                "contentHash": reference.contentHash,
-                "size": reference.size,
-            }),
-        )
-        .await
-    }
-
-    /// Pushes one locally available blob into the target CoreNode.
-    async fn pushLocalBlobToRemote(
-        &self,
-        targetNodeId: &str,
-        reference: &RuntimeFileSyncReference,
-    ) -> Result<(), String> {
-        let mut push = self
-            .state
-            .nodeRouter
-            .openPushNode(
-                targetNodeId.to_string(),
-                {
-                    let mut request = blobPushRequest(&self.state.nodeRouter, reference)?;
-                    request.target = NODE_SYNC_TARGET.into();
-                    request
-                },
-            )
+        if let Err(error) = self
+            .synchronizeBlobReferences(targetNodeId, references)
             .await
-            .map_err(|error| error.to_string())?;
-        let mut offset = 0i64;
-        while offset < reference.size {
-            self.state.nodeRouter.requirePeerStorageProviders(&self.state.nodeRouter.localNodeId(), targetNodeId)
-                .map_err(|error| error.to_string())?;
-            let chunk: Vec<u8> = self
-                .callLocal(
-                    "syncReadBlobChunk",
-                    json!({
-                        "contentHash": reference.contentHash,
-                        "offset": offset,
-                        "length": SYNC_BLOB_CHUNK_BYTES,
-                    }),
-                )
-                .await?;
-            let nextOffset = sendBlobChunkValue(reference, offset, chunk)?;
-            push.send(nextOffset.1)
-                .await
-                .map_err(|error| error.to_string())?;
-            offset = nextOffset.0;
+        {
+            errors.push(error);
         }
-        self.state.nodeRouter.requirePeerStorageProviders(&self.state.nodeRouter.localNodeId(), targetNodeId)
-            .map_err(|error| error.to_string())?;
-        push.close().await.map_err(|error| error.to_string())?;
-        if !remoteHasBlob(&self.state.nodeRouter, targetNodeId, reference).await? {
-            return Err(format!(
-                "remote CoreNode did not persist synchronization blob {}",
-                reference.contentHash
-            ));
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
         }
-        Ok(())
     }
 
-    /// Pushes one remotely available blob into the local CoreNode.
-    async fn pushRemoteBlobToLocal(
+    /// Transfers independent content hashes without withholding durable receipt of another operation.
+    async fn synchronizeBlobReferences(
+        &self,
+        targetNodeId: &str,
+        references: Vec<RuntimeFileSyncReference>,
+    ) -> Result<(), String> {
+        let references = references.into_iter()
+            .map(|reference|((reference.contentHash.clone(),reference.size),reference))
+            .collect::<BTreeMap<_,_>>().into_values().collect::<Vec<_>>();
+        if references.is_empty() { return Ok(()); }
+        let (remote,local) = tokio::join!(biased;
+            self.blobPresence(targetNodeId,&references,false), self.blobPresence(targetNodeId,&references,true));
+        let mut errors = Vec::new();
+        for ((reference,local),remote) in references.iter().zip(local?).zip(remote?) {
+            let result = async {
+                self.state.nodeRouter.requirePeerStorageProviders(&self.state.nodeRouter.localNodeId(),targetNodeId)
+                    .map_err(|e|e.to_string())?;
+                match (local?,remote?) {
+                    (true,true) => Ok(()),
+                    (true,false) => self.transferBlob(targetNodeId,reference,true).await,
+                    (false,true) => self.transferBlob(targetNodeId,reference,false).await,
+                    (false,false) => Err(format!("blob {} is missing from both direct peers",reference.contentHash)),
+                }
+            }.await;
+            if let Err(error) = result { errors.push(error); }
+        }
+        if errors.is_empty() { Ok(()) } else { Err(errors.join("; ")) }
+    }
+
+    /// Checks one page in one dispatch per endpoint, retaining individual blob failures.
+    async fn blobPresence(&self, target: &str, references: &[RuntimeFileSyncReference], local: bool) -> Result<Vec<Result<bool,String>>,String> {
+        let args = json!({"references":references});
+        let presence: Vec<Result<bool,String>> = if local { self.callLocal("syncBlobExists",args).await? }
+            else { callRemote(&self.state.nodeRouter,target,PeerSyncMethod::SyncBlobExists,args).await? };
+        if presence.len() != references.len() { return Err("Blob presence response length differs".into()); }
+        Ok(presence)
+    }
+
+    /// Both directions share authorization, chunk validation, progress and final verification.
+    async fn transferBlob(
         &self,
         targetNodeId: &str,
         reference: &RuntimeFileSyncReference,
+        localSource: bool,
     ) -> Result<(), String> {
-        let mut push = self
-            .state
-            .localRuntime
-            .openPush(blobPushRequest(&self.state.nodeRouter, reference)?)
-            .map_err(|error| error.to_string())?;
-        let mut offset = 0i64;
-        while offset < reference.size {
+        self.state.progress.beginFile(targetNodeId, reference.size);
+        let mut request = blobPushRequest(&self.state.nodeRouter, reference)?;
+        let mut push = if localSource {
+            request.target = NODE_SYNC_TARGET.into();
+            self.state.nodeRouter.openPushNode(targetNodeId.to_string(), request).await
+                .map_err(|error| error.to_string())?
+        } else {
+            self.state.localRuntime.openPush(request).map_err(|error| error.to_string())?
+        };
+        let mut offset = 0;
+        let result = async {
+            while offset < reference.size {
+                self.state.nodeRouter.requirePeerStorageProviders(&self.state.nodeRouter.localNodeId(), targetNodeId)
+                    .map_err(|error| error.to_string())?;
+                let args = json!({ "contentHash": reference.contentHash, "offset": offset, "length": SYNC_BLOB_CHUNK_BYTES });
+                let chunk = if localSource {
+                    self.callLocal::<Vec<u8>>("syncReadBlobChunk", args).await?
+                } else {
+                    callRemote::<Vec<u8>>(&self.state.nodeRouter, targetNodeId, PeerSyncMethod::SyncReadBlobChunk, args).await?
+                };
+                self.state.nodeRouter.requirePeerStorageProviders(&self.state.nodeRouter.localNodeId(), targetNodeId)
+                    .map_err(|error| error.to_string())?;
+                offset = sendBlobChunk(&mut push, reference, offset, chunk).await?;
+                self.state.progress.fileOffset(targetNodeId, offset, false);
+            }
             self.state.nodeRouter.requirePeerStorageProviders(&self.state.nodeRouter.localNodeId(), targetNodeId)
                 .map_err(|error| error.to_string())?;
-            let chunk: Vec<u8> = callRemote(
-                &self.state.nodeRouter,
-                targetNodeId,
-                PeerSyncMethod::SyncReadBlobChunk,
-                json!({
-                    "contentHash": reference.contentHash,
-                    "offset": offset,
-                    "length": SYNC_BLOB_CHUNK_BYTES,
-                }),
-            )
-            .await?;
-            self.state.nodeRouter.requirePeerStorageProviders(&self.state.nodeRouter.localNodeId(), targetNodeId)
-                .map_err(|error| error.to_string())?;
-            offset = sendBlobChunk(&mut push, reference, offset, chunk).await?;
-        }
-        self.state.nodeRouter.requirePeerStorageProviders(&self.state.nodeRouter.localNodeId(), targetNodeId)
-            .map_err(|error| error.to_string())?;
-        push.close().await.map_err(|error| error.to_string())?;
-        if !self.localHasBlob(reference).await? {
-            return Err(format!(
-                "local CoreNode did not persist synchronization blob {}",
-                reference.contentHash
-            ));
-        }
-        Ok(())
+            push.close().await.map_err(|error| error.to_string())?;
+            let persisted = self.blobPresence(targetNodeId,std::slice::from_ref(reference),!localSource).await?
+                .pop().ok_or("Blob presence response missing")??;
+            if !persisted {
+                return Err(format!("CoreNode did not persist synchronization blob {}", reference.contentHash));
+            }
+            Ok(())
+        }.await;
+        // Preserve the exact sent offset even if a later chunk or verification fails.
+        self.state.progress.fileOffset(targetNodeId, offset, true);
+        result
     }
 
-    /// Schedules one fixed coalescing window without restarting an existing timer.
-    fn scheduleSynchronization(&self) -> Result<(), String> {
+    /// Coalesces join, storage and connectivity changes into the existing worker.
+    pub(crate) fn scheduleSynchronization(&self, reason: &'static str) -> Result<(), String> {
+        self.state.synchronizationReasons.lock().unwrap_or_else(|error| error.into_inner()).insert(reason);
         self.state.synchronizationRequested.store(true, Ordering::Release);
         if self
             .state
@@ -1102,7 +1306,8 @@ impl SpacePersistenceSyncService {
             return Ok(());
         }
         let service = self.clone();
-        let scheduleResult = defaultHostRuntimeTaskSchedulerHost().scheduleHostRuntimeAsyncTask(
+        // The sync pass performs synchronous storage work between its remote awaits.
+        let scheduleResult = defaultHostRuntimeTaskSchedulerHost().scheduleHostRuntimeBlockingAsyncTask(
             "core-node-space-persistence-sync",
             Box::new(move || {
                 Box::pin(async move {
@@ -1113,29 +1318,21 @@ impl SpacePersistenceSyncService {
                             .store(false, Ordering::Release);
                         return;
                     }
-                    let _ = defaultHostRuntimeTaskSchedulerHost()
-                        .waitForHostRuntimeDelay(SPACE_SYNC_PREPARATION_DELAY_MS)
-                        .await;
-                    if !service.state.active.load(Ordering::Acquire) {
-                        service
-                            .state
-                            .synchronizationScheduled
-                            .store(false, Ordering::Release);
-                        return;
-                    }
                     service.state.synchronizationRequested.store(false, Ordering::Release);
+                    let reasons = std::mem::take(&mut *service.state.synchronizationReasons.lock()
+                        .unwrap_or_else(|error| error.into_inner())).into_iter().collect::<Vec<_>>().join(",");
                     let synchronizedRevision = syncMutationRevision();
                     let syncStartedAt = currentTimeMillis();
                     let localNodeId = service.state.nodeRouter.localNodeId();
                     operit_util::AppLogger::AppLogger::v_with_level(
                         "SpacePersistenceSyncService",
                         &format!(
-                            "sync_cycle.start local={} revision={}",
-                            localNodeId, synchronizedRevision
+                            "sync_cycle.start local={} revision={} triggers={}",
+                            localNodeId, synchronizedRevision, reasons
                         ),
                         operit_util::AppLogger::VERBOSE_LEVEL_5,
                     );
-                    match service.synchronizeOnce().await {
+                    match crate::fault_isolation::operation("Space synchronization pass", service.synchronizeOnce()).await {
                         Ok(()) => {
                             operit_util::AppLogger::AppLogger::v_with_level(
                                 "SpacePersistenceSyncService",
@@ -1169,7 +1366,7 @@ impl SpacePersistenceSyncService {
                         && (service.state.synchronizationRequested.load(Ordering::Acquire)
                             || syncMutationRevision() != synchronizedRevision)
                     {
-                        if let Err(error) = service.scheduleSynchronization() {
+                        if let Err(error) = service.scheduleSynchronization("changes_during_pass") {
                             operit_util::AppLogger::AppLogger::e(
                                 "SpacePersistenceSyncService",
                                 &format!("Space persistence sync rescheduling failed: {error}"),
@@ -1194,35 +1391,14 @@ impl SpacePersistenceSyncService {
     where
         T: DeserializeOwned,
     {
-        let response = self
-            .state
-            .localRuntime
-            .callApplication(applicationCallRequest(
-                &self.state.nodeRouter,
-                methodName,
-                args,
-            )?)
-            .await;
-        decodeCoreResponse(response.result.map_err(|error| error.to_string())?)
+        let request = serviceCallRequest(&self.state.nodeRouter, "application", methodName, args)?;
+        let startedAt = currentTimeMillis();
+        let response = self.state.localRuntime.callApplication(request).await;
+        recordSlowSyncCall("local", methodName, startedAt);
+        decodeCoreResponse(response.result.map_err(|error| {
+            format!("local {methodName}: {error}")
+        })?)
     }
-}
-
-/// Reports whether the target CoreNode owns one verified synchronization blob.
-async fn remoteHasBlob(
-    nodeRouter: &CoreNodeRouter,
-    targetNodeId: &str,
-    reference: &RuntimeFileSyncReference,
-) -> Result<bool, String> {
-    callRemote(
-        nodeRouter,
-        targetNodeId,
-        PeerSyncMethod::SyncBlobExists,
-        json!({
-            "contentHash": reference.contentHash,
-            "size": reference.size,
-        }),
-    )
-    .await
 }
 
 /// Builds one service reverse-stream request for a complete synchronization blob.
@@ -1235,7 +1411,7 @@ fn blobPushRequest(
         .targetForSchema("services.syncBlobTransferManager")
         .ok_or_else(|| "unknown Core schema key: services.syncBlobTransferManager".to_string())?;
     Ok(CorePushRequest::new(
-        format!("space-persistence-blob-{}", currentTimeMillis()),
+        operit_link::nextCoreRouteRequestId("space-persistence-blob"),
         target,
         "syncReceiveBlob",
     )
@@ -1279,54 +1455,29 @@ async fn sendBlobChunk(
     Ok(nextOffset)
 }
 
-/// Validates one synchronization chunk and converts it to one Link value.
-fn sendBlobChunkValue(
-    reference: &RuntimeFileSyncReference,
-    offset: i64,
-    chunk: Vec<u8>,
-) -> Result<(i64, CoreValue), String> {
-    if chunk.is_empty() {
-        return Err(format!(
-            "synchronization blob {} ended before its declared size",
-            reference.contentHash
-        ));
-    }
-    let chunkLength = i64::try_from(chunk.len())
-        .map_err(|_| "synchronization blob chunk length does not fit i64".to_string())?;
-    let nextOffset = offset
-        .checked_add(chunkLength)
-        .ok_or_else(|| "synchronization blob offset overflow".to_string())?;
-    if nextOffset > reference.size {
-        return Err(format!(
-            "synchronization blob {} exceeded its declared size",
-            reference.contentHash
-        ));
-    }
-    Ok((
-        nextOffset,
-        toCoreValue(chunk).map_err(|error| error.to_string())?,
-    ))
-}
-
-/// Returns the process registry of active per-CoreNode persistence workers.
-fn persistenceServices() -> &'static Mutex<BTreeMap<String, Arc<SpacePersistenceSyncState>>> {
+/// Weak registration shares one worker across facades without extending its lifetime.
+fn persistenceServices() -> &'static Mutex<BTreeMap<String, Weak<SpacePersistenceSyncState>>> {
     SPACE_SYNC_SERVICES.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
 /// Rejects only the requested domains whose durable clocks could not be read.
 #[allow(non_snake_case)]
-fn validateDomainClock(clock: &Value, domains: &[&str], side: &str) -> Result<(), String> {
-    if let Some(errors) = clock.get("domainErrors") {
-        let errors: BTreeMap<String, String> = serde_json::from_value(errors.clone())
-            .map_err(|error| format!("{side} invalid sync clock errors: {error}"))?;
-        let failures = domains.iter().filter_map(|domain| {
-            errors.get(*domain).map(|error| format!("{side} {domain} clock: {error}"))
-        }).collect::<Vec<_>>();
-        if !failures.is_empty() {
-            return Err(failures.join("; "));
-        }
+fn validateDomainClock(clock: &Value, _domains: &[&str], side: &str) -> Result<(), String> {
+    if clock.get("protocolVersion").and_then(Value::as_u64) != Some(1) {
+        return Err(format!("{side} synchronization receipt protocol mismatch"));
     }
-    Ok(())
+    let receipt: operit_store::SyncOperationStore::SyncReceipt =
+        serde_json::from_value(clock.clone())
+            .map_err(|error| format!("{side} synchronization receipt: {error}"))?;
+    receipt
+        .validate()
+        .map_err(|error| format!("{side} synchronization receipt: {error}"))
+}
+
+/// Refuses a scheduling acknowledgement that is not tied to the verified exchange.
+fn clockStateSummary(clock: &Value) -> Result<String, String> {
+    clock.get("stateSummary").and_then(Value::as_str).filter(|summary| !summary.is_empty())
+        .map(str::to_owned).ok_or_else(|| "Synchronization state summary missing".into())
 }
 
 /// Invokes one application method through the Router.
@@ -1339,13 +1490,36 @@ async fn callRemote<T>(
 where
     T: DeserializeOwned,
 {
-    let response = nodeRouter
-        .callNode(
-            targetNodeId.to_string(),
-            method.request(operit_link::nextCoreRouteRequestId("space-persistence"), toCoreValue(args).map_err(|error| error.to_string())?),
-        )
-        .await;
-    decodeCoreResponse(response.result.map_err(|error| error.to_string())?)
+    let request = method.request(
+        operit_link::nextCoreRouteRequestId("space-persistence"),
+        toCoreValue(args).map_err(|error| error.to_string())?,
+    );
+    let methodName = request.methodName.clone();
+    let startedAt = currentTimeMillis();
+    let response = nodeRouter.callNode(targetNodeId.to_string(), request).await;
+    recordSlowSyncCall(targetNodeId, &methodName, startedAt);
+    decodeCoreResponse(response.result.map_err(|error| {
+        format!("remote {targetNodeId} {methodName}: {error}")
+    })?)
+}
+
+/// Negotiates bounded transport with direct authenticated peers; relayed Core routes use their existing contract.
+async fn projectionProtocol(
+    router: &CoreNodeRouter, peer: &str,
+) -> Result<Option<crate::NodeSpaceService::space_projection::ProjectionProtocol>, String> {
+    let peers = router.nodeServices()?.peers();
+    // Endpoint negotiation belongs to a direct authenticated neighbor. Ordinary
+    // Core control/business synchronization must still work across relay hops.
+    if !peers.activePeerNodeIds().map_err(|error| error.to_string())?.contains(peer)
+        || !peers.hasPairing(peer, crate::NodeServices::PairingDirection::Either).map_err(|error| error.to_string())? {
+        return Ok(None);
+    }
+    let request = serviceCallRequest(router, crate::NodeSpaceService::NODE_SPACE_TARGET,
+        "projectionProtocol", json!({"version": crate::NodeSpaceService::space_projection::VERSION}))?;
+    let response = router.callNode(peer.to_owned(), request).await;
+    let mut protocol = crate::NodeSpaceService::space_projection::decodeProtocolResponse(peer, response.result)?;
+    protocol.maxMessageBytes = protocol.maxMessageBytes.min(peers.maxMessageBytes());
+    Ok(Some(protocol))
 }
 
 /// Invokes one generated service method through the Router.
@@ -1360,29 +1534,29 @@ async fn callRemoteService<T>(
 where
     T: DeserializeOwned,
 {
-    let response = nodeRouter
-        .callNode(
-            targetNodeId.to_string(),
-            serviceCallRequest(nodeRouter, targetPath, methodName, args)?,
-        )
-        .await;
-    decodeCoreResponse(response.result.map_err(|error| error.to_string())?)
+    let request = serviceCallRequest(nodeRouter, targetPath, methodName, args)?;
+    let startedAt = currentTimeMillis();
+    let response = nodeRouter.callNode(targetNodeId.to_string(), request).await;
+    recordSlowSyncCall(targetNodeId, methodName, startedAt);
+    decodeCoreResponse(response.result.map_err(|error| {
+        format!("remote {targetNodeId} {targetPath}.{methodName}: {error}")
+    })?)
 }
 
-/// Builds one Link request for an application-level runtime operation.
-fn applicationCallRequest(
-    nodeRouter: &CoreNodeRouter,
-    methodName: &str,
-    args: Value,
-) -> Result<CoreCallRequest, String> {
-    Ok(CoreCallRequest::new(
-        format!("space-persistence-{methodName}-{}", currentTimeMillis()),
-        nodeRouter
-            .targetForSchema("application")
-            .ok_or_else(|| "unknown Core schema key: application".to_string())?,
-        methodName,
-        toCoreValue(args).map_err(|error| error.to_string())?,
-    ))
+/// Reads exact unapplied identities from the existing receipt and application reports.
+fn pendingOperationIds(report: &Value) -> BTreeSet<String> {
+    report.get("pendingOperationIds").and_then(Value::as_array).into_iter().flatten()
+        .filter_map(Value::as_str).map(str::to_owned).collect()
+}
+
+/// Reports slow synchronization steps without logging business payloads or adding another dispatch path.
+fn recordSlowSyncCall(target: &str, method: &str, startedAt: i64) {
+    let elapsedMs = currentTimeMillis() - startedAt;
+    if elapsedMs >= 250 {
+        operit_util::AppLogger::AppLogger::trace("CoreSyncTrace", &format!(
+            "sync_call.slow target={target} method={method} elapsedMs={elapsedMs}"
+        ));
+    }
 }
 
 /// Builds one Link request for a generated service operation.
@@ -1401,7 +1575,7 @@ fn serviceCallRequest(
             .ok_or_else(|| format!("unknown Core schema key: {targetPath}"))?
     };
     Ok(CoreCallRequest::new(
-        format!("space-persistence-{methodName}-{}", currentTimeMillis()),
+        operit_link::nextCoreRouteRequestId(&format!("space-persistence-{methodName}")),
         target,
         methodName,
         toCoreValue(args).map_err(|error| error.to_string())?,
@@ -1417,67 +1591,14 @@ where
     fromCoreValue(value).map_err(|error| error.to_string())
 }
 
-/// Reads only the ordering fields of one encoded operation. Cloning each
-/// operation just to deserialize it would duplicate the whole page.
-fn syncOperationOrder(value: &Value) -> Result<SyncOperationOrder, String> {
-    let field = |name: &str| {
-        value
-            .get(name)
-            .ok_or_else(|| format!("invalid sync operation: missing {name}"))
-    };
-    Ok(SyncOperationOrder {
-        opId: field("opId")?
-            .as_str()
-            .ok_or("invalid sync operation: opId is not a string")?
-            .to_string(),
-        originDeviceId: field("originDeviceId")?
-            .as_str()
-            .ok_or("invalid sync operation: originDeviceId is not a string")?
-            .to_string(),
-        sequence: field("sequence")?
-            .as_i64()
-            .ok_or("invalid sync operation: sequence is not an integer")?,
-        createdAt: field("createdAt")?
-            .as_i64()
-            .ok_or("invalid sync operation: createdAt is not an integer")?,
-    })
-}
-
 /// Merges two operation pages into their deterministic application order.
 fn mergeSyncOperations(left: Value, right: Value) -> Result<Vec<Value>, String> {
-    let mut byId = BTreeMap::new();
-    for operation in syncOperations(left)?
-        .into_iter()
-        .chain(syncOperations(right)?)
-    {
-        let key = syncOperationOrder(&operation)?;
-        if let Some((_, existing)) = byId.get(&key.opId) {
-            if existing != &operation {
-                return Err(format!("conflicting synchronization operation identity: {}", key.opId));
-            }
-            continue;
-        }
-        byId.insert(key.opId.clone(), (key, operation));
-    }
-    let mut operations = byId.into_values().collect::<Vec<_>>();
-    operations.sort_by(|left, right| {
-        (
-            left.0.createdAt,
-            &left.0.originDeviceId,
-            left.0.sequence,
-            &left.0.opId,
-        )
-            .cmp(&(
-                right.0.createdAt,
-                &right.0.originDeviceId,
-                right.0.sequence,
-                &right.0.opId,
-            ))
-    });
-    Ok(operations
-        .into_iter()
-        .map(|(_, operation)| operation)
-        .collect())
+    let operations = syncOperations(left)?.into_iter().chain(syncOperations(right)?)
+        .map(|value| serde_json::from_value::<SyncOperation>(value).map_err(|e| format!("Invalid sync operation: {e}")))
+        .collect::<Result<Vec<_>, _>>()?;
+    operit_store::Transaction::ordered(operations, |op| &op.opId,
+        operit_store::Transaction::Revision::fromOperation)?.into_iter()
+        .map(|op| serde_json::to_value(op).map_err(|e| e.to_string())).collect()
 }
 
 /// Decodes one runtime sync operation page into its ordered operation array.
@@ -1511,10 +1632,7 @@ fn syncPageBudget(maxMessageBytes: usize) -> usize {
     (maxMessageBytes.saturating_mul(3) / 4).saturating_sub(SYNC_PAGE_HEADROOM_BYTES)
 }
 
-/// Only the final message of a page may close the history boundary.
-fn chunkCompletesPage(complete: bool, index: usize, chunks: usize) -> bool {
-    complete && index + 1 == chunks
-}
+
 
 /// Splits one ordered, deduplicated page into contiguous slices that each fit
 /// the Link ceiling. Operations stay whole, so a transaction is never divided.
@@ -1558,22 +1676,11 @@ fn syncPageChunks<'a>(
 /// Summarizes one synchronization clock without logging the complete vector.
 #[allow(non_snake_case)]
 fn summarizeSyncClock(value: &Value) -> String {
-    value
-        .get("sequences")
-        .and_then(Value::as_object)
-        .map(|sequences| {
-            let mut entries = sequences
-                .iter()
-                .filter_map(|(device, sequence)| {
-                    sequence
-                        .as_i64()
-                        .map(|sequence| format!("{device}:{sequence}"))
-                })
-                .collect::<Vec<_>>();
-            entries.sort();
-            entries.join(",")
-        })
-        .unwrap_or_else(|| "none".to_string())
+    format!(
+        "origins={}#boundary={}#pending={}#errors={}",
+        value["ranges"].as_object().map_or(0, |ranges|ranges.len()),
+        value["stateSummary"], value["pending"], value["errors"]
+    )
 }
 
 /// Records one page's operation ids and reports whether it added a new identity.
@@ -1607,7 +1714,6 @@ fn summarizeSyncOperations(operations: &[Value]) -> String {
     let mut domainCounts = BTreeMap::<String, usize>::new();
     let mut chatEntities = BTreeSet::new();
     let mut createdAt = Vec::new();
-    let mut operationIds = Vec::new();
     for value in operations {
         // Read the fields the summary needs directly: cloning each operation to
         // deserialize it would copy the whole page once per trace line.
@@ -1621,31 +1727,20 @@ fn summarizeSyncOperations(operations: &[Value]) -> String {
             chatEntities.insert(format!("{entityType}/{entityId}"));
         }
         createdAt.push(value.get("createdAt").and_then(Value::as_i64).unwrap_or_default());
-        operationIds.push(value.get("opId").and_then(Value::as_str).unwrap_or_default().to_string());
     }
     createdAt.sort();
-    operationIds.sort();
     let domains = domainCounts
         .into_iter()
         .map(|(domain, count)| format!("{domain}:{count}"))
         .collect::<Vec<_>>()
         .join(",");
     format!(
-        "count={} domains={} chatEntities={} createdAt={}..{} opIds={}",
+        "count={} domains={} chatEntities={} createdAt={}..{}",
         operations.len(),
-        if domains.is_empty() { "none" } else { &domains },
-        if chatEntities.is_empty() {
-            "none".to_string()
-        } else {
-            chatEntities.into_iter().collect::<Vec<_>>().join(",")
-        },
+        domains,
+        chatEntities.len(),
         createdAt.first().copied().unwrap_or_default(),
         createdAt.last().copied().unwrap_or_default(),
-        if operationIds.is_empty() {
-            "none".to_string()
-        } else {
-            operationIds.join(",")
-        }
     )
 }
 
@@ -1657,25 +1752,22 @@ mod page_budget_tests {
     #[test]
     fn plugin_clock_failures_are_isolated_from_core_domains() {
         let clock = json!({
-            "sequences": {"core": 7},
-            "domainErrors": {"plugin_storage": "invalid plugin catalog"},
+            "protocolVersion": 1, "ranges": {"core": [[1,7]]},
+            "errors": ["invalid plugin catalog"],
         });
         assert!(validateDomainClock(&clock, &SYNC_DOMAINS, "local").is_ok());
-        assert_eq!(
-            validateDomainClock(&clock, &PLUGIN_SYNC_DOMAINS, "remote").unwrap_err(),
-            "remote plugin_storage clock: invalid plugin catalog",
-        );
-        let durable: operit_store::SyncOperationStore::SyncClock = serde_json::from_value(clock).unwrap();
-        assert_eq!(durable.sequenceFor("core"), 7);
-        assert_eq!(durable.sequences.len(), 1);
+        let durable: operit_store::SyncOperationStore::SyncReceipt = serde_json::from_value(clock).unwrap();
+        assert_eq!(durable.ranges["core"], vec![[1,7]]);
     }
 
     /// Clears a plugin clock error only when the actual clock can be read again.
     #[test]
     fn recovered_plugin_clock_can_synchronize_again() {
-        let clock = json!({"sequences": {"plugin": 2}, "domainErrors": {}});
-        assert!(validateDomainClock(&clock, &PLUGIN_SYNC_DOMAINS, "local").is_ok());
+        let clock = json!({"protocolVersion": 1, "ranges": {"plugin": [[1,2]]}, "errors": []});
+        assert!(validateDomainClock(&clock, &SYNC_DOMAINS, "local").is_ok());
     }
+
+
 
     /// Constructs one transport-sized plugin operation for page budget tests.
     fn operation(opId: &str, payloadBytes: usize) -> Value {
@@ -1692,6 +1784,26 @@ mod page_budget_tests {
             .iter()
             .map(|value| value["opId"].as_str().unwrap_or_default().to_string())
             .collect()
+    }
+
+    /// Transport rejects a changed original regardless of arrival direction.
+    #[test]
+    fn merge_pages_rejects_changed_immutable_chat_original_in_both_orders() {
+        let old = json!({
+            "opId":"device:1", "originDeviceId":"device", "sequence":1,
+            "domain":"chat", "entityType":"message", "entityId":"chat:1",
+            "operation":"upsert", "semantics":"entity_state",
+            "payload":{"text":"old"}, "createdAt":1, "schemaVersion":7,
+        });
+        let mut new = old.clone();
+        new["schemaVersion"] = json!(8);
+        new["payload"] = json!({"text":"new"});
+        for (left, right) in [(old.clone(), new.clone()), (new.clone(), old.clone())] {
+            assert!(mergeSyncOperations(json!([left]), json!([right])).is_err());
+        }
+        let mut control = old.clone(); control["domain"] = json!("network_control");
+        let mut conflict = control.clone(); conflict["payload"] = json!({"permission":"admin"});
+        assert!(mergeSyncOperations(json!([control]), json!([conflict])).is_err());
     }
 
     #[test]
@@ -1751,14 +1863,7 @@ mod page_budget_tests {
         assert!(error.contains("domain=plugin_storage"), "{error}");
     }
 
-    #[test]
-    fn only_the_last_message_closes_the_history_boundary() {
-        assert!(chunkCompletesPage(true, 0, 1));
-        assert!(!chunkCompletesPage(false, 0, 1));
-        assert!(!chunkCompletesPage(true, 0, 3));
-        assert!(!chunkCompletesPage(true, 1, 3));
-        assert!(chunkCompletesPage(true, 2, 3));
-    }
+
 
     #[test]
     fn an_empty_page_has_no_chunks() {
@@ -1767,20 +1872,15 @@ mod page_budget_tests {
     }
 
     #[test]
-    fn operation_order_is_read_without_cloning_the_payload() {
-        let value = json!({
-            "opId": "device:7",
-            "originDeviceId": "device",
-            "sequence": 7,
-            "createdAt": 1234,
-            "payload": "x".repeat(4096),
-        });
-        let order = syncOperationOrder(&value).unwrap();
-        assert_eq!(order.opId, "device:7");
-        assert_eq!(order.originDeviceId, "device");
-        assert_eq!(order.sequence, 7);
-        assert_eq!(order.createdAt, 1234);
-        assert!(syncOperationOrder(&json!({"opId": "device:7"})).is_err());
+    fn page_union_uses_the_common_business_order_and_rejects_invalid_originals() {
+        let mut first = operation("device:1", 4096);
+        first["entityType"] = json!("test"); first["entityId"] = json!("entity"); first["operation"] = json!("set");
+        first["semantics"] = json!("transaction"); first["schemaVersion"] = json!(1);
+        first["originDeviceId"] = json!("device"); first["sequence"] = json!(1); first["createdAt"] = json!(20);
+        let mut second = first.clone();
+        second["opId"] = json!("device:2"); second["sequence"] = json!(2); second["createdAt"] = json!(10);
+        assert_eq!(mergeSyncOperations(json!([second.clone(), first.clone()]), json!([first.clone()])).unwrap(), vec![first,second]);
+        assert!(mergeSyncOperations(json!([{"opId":"device:7"}]), json!([])).is_err());
     }
 
     #[test]

@@ -103,7 +103,7 @@ impl ToolCall {
         }
         for key in self.parameters.keys() {
             if !matches!(key.as_str(), "tool_name" | "params" | PACKAGE_CALLER_NAME_PARAM | PACKAGE_CHAT_ID_PARAM | PACKAGE_CALLER_PARTICIPANT_ID_PARAM | PACKAGE_CALLER_OWNER_PARAM) {
-                return Err(format!("Unexpected proxy parameter: {key}"));
+                return Err(format!("Unexpected proxy parameter: {key}. Put target tool parameters inside params as a JSON object."));
             }
         }
         let name = self.parameters.get("tool_name").and_then(serde_json::Value::as_str)
@@ -249,10 +249,11 @@ pub struct RouteChangeIntent {
     pub targetNodeId: String,
 }
 
-/// Owns finalized results and the exact markup shared by display and model history.
+/// Owns finalized results and separate display and provider projections.
 pub struct ToolExecutionBatch {
     pub results: Vec<ToolResult>,
     pub message: String,
+    pub displayMessage: String,
     pub routeChangeIntent: Option<RouteChangeIntent>,
 }
 
@@ -260,7 +261,10 @@ impl ToolExecutionBatch {
     /// Formats each invocation result once without imposing a batch-wide output limit.
     pub fn new(results: Vec<ToolResult>, routeChangeIntent: Option<RouteChangeIntent>) -> Self {
         let message = ConversationMarkupManager::buildToolResultMessage(&results);
-        Self { results, message, routeChangeIntent }
+        let displayMessage = results.iter()
+            .map(|result| ConversationMarkupManager::formatToolResultForDisplay(result, None))
+            .collect::<Vec<_>>().join("\n");
+        Self { results, message, displayMessage, routeChangeIntent }
     }
 }
 
@@ -366,6 +370,7 @@ impl ToolExecutionManager {
         runtimeContext.validateExecutionContext()?;
         Self::scopeToolRuntimeContext(runtimeContext, async move {
         let mut results = Vec::new();
+        let mut displays = Vec::new();
         let mut routeChangeIntent = None;
         let requestedToolNames = invocations
             .iter()
@@ -453,7 +458,11 @@ impl ToolExecutionManager {
                 let finalResult = ToolResult {
                     toolName: displayToolName.clone(),
                     success: last.success,
-                    result: stringResultData(combinedResultString),
+                    result: if collected.len() == 1 {
+                        last.result.clone()
+                    } else {
+                        stringResultData(combinedResultString)
+                    },
                     error: last.error.clone(),
                 };
                 if let Some(intent) = Self::routeChangeIntentForResult(&invocation.tool, last) {
@@ -470,11 +479,15 @@ impl ToolExecutionManager {
                     ),
                     operit_util::AppLogger::VERBOSE_LEVEL_3,
                 );
+                displays.push(toolHandler.toolDisplayDeclaration(&displayToolName));
                 results.push(finalResult);
             }
         }
 
-        let batch = ToolExecutionBatch::new(results, routeChangeIntent);
+        let mut batch = ToolExecutionBatch::new(results, routeChangeIntent);
+        batch.displayMessage = batch.results.iter().zip(&displays)
+            .map(|(result, display)| ConversationMarkupManager::formatToolResultForDisplay(result, display.as_ref()))
+            .collect::<Vec<_>>().join("\n");
         AppLogger::v_with_level(
             TAG,
             &format!(

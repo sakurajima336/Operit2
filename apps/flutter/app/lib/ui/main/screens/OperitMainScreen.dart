@@ -7,6 +7,9 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:desktop_widgets/desktop_widgets.dart';
 
+import '../../window/DesktopWindowChrome.dart';
+import '../design/SoftwareDesignCatalog.dart';
+
 import '../../../core/bridge/ProxyCoreRuntimeBridge.dart';
 import '../../common/contributions/ChatSidebarTabHost.dart'
     show ChatSidebarPreparation, ChatSidebarPreparationScope;
@@ -62,6 +65,7 @@ class _OperitMainScreenState extends State<OperitMainScreen> {
 
   late AppNavigationModel _navigationModel;
   late final AppRouterState _routerState;
+  late final SoftwareDesignCatalog _softwareDesignCatalog;
   late final TopBarController _topBarController;
   late final MainLayoutController _mainLayoutController;
   late final SidebarDockController _sidebarDockController;
@@ -97,6 +101,11 @@ class _OperitMainScreenState extends State<OperitMainScreen> {
     _drawerConversationState.addListener(_prepareSidebarData);
     _drawerOpenState = ValueNotifier<bool>(false);
     AppRouterGateway.install(handler: _navigateToRoute, reset: _resetToRoute);
+    _softwareDesignCatalog = SoftwareDesignCatalog(
+      router: _routerState,
+      routes: () => _navigationModel.routes,
+      navigate: _navigateToRoute,
+    );
     NotificationActivationService.instance.installChatHandler(
       _activateNotificationChat,
     );
@@ -242,6 +251,8 @@ class _OperitMainScreenState extends State<OperitMainScreen> {
           await _clients.chatRuntimeHolderMain.createNewChat(
             setAsCurrentChat: true,
             sourceChatId: null,
+            parentChatId: null,
+            workspaceId: null,
             input: null,
           );
         } catch (error, stackTrace) {
@@ -274,6 +285,7 @@ class _OperitMainScreenState extends State<OperitMainScreen> {
       toolPkgNavigationEntries: _toolPkgNavigationEntries,
     );
     AppRouteDiscoveryGateway.install(() => _navigationModel.routes);
+    _softwareDesignCatalog.install();
     _synchronizeSidebarDock();
     if (!_requestedInitialToolPkgNavigationRefresh) {
       _requestedInitialToolPkgNavigationRefresh = true;
@@ -285,6 +297,7 @@ class _OperitMainScreenState extends State<OperitMainScreen> {
   void dispose() {
     unawaited(DesktopWidgets.setActionHandler(null));
     unawaited(DesktopWidgets.setSnapshotRenderer(null));
+    _softwareDesignCatalog.dispose();
     AppRouterGateway.clear();
     AppRouteDiscoveryGateway.clear();
     NotificationActivationService.instance.clearChatHandler();
@@ -792,26 +805,34 @@ class _OperitMainScreenState extends State<OperitMainScreen> {
                             onNavigationEntrySelected:
                                 _navigateToNavigationEntry,
                             onConversationActivated: _activateConversationRoute,
+                            onCollapseSidebar: () {
+                              setState(() {
+                                _isTabletSidebarExpanded = false;
+                              });
+                            },
                           )
-                        : PhoneLayout(
-                            content: content,
-                            navigationEntries:
-                                _navigationModel.navigationEntries,
-                            pluginSidebarEntries: pluginSidebarEntries,
-                            selectedRouteId: currentRouteEntry.routeId,
-                            drawerConversationState: _drawerConversationState,
-                            drawerWidth: screenSize.width * 0.75,
-                            drawerOpenState: _drawerOpenState,
-                            enableNavigationAnimation: true,
-                            onOpenDrawer: () {
-                              _drawerOpenState.value = true;
-                            },
-                            onCloseDrawer: () {
-                              _drawerOpenState.value = false;
-                            },
-                            onNavigationEntrySelected:
-                                _navigateToNavigationEntry,
-                            onConversationActivated: _activateConversationRoute,
+                        : DesktopContentPanel(
+                            child: PhoneLayout(
+                              content: content,
+                              navigationEntries:
+                                  _navigationModel.navigationEntries,
+                              pluginSidebarEntries: pluginSidebarEntries,
+                              selectedRouteId: currentRouteEntry.routeId,
+                              drawerConversationState: _drawerConversationState,
+                              drawerWidth: screenSize.width * 0.75,
+                              drawerOpenState: _drawerOpenState,
+                              enableNavigationAnimation: true,
+                              onOpenDrawer: () {
+                                _drawerOpenState.value = true;
+                              },
+                              onCloseDrawer: () {
+                                _drawerOpenState.value = false;
+                              },
+                              onNavigationEntrySelected:
+                                  _navigateToNavigationEntry,
+                              onConversationActivated:
+                                  _activateConversationRoute,
+                            ),
                           ),
                   ),
                   builder: (context, drawerOpen, child) {

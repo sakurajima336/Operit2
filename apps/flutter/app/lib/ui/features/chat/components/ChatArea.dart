@@ -1,8 +1,8 @@
 // ignore_for_file: file_names
 
 import 'dart:async';
-import 'dart:collection';
 
+import 'package:collection/collection.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
@@ -20,12 +20,12 @@ import 'MessageCopyPreview.dart';
 import 'ChatScrollNavigator.dart';
 import 'NewChatIntro.dart';
 import 'style/ThemedChatMessage.dart';
+import '../../../common/contributions/EmbeddedPluginSurfaceCatalog.dart';
+import 'ChatMessageSlotHost.dart';
 
 const Duration _navigatorHideDelay = Duration(milliseconds: 1200);
 const Duration _viewportResizeSettleDelay = Duration(milliseconds: 120);
-const Duration _bottomFollowRateWindow = Duration(milliseconds: 600);
-const double _bottomFollowOutputVelocityGain = 0.65;
-const double _bottomFollowGapCorrectionRate = 0.8;
+const Duration _bottomFollowDuration = Duration(milliseconds: 240);
 const double _bottomFollowPositionTolerance = 1;
 
 class ChatArea extends StatefulWidget {
@@ -44,6 +44,7 @@ class ChatArea extends StatefulWidget {
     required this.hasOlderDisplayHistory,
     required this.hasNewerDisplayHistory,
     required this.isLoadingDisplayWindow,
+    this.messageNavigation,
     required this.loadLocatorEntries,
     required this.onRevealMessageForLocator,
     required this.onAutoScrollToBottomChanged,
@@ -84,6 +85,7 @@ class ChatArea extends StatefulWidget {
   final bool hasOlderDisplayHistory;
   final bool hasNewerDisplayHistory;
   final bool isLoadingDisplayWindow;
+  final ChatMessageNavigationController? messageNavigation;
   final LoadMessageLocatorEntries loadLocatorEntries;
   final RevealMessageForLocator onRevealMessageForLocator;
   final ValueChanged<bool> onAutoScrollToBottomChanged;
@@ -128,6 +130,8 @@ class _ChatAreaState extends State<ChatArea>
   );
   final Map<int, _CachedMessageRow> _messageRowCache =
       <int, _CachedMessageRow>{};
+  late final ValueNotifier<bool> _chatBusyNotifier;
+  late EmbeddedPluginSurfaceCatalog _messageContributions;
   Timer? _navigatorHideTimer;
   Timer? _viewportResizeTimer;
   bool _userScrollSessionActive = false;
@@ -143,8 +147,7 @@ class _ChatAreaState extends State<ChatArea>
   /// Uses the scheduler timeline shared by layout, animation and test frames.
   int get _bottomFollowNowMicroseconds =>
       SchedulerBinding.instance.currentSystemFrameTimeStamp.inMicroseconds;
-  final Queue<_BottomGrowthSample> _bottomGrowthSamples =
-      Queue<_BottomGrowthSample>();
+  int? _bottomFollowDeadlineMicroseconds;
   late final Ticker _bottomFollowTicker;
   int? _bottomFollowLastFrameMicroseconds;
   bool _bottomFollowCompleting = false;
@@ -160,12 +163,51 @@ class _ChatAreaState extends State<ChatArea>
   @override
   void initState() {
     super.initState();
+    _messageContributions = EmbeddedPluginSurfaceCatalog(
+      clients: widget.clients,
+      surfaces: const {'chat_message_after'},
+    );
+    _chatBusyNotifier = ValueNotifier<bool>(widget.isLoading);
     _layoutScrollController = _ChatLayoutScrollController(
       delegate: widget.scrollController,
       shouldAlignBottom: _shouldAlignBottomDuringLayout,
       shouldInitiallyAlignBottom: _ownsBottomScroll,
     );
     _bottomFollowTicker = createTicker(_tickBottomFollow);
+  }
+
+  /// Updates localized declarations without opening a catalog per transcript row.
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _messageContributions.setLanguage(
+      Localizations.localeOf(context).languageCode,
+    );
+  }
+
+  /// Binds message actions to the mounted chat and exact answer revision, not plugin-supplied ids.
+  Future<void> _handleMessageContribution(
+    String chatId,
+    ChatUiMessage message,
+    EmbeddedPluginSurfaceEntry entry,
+    Object? value,
+  ) async {
+    if (!mounted || widget.currentChatId != chatId) return;
+    final current = widget.messages.firstWhereOrNull(
+      (item) => item.timestamp == message.timestamp,
+    );
+    if (current == null ||
+        current.selectedVariantIndex != message.selectedVariantIndex) {
+      return;
+    }
+    if (!_messageContributions.entries.any(
+      (item) => item.mountIdentity == entry.mountIdentity,
+    )) {
+      return;
+    }
+    if (value is Map && value['type'] == 'toolpkg.message.rollback') {
+      widget.onRollbackToMessage(message.timestamp);
+    }
   }
 
   /// Builds the scrollable message area and its navigation overlay.
@@ -267,6 +309,7 @@ class _ChatAreaState extends State<ChatArea>
           animation: Listenable.merge(<Listenable>[
             _messageAnchorsNotifier,
             _viewportHeightNotifier,
+            widget.scrollController,
           ]),
           builder: (context, _) {
             final messageAnchors = _messageAnchorsNotifier.value;
@@ -284,6 +327,7 @@ class _ChatAreaState extends State<ChatArea>
                       viewportHeight: _viewportHeight,
                       autoScrollToBottom: autoScrollToBottom,
                       hasNewerDisplayHistory: widget.hasNewerDisplayHistory,
+                      messageNavigation: widget.messageNavigation,
                       loadLocatorEntries: widget.loadLocatorEntries,
                       onRequestLatestMessages: widget.onShowLatestDisplayWindow,
                       onAutoScrollToBottomChanged:
@@ -550,6 +594,7 @@ class _ChatAreaState extends State<ChatArea>
       }
       final scrollController = widget.scrollController;
       if (scrollController.hasClients &&
+          scrollController.positions.length == 1 &&
           scrollController.position.isScrollingNotifier.value) {
         _scheduleNavigatorHide();
         return;
@@ -599,22 +644,18 @@ class _ChatAreaState extends State<ChatArea>
         !widget.scrollController.hasClients) {
       return;
     }
-    if (heightDelta > _bottomFollowPositionTolerance) {
-      _bottomGrowthSamples.add(
-        _BottomGrowthSample(
-          timestampMicroseconds: nowMicroseconds,
-          heightDelta: heightDelta,
-        ),
-      );
+    if (heightDelta > _bottomFollowPositionTolerance ||
+        !_bottomFollowTicker.isActive) {
+      _bottomFollowDeadlineMicroseconds =
+          nowMicroseconds + _bottomFollowDuration.inMicroseconds;
     }
-    _pruneBottomGrowthSamples(nowMicroseconds);
     if (!_bottomFollowTicker.isActive) {
       _bottomFollowLastFrameMicroseconds = nowMicroseconds;
       _bottomFollowTicker.start();
     }
   }
 
-  /// Advances the scroll position from recent output growth and baseline error.
+  /// Follows measured growth and settles within a bounded animation window.
   void _tickBottomFollow(Duration elapsed) {
     final nowMicroseconds = _bottomFollowNowMicroseconds;
     if (!mounted ||
@@ -622,75 +663,45 @@ class _ChatAreaState extends State<ChatArea>
         !widget.autoScrollToBottomListenable.value ||
         widget.hasNewerDisplayHistory ||
         widget.isLoadingDisplayWindow ||
-        !widget.scrollController.hasClients) {
+        !widget.scrollController.hasClients ||
+        widget.scrollController.positions.length != 1 ||
+        !widget.scrollController.position.hasPixels) {
       _stopBottomFollow();
       return;
     }
     if (_activeUserScrollPointers.isNotEmpty) {
-      _bottomFollowLastFrameMicroseconds = nowMicroseconds;
-      _pruneBottomGrowthSamples(nowMicroseconds);
+      _stopBottomFollow();
       return;
     }
     final previousMicroseconds = _bottomFollowLastFrameMicroseconds!;
     _bottomFollowLastFrameMicroseconds = nowMicroseconds;
-    _pruneBottomGrowthSamples(nowMicroseconds);
 
     final position = widget.scrollController.position;
     final gap = position.maxScrollExtent - position.pixels;
     if (gap <= _bottomFollowPositionTolerance) {
-      if (_bottomGrowthSamples.isEmpty) {
-        _stopBottomFollow();
-      }
+      _stopBottomFollow();
       return;
     }
-    final elapsedSeconds =
-        (nowMicroseconds - previousMicroseconds) /
-        Duration.microsecondsPerSecond;
-    final outputDelta =
-        _bottomOutputVelocity(nowMicroseconds) *
-        _bottomFollowOutputVelocityGain *
-        elapsedSeconds;
-    final gapCorrectionDelta =
-        gap * _bottomFollowGapCorrectionRate * elapsedSeconds;
-    final scrollDelta = outputDelta + gapCorrectionDelta;
-    final target = (position.pixels + scrollDelta).clamp(
+    final deadline = _bottomFollowDeadlineMicroseconds ?? nowMicroseconds;
+    final remaining = deadline - previousMicroseconds;
+    final elapsed = nowMicroseconds - previousMicroseconds;
+    final fraction = remaining <= 0
+        ? 1.0
+        : (elapsed / remaining).clamp(0.0, 1.0);
+    final target = (position.pixels + gap * fraction).clamp(
       position.pixels,
       position.maxScrollExtent,
     );
-    widget.scrollController.jumpTo(target);
+    if (target != position.pixels) widget.scrollController.jumpTo(target);
+    if (nowMicroseconds >= deadline) _stopBottomFollow();
   }
 
-  /// Computes a linearly weighted output velocity over the active time window.
-  double _bottomOutputVelocity(int nowMicroseconds) {
-    final windowMicroseconds = _bottomFollowRateWindow.inMicroseconds;
-    var weightedGrowth = 0.0;
-    for (final sample in _bottomGrowthSamples) {
-      final ageMicroseconds = nowMicroseconds - sample.timestampMicroseconds;
-      final remainingWeight = 1 - ageMicroseconds / windowMicroseconds;
-      weightedGrowth += sample.heightDelta * remainingWeight;
-    }
-    return weightedGrowth *
-        2 *
-        Duration.microsecondsPerSecond /
-        windowMicroseconds;
-  }
-
-  /// Removes growth samples that no longer contribute to the time window.
-  void _pruneBottomGrowthSamples(int nowMicroseconds) {
-    final oldestTimestamp =
-        nowMicroseconds - _bottomFollowRateWindow.inMicroseconds;
-    while (_bottomGrowthSamples.isNotEmpty &&
-        _bottomGrowthSamples.first.timestampMicroseconds <= oldestTimestamp) {
-      _bottomGrowthSamples.removeFirst();
-    }
-  }
-
-  /// Stops live following and clears its temporal growth model.
+  /// Stops live following and releases its frame callback.
   void _stopBottomFollow() {
     _bottomFollowTicker.stop();
     _bottomFollowLastFrameMicroseconds = null;
     _bottomFollowCompleting = false;
-    _bottomGrowthSamples.clear();
+    _bottomFollowDeadlineMicroseconds = null;
   }
 
   /// Reports whether bottom following should continue for live or completing rows.
@@ -714,6 +725,8 @@ class _ChatAreaState extends State<ChatArea>
     }
     final nowMicroseconds = _bottomFollowNowMicroseconds;
     _bottomFollowCompleting = true;
+    _bottomFollowDeadlineMicroseconds =
+        nowMicroseconds + _bottomFollowDuration.inMicroseconds;
     if (!_bottomFollowTicker.isActive) {
       _bottomFollowLastFrameMicroseconds = nowMicroseconds;
       _bottomFollowTicker.start();
@@ -736,8 +749,14 @@ class _ChatAreaState extends State<ChatArea>
       await widget.onShowLatestDisplayWindow();
       return;
     }
-    await widget.scrollController.animateTo(
-      widget.scrollController.position.maxScrollExtent,
+    final scroll = widget.scrollController;
+    if (!scroll.hasClients ||
+        scroll.positions.length != 1 ||
+        !scroll.position.hasPixels) {
+      return;
+    }
+    await scroll.animateTo(
+      scroll.position.maxScrollExtent,
       duration: const Duration(milliseconds: 220),
       curve: Curves.easeOutCubic,
     );
@@ -805,7 +824,10 @@ class _ChatAreaState extends State<ChatArea>
 
   /// Collects render anchors for currently visible chat message rows.
   void _collectMessageAnchors() {
-    if (!widget.scrollController.hasClients) {
+    final scroll = widget.scrollController;
+    if (!scroll.hasClients ||
+        scroll.positions.length != 1 ||
+        !scroll.position.hasPixels) {
       return;
     }
     final viewportContext = _viewportKey.currentContext;
@@ -822,16 +844,21 @@ class _ChatAreaState extends State<ChatArea>
       if (rowBox == null || !rowBox.attached || !rowBox.hasSize) {
         continue;
       }
-      final localTop = rowBox
-          .localToGlobal(Offset.zero, ancestor: viewportBox)
-          .dy;
-      anchors[message.timestamp] = ChatScrollMessageAnchor(
-        timestamp: message.timestamp,
-        index: index,
-        key: key,
-        absoluteTopPx: widget.scrollController.offset + localTop,
-        heightPx: rowBox.size.height,
-      );
+      try {
+        final localTop = rowBox
+            .localToGlobal(Offset.zero, ancestor: viewportBox)
+            .dy;
+        anchors[message.timestamp] = ChatScrollMessageAnchor(
+          timestamp: message.timestamp,
+          index: index,
+          key: key,
+          absoluteTopPx: scroll.offset + localTop,
+          heightPx: rowBox.size.height,
+        );
+      } catch (_) {
+        // Skip rows that are being unmounted or detached from viewportBox during resize
+        continue;
+      }
     }
     _messageAnchorsNotifier.value = anchors;
   }
@@ -875,6 +902,8 @@ class _ChatAreaState extends State<ChatArea>
   @override
   void didUpdateWidget(ChatArea oldWidget) {
     super.didUpdateWidget(oldWidget);
+    _messageContributions.bindClients(widget.clients);
+    _chatBusyNotifier.value = widget.isLoading;
     _layoutScrollController.delegate = widget.scrollController;
     final chatChanged = oldWidget.currentChatId != widget.currentChatId;
     if (chatChanged) {
@@ -951,20 +980,23 @@ class _ChatAreaState extends State<ChatArea>
   /// Releases timers, cached rows, and navigation state.
   @override
   void dispose() {
+    _messageContributions.dispose();
     _navigatorHideTimer?.cancel();
     _viewportResizeTimer?.cancel();
     _layoutScrollController.dispose();
     _bottomFollowTicker.dispose();
-    _bottomGrowthSamples.clear();
+    _bottomFollowDeadlineMicroseconds = null;
     _messageAnchorsNotifier.dispose();
     _viewportHeightNotifier.dispose();
     _showNavigatorChipNotifier.dispose();
+    _chatBusyNotifier.dispose();
     _messageKeys.clear();
     _messageRowCache.clear();
     _disposeRowExtents();
     super.dispose();
   }
 
+  /// Reuses transcript content while each menu observes current chat activity.
   Widget _messageRowFor(int messageIndex, ChatUiMessage message) {
     final selected = widget.selectedMessageTimestamps.contains(
       message.timestamp,
@@ -1014,6 +1046,17 @@ class _ChatAreaState extends State<ChatArea>
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
           chatMessage,
+          if (!selectionMode)
+            if (widget.currentChatId case final chatId?)
+              ChatMessageSlotHost(
+                catalog: _messageContributions,
+                chatId: chatId,
+                message: message,
+                isStreaming: isStreaming,
+                onActionResult: (entry, value) => unawaited(
+                  _handleMessageContribution(chatId, message, entry, value),
+                ),
+              ),
           if (message.sender == 'ai' && message.variantCount > 1)
             _MessageVariantSwitcher(
               message: message,
@@ -1030,28 +1073,33 @@ class _ChatAreaState extends State<ChatArea>
           )
         : widget.currentChatId == null
         ? messageContent
-        : MessageContextMenu(
-            key: ValueKey<String>('menu-${_messageWidgetKey(message)}'),
-            message: message,
-            chatId: widget.currentChatId!,
-            messageIndex: messageIndex,
-            clients: widget.clients,
-            packageManager: widget.packageManager,
-            onToggleFavoriteMessage: widget.onToggleFavoriteMessage,
-            onDeleteMessage: widget.onDeleteMessage,
-            onDeleteMessagesFrom: widget.onDeleteMessagesFrom,
-            onDeleteMessageVariant: widget.onDeleteMessageVariant,
-            onRollbackToMessage: widget.onRollbackToMessage,
-            onSelectMessageToEdit: widget.onSelectMessageToEdit,
-            onRegenerateMessage: widget.onRegenerateMessage,
-            onInsertSummary: widget.onInsertSummary,
-            onCreateBranch: widget.onCreateBranch,
-            onReplyToMessage: widget.onReplyToMessage,
-            onPlayVoice: widget.onPlayVoice,
-            onToggleMultiSelectMode: widget.onToggleMultiSelectMode,
-            onRefresh: widget.onRefreshRequested,
-            splitMarkdownContent: widget.splitMarkdownContent,
+        : ValueListenableBuilder<bool>(
+            valueListenable: _chatBusyNotifier,
             child: messageContent,
+            builder: (context, isChatBusy, child) => MessageContextMenu(
+              key: ValueKey<String>('menu-${_messageWidgetKey(message)}'),
+              message: message,
+              chatId: widget.currentChatId!,
+              messageIndex: messageIndex,
+              clients: widget.clients,
+              packageManager: widget.packageManager,
+              onToggleFavoriteMessage: widget.onToggleFavoriteMessage,
+              onDeleteMessage: widget.onDeleteMessage,
+              onDeleteMessagesFrom: widget.onDeleteMessagesFrom,
+              onDeleteMessageVariant: widget.onDeleteMessageVariant,
+              onRollbackToMessage: widget.onRollbackToMessage,
+              onSelectMessageToEdit: widget.onSelectMessageToEdit,
+              onRegenerateMessage: widget.onRegenerateMessage,
+              isChatBusy: isChatBusy,
+              onInsertSummary: widget.onInsertSummary,
+              onCreateBranch: widget.onCreateBranch,
+              onReplyToMessage: widget.onReplyToMessage,
+              onPlayVoice: widget.onPlayVoice,
+              onToggleMultiSelectMode: widget.onToggleMultiSelectMode,
+              onRefresh: widget.onRefreshRequested,
+              splitMarkdownContent: widget.splitMarkdownContent,
+              child: child!,
+            ),
           );
     _messageRowCache[message.timestamp] = _CachedMessageRow(
       index: messageIndex,
@@ -1409,6 +1457,7 @@ class _SelectableMessageFrame extends StatelessWidget {
 }
 
 class _CachedMessageRow {
+  /// Records the message and rendering state represented by one retained row.
   const _CachedMessageRow({
     required this.index,
     required this.message,
@@ -1439,7 +1488,11 @@ class _CachedMessageRow {
 /// Reports whether one cached message row can be reused unchanged.
 bool _sameMessageForRender(ChatUiMessage left, ChatUiMessage right) {
   final contentStreamSame = identical(left.contentStream, right.contentStream);
-  return left.sender == right.sender &&
+  return const DeepCollectionEquality().equals(
+        left.pluginExtensions,
+        right.pluginExtensions,
+      ) &&
+      left.sender == right.sender &&
       (_sameMessagePartsForRender(left, right) ||
           _sameLiveAiStreamForRender(left, right, contentStreamSame)) &&
       left.timestamp == right.timestamp &&
@@ -1577,18 +1630,6 @@ class _LiveBottomStreamSizeRenderObject extends RenderProxyBox {
       _onSizeGrown(heightDelta);
     });
   }
-}
-
-/// Stores one measured live-row height increase in monotonic time.
-class _BottomGrowthSample {
-  /// Creates one timestamped height-growth sample.
-  const _BottomGrowthSample({
-    required this.timestampMicroseconds,
-    required this.heightDelta,
-  });
-
-  final int timestampMicroseconds;
-  final double heightDelta;
 }
 
 class _EmptyChatArea extends StatelessWidget {

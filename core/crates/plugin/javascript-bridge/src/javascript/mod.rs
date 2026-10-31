@@ -28,6 +28,9 @@ pub mod JsInitRuntimeScriptBuilder;
 #[path = "JsHostOperations.rs"]
 pub mod JsHostOperations;
 
+#[path = "JsBinaryCrypto.rs"]
+mod JsBinaryCrypto;
+
 #[path = "JsJavaBridge.rs"]
 pub mod JsJavaBridge;
 
@@ -37,8 +40,6 @@ pub mod JsJavaBridgeDelegates;
 #[path = "JsLibraries.rs"]
 pub mod JsLibraries;
 
-#[path = "JsTimeoutConfig.rs"]
-pub mod JsTimeoutConfig;
 
 #[path = "JsToolManager.rs"]
 pub mod JsToolManager;

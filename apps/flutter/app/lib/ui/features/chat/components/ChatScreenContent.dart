@@ -52,6 +52,7 @@ class ChatScreenContent extends StatelessWidget {
     required this.hasOlderDisplayHistory,
     required this.hasNewerDisplayHistory,
     required this.isLoadingDisplayWindow,
+    this.messageNavigation,
     required this.loadLocatorEntries,
     required this.onRevealMessageForLocator,
     required this.onAutoScrollToBottomChanged,
@@ -78,6 +79,8 @@ class ChatScreenContent extends StatelessWidget {
     required this.onRefreshRequested,
     required this.onSendMessage,
     required this.onQueueMessage,
+    this.onGuideMessage,
+    this.onInterruptAndSendMessage,
     required this.onCancelMessage,
     required this.pendingQueueMessages,
     required this.isPendingQueueExpanded,
@@ -87,6 +90,7 @@ class ChatScreenContent extends StatelessWidget {
     required this.onDeletePendingQueueMessage,
     required this.onEditPendingQueueMessage,
     required this.onSendPendingQueueMessage,
+    this.onGuidePendingQueueMessage,
     required this.attachments,
     required this.onAttachImage,
     required this.onTakePhoto,
@@ -108,8 +112,11 @@ class ChatScreenContent extends StatelessWidget {
     required this.isSpeechTranscribing,
     required this.onSpeechInput,
     this.selectedMessageTimestamps = const <int>{},
+    this.showInput = true,
   });
 
+  /// Keeps the shared transcript available when another workflow owns submission.
+  final bool showInput;
   final List<ChatUiMessage> messages;
   final bool loading;
   final String? errorMessage;
@@ -127,6 +134,7 @@ class ChatScreenContent extends StatelessWidget {
   final bool hasOlderDisplayHistory;
   final bool hasNewerDisplayHistory;
   final bool isLoadingDisplayWindow;
+  final ChatMessageNavigationController? messageNavigation;
   final LoadMessageLocatorEntries loadLocatorEntries;
   final RevealMessageForLocator onRevealMessageForLocator;
   final ValueChanged<bool> onAutoScrollToBottomChanged;
@@ -153,6 +161,8 @@ class ChatScreenContent extends StatelessWidget {
   final Future<void> Function() onRefreshRequested;
   final VoidCallback onSendMessage;
   final VoidCallback onQueueMessage;
+  final VoidCallback? onGuideMessage;
+  final VoidCallback? onInterruptAndSendMessage;
   final VoidCallback onCancelMessage;
   final List<PendingQueueMessageItem> pendingQueueMessages;
   final bool isPendingQueueExpanded;
@@ -168,6 +178,7 @@ class ChatScreenContent extends StatelessWidget {
   final ValueChanged<int> onDeletePendingQueueMessage;
   final ValueChanged<int> onEditPendingQueueMessage;
   final ValueChanged<int> onSendPendingQueueMessage;
+  final ValueChanged<int>? onGuidePendingQueueMessage;
   final List<AttachmentInfo> attachments;
   final VoidCallback onAttachImage;
   final VoidCallback? onTakePhoto;
@@ -197,149 +208,178 @@ class ChatScreenContent extends StatelessWidget {
       context,
     ).themePreferenceSnapshot;
     final inputStyle = themePreferenceSnapshot.inputStyle;
-    final statusLaneInset = _inputProcessingStatusLaneInset(
-      themePreferenceSnapshot,
-    );
+    final isExcludedBottomStatus =
+        inputProcessingState.tag == 'ExecutingTool' ||
+        inputProcessingState.tag == 'ProcessingToolResult' ||
+        inputProcessingState.tag == 'ToolProgress' ||
+        inputProcessingState.tag == 'Receiving' ||
+        inputProcessingState.tag == 'Processing' ||
+        inputProcessingState.tag == 'Summarizing' ||
+        inputProcessingState.tag == 'Connecting' ||
+        inputProcessingState.message == 'chat_compressing_history' ||
+        inputProcessingState.message == 'chat_summarizing_generating' ||
+        inputProcessingState.message == 'enhanced_receiving_tool_result' ||
+        inputProcessingState.message == 'enhanced_receiving_response' ||
+        inputProcessingState.message == 'enhanced_processing_message' ||
+        inputProcessingState.message == 'enhanced_processing_input' ||
+        inputProcessingState.message == 'message_processing';
     final processingStatus = inputProcessingStatusText(
       AppLocalizations.of(context)!,
       inputProcessingState,
     );
-    final showProcessingStatus =
-        statusLaneInset > 0 &&
+    final hasVisibleStatus =
         inputProcessingState.isProcessing &&
+        !isExcludedBottomStatus &&
         processingStatus.isNotEmpty;
-    return Stack(
-      alignment: Alignment.topCenter,
-      children: <Widget>[
-        if (backgroundUri != null)
-          Positioned.fill(
-            child: IgnorePointer(
-              child: ThemeAssetImage(
-                storagePath: backgroundUri!,
-                fit: BoxFit.cover,
+    final statusLaneInset = _inputProcessingStatusLaneInset(
+      themePreferenceSnapshot,
+      hasVisibleStatus: hasVisibleStatus,
+    );
+    final showProcessingStatus = statusLaneInset > 0 && hasVisibleStatus;
+    return CallbackShortcuts(
+      bindings: {
+        if (messageNavigation != null) ...{
+          const SingleActivator(LogicalKeyboardKey.keyF, control: true):
+              messageNavigation!.open,
+          const SingleActivator(LogicalKeyboardKey.keyF, meta: true):
+              messageNavigation!.open,
+        },
+      },
+      child: Stack(
+        alignment: Alignment.topCenter,
+        children: <Widget>[
+          if (backgroundUri != null)
+            Positioned.fill(
+              child: IgnorePointer(
+                child: ThemeAssetImage(
+                  storagePath: backgroundUri!,
+                  fit: BoxFit.cover,
+                ),
               ),
             ),
-          ),
-        Positioned.fill(
-          child: Column(
-            children: <Widget>[
-              Expanded(
-                child: Stack(
-                  fit: StackFit.expand,
-                  children: <Widget>[
-                    IgnorePointer(
-                      ignoring: isPreparingChatSwitch,
-                      child: Opacity(
-                        opacity: isPreparingChatSwitch ? 0 : 1,
-                        child: _buildChatArea(
-                          context,
-                          bottomContentInset: statusLaneInset,
-                        ),
-                      ),
-                    ),
-                    Positioned.fill(
-                      child: IgnorePointer(
-                        child: NewChatIntroOverlay(
-                          currentChatId: currentChatId,
-                          isChatEmpty:
-                              !loading &&
-                              messages.isEmpty &&
-                              errorMessage == null,
-                          isSwitching: loading || isPreparingChatSwitch,
-                        ),
-                      ),
-                    ),
-                    if (!isPreparingChatSwitch && statusLaneInset > 0)
-                      Positioned(
-                        left: 0,
-                        right: 0,
-                        bottom: 0,
-                        child: _buildInputProcessingStatusLane(
-                          themePreferenceSnapshot,
-                          visible: showProcessingStatus,
-                          status: processingStatus,
-                          textStyle: theme.textTheme.bodySmall?.copyWith(
-                            color: theme.colorScheme.onSurface.withValues(
-                              alpha: 0.8,
-                            ),
+          Positioned.fill(
+            child: Column(
+              children: <Widget>[
+                Expanded(
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: <Widget>[
+                      IgnorePointer(
+                        ignoring: isPreparingChatSwitch,
+                        child: Opacity(
+                          opacity: isPreparingChatSwitch ? 0 : 1,
+                          child: _buildChatArea(
+                            context,
+                            bottomContentInset: statusLaneInset,
                           ),
                         ),
                       ),
-                    if (isPreparingChatSwitch) const M3LoadingPane(size: 42),
-                  ],
-                ),
-              ),
-              if (!isPreparingChatSwitch && toolPermissionRequests.isNotEmpty)
-                Align(
-                  alignment: Alignment.bottomCenter,
-                  child: ConstrainedBox(
-                    constraints: BoxConstraints(
-                      maxWidth: themePreferenceSnapshot.bubbleWideLayoutEnabled
-                          ? chatWideContentMaxWidth
-                          : chatContentMaxWidth,
-                    ),
-                    child: Padding(
-                      padding: EdgeInsets.symmetric(
-                        horizontal: themePreferenceSnapshot.chatInputFloating
-                            ? 8
-                            : 0,
+                      Positioned.fill(
+                        child: IgnorePointer(
+                          child: NewChatIntroOverlay(
+                            currentChatId: currentChatId,
+                            isChatEmpty:
+                                !loading &&
+                                messages.isEmpty &&
+                                errorMessage == null,
+                            isSwitching: loading || isPreparingChatSwitch,
+                          ),
+                        ),
                       ),
-                      child: ChatToolPermissionPanel(
-                        request: toolPermissionRequests.first,
-                        onRespond: onToolPermissionDecision,
+                      if (!isPreparingChatSwitch && statusLaneInset > 0)
+                        Positioned(
+                          left: 0,
+                          right: 0,
+                          bottom: 0,
+                          child: _buildInputProcessingStatusLane(
+                            themePreferenceSnapshot,
+                            visible: showProcessingStatus,
+                            status: processingStatus,
+                            textStyle: theme.textTheme.bodySmall?.copyWith(
+                              color: theme.colorScheme.onSurface.withValues(
+                                alpha: 0.8,
+                              ),
+                            ),
+                          ),
+                        ),
+                      if (isPreparingChatSwitch) const M3LoadingPane(size: 42),
+                    ],
+                  ),
+                ),
+                if (!isPreparingChatSwitch && toolPermissionRequests.isNotEmpty)
+                  Align(
+                    alignment: Alignment.bottomCenter,
+                    child: ConstrainedBox(
+                      constraints: BoxConstraints(
+                        maxWidth:
+                            themePreferenceSnapshot.bubbleWideLayoutEnabled
+                            ? chatWideContentMaxWidth
+                            : chatContentMaxWidth,
+                      ),
+                      child: Padding(
+                        padding: EdgeInsets.symmetric(
+                          horizontal: themePreferenceSnapshot.chatInputFloating
+                              ? 8
+                              : 0,
+                        ),
+                        child: ChatToolPermissionPanel(
+                          request: toolPermissionRequests.first,
+                          onRespond: onToolPermissionDecision,
+                        ),
                       ),
                     ),
                   ),
-                ),
-              // Keep the input subtree mounted during chat switches: tearing
-              // it down deactivates tooltip states whose global pointer
-              // routes then crash on ancestor lookups ("deactivated
-              // widget's ancestor"), matching the chat area treatment.
-              IgnorePointer(
-                ignoring: isPreparingChatSwitch,
-                child: Opacity(
-                  opacity: isPreparingChatSwitch ? 0 : 1,
-                  child: isMultiSelectMode
-                      ? ChatMultiSelectBar(
-                          selectedCount: selectedMessageTimestamps.length,
-                          allSelected:
-                              _selectableMessageTimestamps.isNotEmpty &&
-                              _selectableMessageTimestamps.length ==
-                                  selectedMessageTimestamps.length,
-                          onClose: onExitMultiSelectMode,
-                          onToggleSelectAll:
-                              _selectableMessageTimestamps.isNotEmpty &&
+                // Keep the input subtree mounted during chat switches: tearing
+                // it down deactivates tooltip states whose global pointer
+                // routes then crash on ancestor lookups ("deactivated
+                // widget's ancestor"), matching the chat area treatment.
+                if (showInput || isMultiSelectMode)
+                  IgnorePointer(
+                    ignoring: isPreparingChatSwitch,
+                    child: Opacity(
+                      opacity: isPreparingChatSwitch ? 0 : 1,
+                      child: isMultiSelectMode
+                          ? ChatMultiSelectBar(
+                              selectedCount: selectedMessageTimestamps.length,
+                              allSelected:
+                                  _selectableMessageTimestamps.isNotEmpty &&
                                   _selectableMessageTimestamps.length ==
-                                      selectedMessageTimestamps.length
-                              ? onClearMessageSelection
-                              : onSelectAllMessages,
-                          onCopy: selectedMessageTimestamps.isEmpty
-                              ? null
-                              : () => _copySelectedMessages(context),
-                          onShareImage: selectedMessageTimestamps.isEmpty
-                              ? null
-                              : () => _generateShareImage(context),
-                          onDelete: selectedMessageTimestamps.isEmpty
-                              ? null
-                              : () => _confirmDeleteSelected(context),
-                        )
-                      : DrawerGestureExclusion(
-                          child: _buildChatInputSection(inputStyle),
-                        ),
-                ),
-              ),
-            ],
+                                      selectedMessageTimestamps.length,
+                              onClose: onExitMultiSelectMode,
+                              onToggleSelectAll:
+                                  _selectableMessageTimestamps.isNotEmpty &&
+                                      _selectableMessageTimestamps.length ==
+                                          selectedMessageTimestamps.length
+                                  ? onClearMessageSelection
+                                  : onSelectAllMessages,
+                              onCopy: selectedMessageTimestamps.isEmpty
+                                  ? null
+                                  : () => _copySelectedMessages(context),
+                              onShareImage: selectedMessageTimestamps.isEmpty
+                                  ? null
+                                  : () => _generateShareImage(context),
+                              onDelete: selectedMessageTimestamps.isEmpty
+                                  ? null
+                                  : () => _confirmDeleteSelected(context),
+                            )
+                          : DrawerGestureExclusion(
+                              child: _buildChatInputSection(inputStyle),
+                            ),
+                    ),
+                  ),
+              ],
+            ),
           ),
-        ),
-        Positioned(
-          left: 0,
-          top: 0,
-          child: _ChatNoticeBridge(
-            messageListenable: toastMessageListenable,
-            onDismiss: onDismissToast,
+          Positioned(
+            left: 0,
+            top: 0,
+            child: _ChatNoticeBridge(
+              messageListenable: toastMessageListenable,
+              onDismiss: onDismissToast,
+            ),
           ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 
@@ -371,6 +411,8 @@ class ChatScreenContent extends StatelessWidget {
         currentChatId: currentChatId,
         onSendMessage: sendMessage,
         onQueueMessage: onQueueMessage,
+        onGuideMessage: onGuideMessage,
+        onInterruptAndSendMessage: onInterruptAndSendMessage,
         onCancelMessage: onCancelMessage,
         pendingQueueMessages: pendingQueueMessages,
         isPendingQueueExpanded: isPendingQueueExpanded,
@@ -378,6 +420,7 @@ class ChatScreenContent extends StatelessWidget {
         onDeletePendingQueueMessage: onDeletePendingQueueMessage,
         onEditPendingQueueMessage: onEditPendingQueueMessage,
         onSendPendingQueueMessage: onSendPendingQueueMessage,
+        onGuidePendingQueueMessage: onGuidePendingQueueMessage,
         attachments: attachments,
         onAttachImage: onAttachImage,
         onTakePhoto: onTakePhoto,
@@ -407,6 +450,8 @@ class ChatScreenContent extends StatelessWidget {
         currentChatId: currentChatId,
         onSendMessage: sendMessage,
         onQueueMessage: onQueueMessage,
+        onGuideMessage: onGuideMessage,
+        onInterruptAndSendMessage: onInterruptAndSendMessage,
         onCancelMessage: onCancelMessage,
         pendingQueueMessages: pendingQueueMessages,
         isPendingQueueExpanded: isPendingQueueExpanded,
@@ -414,6 +459,7 @@ class ChatScreenContent extends StatelessWidget {
         onDeletePendingQueueMessage: onDeletePendingQueueMessage,
         onEditPendingQueueMessage: onEditPendingQueueMessage,
         onSendPendingQueueMessage: onSendPendingQueueMessage,
+        onGuidePendingQueueMessage: onGuidePendingQueueMessage,
         attachments: attachments,
         onAttachImage: onAttachImage,
         onTakePhoto: onTakePhoto,
@@ -454,6 +500,7 @@ class ChatScreenContent extends StatelessWidget {
       hasOlderDisplayHistory: hasOlderDisplayHistory,
       hasNewerDisplayHistory: hasNewerDisplayHistory,
       isLoadingDisplayWindow: isLoadingDisplayWindow,
+      messageNavigation: messageNavigation,
       loadLocatorEntries: loadLocatorEntries,
       onRevealMessageForLocator: onRevealMessageForLocator,
       onAutoScrollToBottomChanged: onAutoScrollToBottomChanged,
@@ -483,10 +530,14 @@ class ChatScreenContent extends StatelessWidget {
   }
 
   /// Resolves the transcript space reserved for the status overlay.
-  double _inputProcessingStatusLaneInset(ThemePreferenceSnapshot snapshot) {
+  double _inputProcessingStatusLaneInset(
+    ThemePreferenceSnapshot snapshot, {
+    bool hasVisibleStatus = true,
+  }) {
     if (isPreparingChatSwitch ||
         isMultiSelectMode ||
-        !snapshot.showInputProcessingStatus) {
+        !snapshot.showInputProcessingStatus ||
+        !hasVisibleStatus) {
       return 0;
     }
     return inputProcessingStatusLaneHeight;

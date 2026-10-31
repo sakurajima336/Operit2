@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:operit2/core/bridge/OperitRuntimeBridge.dart';
 import 'package:operit2/core/link/CoreLinkCodec.dart';
 import 'package:operit2/core/link/CoreLinkProtocol.dart';
+import 'package:operit2/core/logging/ClientLogger.dart';
 import 'package:operit2/core/proxy/generated/CoreProxyClients.g.dart';
 import 'package:operit2/core/proxy/generated/CoreProxyModels.g.dart';
 import 'package:operit2/ui/features/chat/components/MessageContextMenu.dart';
@@ -12,6 +13,87 @@ import 'package:operit2/ui/common/components/RetainedPage.dart';
 
 /// Verifies message editing, selected-revision deletion and generic plugin menu dispatch.
 void main() {
+  setUpAll(ClientLogger.initialize);
+
+  for (final favorite in [false, true]) {
+    testWidgets('toggles favorite $favorite before refreshing', (tester) async {
+      final actions = <String>[];
+      await _openMenu(
+        tester,
+        selectedVariantIndex: 0,
+        variantCount: 1,
+        isFavorite: favorite,
+        onToggleFavorite: (timestamp, value) async =>
+            actions.add('$timestamp:$value'),
+        onRefresh: () async => actions.add('refresh'),
+      );
+      await tester.tap(find.text(favorite ? '取消收藏' : '收藏消息'));
+      await tester.pumpAndSettle();
+      expect(actions, ['123:${!favorite}', 'refresh']);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  testWidgets('disables regeneration while the chat is busy', (tester) async {
+    final actions = <int>[];
+    await _openMenu(
+      tester,
+      selectedVariantIndex: 0,
+      variantCount: 1,
+      isChatBusy: true,
+      onRegenerateMessage: (timestamp) async => actions.add(timestamp),
+    );
+    final entry = tester.widget<PopupMenuItem<dynamic>>(
+      find
+          .ancestor(
+            of: find.text('重新生成'),
+            matching: find.byWidgetPredicate(
+              (widget) => widget is PopupMenuItem,
+            ),
+          )
+          .first,
+    );
+    expect(entry.enabled, isFalse);
+    await tester.tap(find.text('重新生成'));
+    await tester.pumpAndSettle();
+    expect(actions, isEmpty);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('regenerates an idle chat before refreshing', (tester) async {
+    final actions = <String>[];
+    await _openMenu(
+      tester,
+      selectedVariantIndex: 0,
+      variantCount: 1,
+      onRegenerateMessage: (timestamp) async =>
+          actions.add('regenerate:$timestamp'),
+      onRefresh: () async => actions.add('refresh'),
+    );
+    await tester.tap(find.text('重新生成'));
+    await tester.pumpAndSettle();
+    expect(actions, ['regenerate:123', 'refresh']);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('shows a rejected regeneration without an unhandled error', (
+    tester,
+  ) async {
+    var refreshed = false;
+    await _openMenu(
+      tester,
+      selectedVariantIndex: 0,
+      variantCount: 1,
+      onRegenerateMessage: (_) async => throw StateError('Chat is busy'),
+      onRefresh: () async => refreshed = true,
+    );
+    await tester.tap(find.text('重新生成'));
+    await tester.pumpAndSettle();
+    expect(find.text('Bad state: Chat is busy'), findsOneWidget);
+    expect(refreshed, isFalse);
+    expect(tester.takeException(), isNull);
+  });
+
   test(
     'copy preserves plugin-owned markup without interpreting its business',
     () {
@@ -134,9 +216,13 @@ Future<void> _openMenu(
   required int selectedVariantIndex,
   required int variantCount,
   String sender = 'ai',
+  bool isFavorite = false,
+  MessageFavoriteAction? onToggleFavorite,
   _MessageMenuBridge? bridge,
   MessageVariantAction? onDeleteMessageVariant,
   MessageSelectionAction? onSelectMessageToEdit,
+  MessageTimestampAction? onRegenerateMessage,
+  bool isChatBusy = false,
   Future<void> Function()? onRefresh,
 }) async {
   await tester.binding.setSurfaceSize(const Size(800, 1200));
@@ -171,16 +257,19 @@ Future<void> _openMenu(
                   waitDurationMs: 0,
                   completedAt: 1,
                   displayMode: ChatMessageDisplayMode.normal,
-                  isFavorite: false,
+                  isFavorite: isFavorite,
                   contentStream: null,
                 ),
                 chatId: 'chat',
                 messageIndex: 0,
                 clients: clients,
                 packageManager: clients.application.packageManager(),
-                onToggleFavoriteMessage: (timestamp, isFavorite) async {},
+                onToggleFavoriteMessage:
+                    onToggleFavorite ?? (timestamp, isFavorite) async {},
                 onDeleteMessageVariant: onDeleteMessageVariant,
                 onSelectMessageToEdit: onSelectMessageToEdit,
+                onRegenerateMessage: onRegenerateMessage,
+                isChatBusy: isChatBusy,
                 onRefresh: onRefresh,
                 child: const SizedBox(
                   width: 200,

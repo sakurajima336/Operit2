@@ -49,7 +49,7 @@ jobs:
       - name: Install Node
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
 
       - name: Cache project Flutter SDK
         uses: actions/cache@v4
@@ -102,7 +102,9 @@ jobs:
 
       - name: Build and package macOS app
         if: inputs.products != 'cli'
-        run: python3 tools/build_scripts/build_flutter_macos.py
+        run: |
+          python3 tools/build_scripts/build_flutter_macos.py --type sandbox
+          python3 tools/build_scripts/build_flutter_macos.py --type unsandbox
 
       - name: Build and package macOS CLI
         if: inputs.products != 'app'
