@@ -51,10 +51,20 @@ impl TestRuntimeStorageHost {
 }
 
 impl RuntimeStorageHost for TestRuntimeStorageHost {
+    /// Uses the real transaction journal required by preference initialization.
+    fn openTransactionDatabase(&self, path: &str) -> HostResult<Box<dyn RuntimeSqliteConnection>> {
+        self.inner.openTransactionDatabase(path)
+    }
+
     /// Delegates durability to the real storage host without rewriting the file.
     fn flushFile(&self, path: &str) -> operit_host_api::HostResult<()> {
         self.inner.flushFile(path)
     }
+
+    /// Reads native file metadata.
+    fn modifiedAt(&self, path: &str) -> HostResult<i64> { self.inner.modifiedAt(path) }
+    /// Preserves remote modification times.
+    fn setModifiedAt(&self, path: &str, time: i64) -> HostResult<()> { self.inner.setModifiedAt(path, time) }
 
     /// Returns the physical test runtime root.
     fn runtimeRootDir(&self) -> Option<std::path::PathBuf> {
@@ -310,6 +320,108 @@ async fn receive_proxy_test_event(stream: &mut CoreEventStream) -> CoreEvent {
         .await
         .expect("proxy test event must arrive")
         .expect("proxy test stream must stay open")
+}
+
+/// Exercises the generated RPC route, including independent per-blob failures.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn generated_proxy_blob_presence_preserves_batch_results() {
+    let _test_guard = SHARED_CONCURRENCY_TEST_LOCK.lock().await;
+    tokio::task::LocalSet::new().run_until(async {
+        use operit_store::RuntimeFileSyncStore::{RuntimeFileSyncReference, RuntimeFileSyncStore};
+        use operit_util::RuntimeStorageLayout::RUNTIME_SYNC_DIR_PATH;
+
+        let storage = register_test_runtime_roots();
+        let store = RuntimeFileSyncStore::new(storage.clone(), RUNTIME_SYNC_DIR_PATH);
+        let present = store.storeBlob(b"sync blob route regression").unwrap();
+        let missing = RuntimeFileSyncReference { contentHash: "0".repeat(64), size: 0 };
+        let invalid = RuntimeFileSyncReference { contentHash: "invalid".into(), size: 0 };
+        let wrong_size = RuntimeFileSyncReference { size: present.size + 1, ..present.clone() };
+
+        let mut hosts = HostManager::withFileSystemHost(Arc::new(PosixFileSystemHost::new()));
+        hosts.runtimeStorageHost = Some(storage.clone());
+        hosts.runtimeSqliteHost = Some(storage);
+        hosts.hostSecretStore = Some(Arc::new(TestSecretStore::default()));
+        hosts.hostJavaScriptRuntimeHost = Some(Arc::new(NativeHostJavaScriptRuntimeHost::new()));
+        hosts.hostRuntimeTaskSchedulerHost = Some(Arc::new(NativeHostRuntimeTaskSchedulerHost::new()));
+        let proxy = LocalCoreProxy::new(OperitApplication::newWithContext(hosts));
+
+        let response = CoreLinkSharedClient::call(&proxy, CoreCallRequest::new(
+            "blob-presence", "core/application", "syncBlobExists",
+            toCoreValue(json!({"references": [present, missing, invalid, wrong_size]})).unwrap(),
+        )).await;
+        let presence: Vec<Result<bool, String>> = fromCoreValue(
+            response.result.expect("blob presence must be available through generated dispatch"),
+        ).unwrap();
+        assert_eq!(presence.len(), 4);
+        assert_eq!(presence[0], Ok(true));
+        assert_eq!(presence[1], Ok(false));
+        assert!(presence[2].as_ref().unwrap_err().contains("SHA-256"));
+        assert!(presence[3].is_err());
+
+        let empty = CoreLinkSharedClient::call(&proxy, CoreCallRequest::new(
+            "empty-blob-presence", "core/application", "syncBlobExists",
+            toCoreValue(json!({"references": []})).unwrap(),
+        )).await;
+        let presence: Vec<Result<bool, String>> = fromCoreValue(empty.result.unwrap()).unwrap();
+        assert!(presence.is_empty());
+
+        let malformed = CoreLinkSharedClient::call(&proxy, CoreCallRequest::new(
+            "invalid-blob-presence", "core/application", "syncBlobExists",
+            toCoreValue(json!({"references": {"invalid": true}})).unwrap(),
+        )).await;
+        assert!(malformed.result.is_err(), "invalid batches must fail without hiding per-blob errors");
+    }).await;
+}
+
+/// Skipped full files retry the winner, retaining failures until its blob exists.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn skipped_file_states_recover_without_structured_initialization() {
+    let _guard = SHARED_CONCURRENCY_TEST_LOCK.lock().await;
+    tokio::task::LocalSet::new().run_until(async {
+        use operit_store::{RuntimeFileSyncStore::RuntimeFileSyncStore, SyncOperationStore::SyncOperationStore};
+        let source = register_test_runtime_roots();
+        let path = "workspaces/project/recovery.txt";
+        let files = RuntimeFileSyncStore::new(source.clone(), "runtime/sync");
+        files.writeBytes(path, b"superseded").unwrap();
+        files.writeBytes(path, b"second").unwrap();
+        let source_journal = SyncOperationStore::new(source.clone(), "runtime/sync");
+        source.openTransactionDatabase("runtime/sync/transactions.sqlite").unwrap()
+            .executeBatch("UPDATE originals SET pending=2 WHERE domain='runtime_file'").unwrap();
+        let originals = source_journal.skippedOperations().unwrap();
+        assert_eq!(originals.len(), 2);
+        let target = register_test_runtime_roots();
+        let journal = SyncOperationStore::new(target.clone(), "runtime/sync");
+        journal.receiveOperations(&originals).unwrap();
+        target.openTransactionDatabase("runtime/sync/transactions.sqlite").unwrap()
+            .executeBatch("UPDATE originals SET pending=2 WHERE domain='runtime_file'").unwrap();
+        let mut hosts = HostManager::withFileSystemHost(Arc::new(PosixFileSystemHost::new()));
+        hosts.runtimeStorageHost = Some(target.clone());
+        hosts.runtimeSqliteHost = Some(target.clone());
+        hosts.hostSecretStore = Some(Arc::new(TestSecretStore::default()));
+        hosts.hostJavaScriptRuntimeHost = Some(Arc::new(NativeHostJavaScriptRuntimeHost::new()));
+        hosts.hostRuntimeTaskSchedulerHost = Some(Arc::new(NativeHostRuntimeTaskSchedulerHost::new()));
+        let app = OperitApplication::newWithContext(hosts);
+        let clock = app.syncClock().unwrap();
+        assert_eq!(clock["pending"], 2);
+        assert_eq!(clock["pendingBlobs"].as_array().unwrap().len(), 1);
+        assert_eq!(app.syncApplyOperations(json!([])).unwrap()["pending"], 2);
+        assert_eq!(journal.skippedOperations().unwrap().len(), 2);
+        // A newer complete state must supersede missing older blobs without a blocked recovery intent.
+        files.writeBytes(path, b"winner").unwrap();
+        let winner = source_journal.operationsSince(&journal.receipt().unwrap(), &[], 100).unwrap().pop().unwrap();
+        journal.receiveOperations(std::slice::from_ref(&winner)).unwrap();
+        assert_eq!(app.syncClock().unwrap()["pendingBlobs"].as_array().unwrap().len(), 1);
+        assert_eq!(journal.skippedOperations().unwrap().len(), 2, "preference preparation must not skip a healthy file operation");
+        let reference = RuntimeFileSyncStore::requiredBlob(&winner).unwrap().unwrap();
+        RuntimeFileSyncStore::new(target.clone(), "runtime/sync").writeBlob(&reference, &files.readBlob(&reference).unwrap()).unwrap();
+        assert_eq!(app.syncApplyOperations(json!([winner])).unwrap()["pending"], 0);
+        assert!(journal.skippedOperations().unwrap().is_empty());
+        assert_eq!(target.readBytes(path).unwrap(), b"winner");
+        assert_eq!(source.modifiedAt(path).unwrap(), target.modifiedAt(path).unwrap());
+        assert_eq!(app.syncApplyOperations(json!([])).unwrap()["applied"], 0);
+        assert_eq!(app.syncClock().unwrap()["pending"], 0);
+        assert!(app.syncConsistency().unwrap()["skipped"].as_object().unwrap().is_empty());
+    }).await;
 }
 
 /// Verifies unrelated generated watches never wait for a resolved holder lock.
