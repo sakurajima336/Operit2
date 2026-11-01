@@ -1,0 +1,84 @@
+name: Rebuild Android V8
+
+# 手动触发：按桥接层 Cargo.lock 钉死的版本，从源码重编 Android V8，
+# 打成 operit2-android-v8-arm64-<版本>.tar.gz 传到本仓库的 Release，
+# 供 "Auto Android Release" 工作流当预编译成品用。
+#
+# 什么时候跑：合并上游后 Cargo.lock 里的 v8 版本变了、自动构建报
+# "No prebuilt V8 asset" 时，跑一次这个，再重跑自动构建即可。
+# 从源码编 V8 很慢（预留 6 小时），日常出包不要走这条路。
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  RUST_TOOLCHAIN_VERSION: 1.95.0
+
+jobs:
+  build-v8:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang lld ninja-build \
+            pkg-config curl git python3 unzip
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+          targets: aarch64-linux-android
+
+      - name: Resolve pinned V8 version
+        id: ver
+        run: |
+          ver=$(python3 - <<'EOF'
+          import tomllib
+          with open('apps/flutter/native/operit-flutter-bridge/Cargo.lock','rb') as f:
+              lock = tomllib.load(f)
+          vs = {p['version'] for p in lock['package'] if p['name'] == 'v8'}
+          assert len(vs) == 1, vs
+          print(vs.pop())
+          EOF
+          )
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "pinned V8 version: $ver"
+
+      - name: Build V8 from source
+        run: |
+          python3 tools/build_scripts/prepare_android_v8.py \
+            --target aarch64-linux-android \
+            --env-file /tmp/operit-v8.env
+          ls -la "tools/release/work/android-v8/${{ steps.ver.outputs.version }}/aarch64-linux-android/"
+
+      - name: Pack prebuilt tarball
+        id: pack
+        run: |
+          ver="${{ steps.ver.outputs.version }}"
+          name="operit2-android-v8-arm64-$ver.tar.gz"
+          tar -czf "/tmp/$name" \
+            -C "tools/release/work/android-v8/$ver/aarch64-linux-android" .
+          (cd /tmp && sha256sum "$name" > "$name.sha256")
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          cat "/tmp/$name.sha256"
+
+      - name: Publish to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ver="${{ steps.ver.outputs.version }}"
+          name="${{ steps.pack.outputs.name }}"
+          tag="android-v8-$ver"
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" \
+              --title "Android V8 prebuilt $ver" \
+              --notes "V8 $ver 预编译成品（arm64），由 Rebuild Android V8 工作流从源码构建。Auto Android Release 按 Cargo.lock 的版本钉子取用。"
+          fi
+          gh release upload "$tag" "/tmp/$name" "/tmp/$name.sha256" --clobber
+          echo "published $name to release $tag"
