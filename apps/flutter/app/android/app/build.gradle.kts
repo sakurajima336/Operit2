@@ -126,6 +126,15 @@ android {
     ndkVersion = flutter.ndkVersion
 
     signingConfigs {
+        // Debug and release use separate keys so a debug build can never be
+        // mistaken for, or silently upgrade, a release install.
+        create("debugLocal") {
+            storeFile = file(requiredLocalProperty("DEBUG_STORE_FILE"))
+            storePassword = requiredLocalProperty("DEBUG_STORE_PASSWORD")
+            keyAlias = requiredLocalProperty("DEBUG_KEY_ALIAS")
+            keyPassword = requiredLocalProperty("DEBUG_KEY_PASSWORD")
+        }
+
         create("release") {
             storeFile = file(requiredLocalProperty("RELEASE_STORE_FILE"))
             storePassword = requiredLocalProperty("RELEASE_STORE_PASSWORD")
@@ -172,9 +181,7 @@ android {
         }
 
         debug {
-            // Local builds sign debug with the same key as release so debug and
-            // release APKs can upgrade each other in place.
-            signingConfig = signingConfigs.getByName("release")
+            signingConfig = signingConfigs.getByName("debugLocal")
         }
 
         release {

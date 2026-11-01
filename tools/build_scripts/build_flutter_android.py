@@ -23,17 +23,28 @@ from common import (
 
 
 def ensure_android_signing() -> None:
-    signing_properties = RELEASE_DIR / "secrets" / "android-signing.properties"
+    """Mirrors both signing profiles into local.properties.
+
+    Debug and release use separate keys, so each profile has its own property
+    file and its own set of local.properties entries.
+    """
+    ensure_signing_profile("RELEASE", "android-signing.properties")
+    ensure_signing_profile("DEBUG", "android-debug-signing.properties")
+
+
+# Copies one signing profile from its secrets file into local.properties.
+def ensure_signing_profile(prefix: str, properties_name: str) -> None:
+    signing_properties = RELEASE_DIR / "secrets" / properties_name
     if not signing_properties.exists():
         raise RuntimeError(f"Android signing properties not found: {signing_properties}")
 
     signing = read_properties(signing_properties)
     local = read_properties(ANDROID_LOCAL_PROPERTIES)
-    local["RELEASE_STORE_FILE"] = str(android_release_store_file(signing, signing_properties))
+    local[f"{prefix}_STORE_FILE"] = str(android_release_store_file(signing, signing_properties, prefix))
     for key in (
-        "RELEASE_STORE_PASSWORD",
-        "RELEASE_KEY_ALIAS",
-        "RELEASE_KEY_PASSWORD",
+        f"{prefix}_STORE_PASSWORD",
+        f"{prefix}_KEY_ALIAS",
+        f"{prefix}_KEY_PASSWORD",
     ):
         if key not in signing:
             raise RuntimeError(f"Android signing property missing from {signing_properties}: {key}")
@@ -49,9 +60,11 @@ def configure_android_flutter_sdk(flutter: str) -> None:
     write_properties(ANDROID_LOCAL_PROPERTIES, local)
 
 
-# Reads the Android release keystore path from signing properties.
-def android_release_store_file(signing: dict[str, str], signing_properties: Path) -> Path:
-    key = "RELEASE_STORE_FILE"
+# Reads one keystore path from signing properties.
+def android_release_store_file(
+    signing: dict[str, str], signing_properties: Path, prefix: str = "RELEASE"
+) -> Path:
+    key = f"{prefix}_STORE_FILE"
     value = signing.get(key)
     if not value:
         raise RuntimeError(f"Android signing property missing from {signing_properties}: {key}")
@@ -59,7 +72,7 @@ def android_release_store_file(signing: dict[str, str], signing_properties: Path
     if not store_file.is_absolute():
         store_file = signing_properties.parent / store_file
     if not store_file.is_file():
-        raise RuntimeError(f"Android release keystore not found: {store_file}")
+        raise RuntimeError(f"Android {prefix.lower()} keystore not found: {store_file}")
     return store_file
 
 
