@@ -171,6 +171,12 @@ android {
             }
         }
 
+        debug {
+            // Local builds sign debug with the same key as release so debug and
+            // release APKs can upgrade each other in place.
+            signingConfig = signingConfigs.getByName("release")
+        }
+
         release {
             signingConfig = signingConfigs.getByName("release")
             proguardFiles("proguard-rules.pro")
