@@ -37,6 +37,7 @@ export interface ToolResultMap {
     'read_file_part': FilePartContentData;
     'read_file_full': FileContentData;
     'read_file_binary': BinaryFileContentData;
+    'read_image': FileContentData;
 
     'write_file': FileOperationData;
     'delete_file': FileOperationData;

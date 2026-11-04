@@ -422,6 +422,63 @@ impl StandardFileSystemTools {
     }
 
     #[allow(non_snake_case)]
+    /// Views an image file directly, the way Codex's view_image or Claude
+    /// Code's Read do: the picture is registered in the image pool and its
+    /// media link is returned, so a vision-capable model sees the image
+    /// itself instead of OCR text or a file name. When direct viewing is
+    /// unavailable the shared image chain falls back to intent recognition
+    /// and then OCR, exactly like read_file on an image.
+    pub async fn readImage(&self, tool: &AITool) -> ToolResult {
+        let tool = &match self.prepareFileToolCall(tool, &["path"], true) {
+            Ok(PreparedFileToolCall::Local(call)) => call,
+            Ok(PreparedFileToolCall::Remote {
+                call,
+                nodeId,
+                typedPath,
+                nodePrefix,
+            }) => {
+                return self
+                    .dispatchRemoteFileTool(call, nodeId, &typedPath, &nodePrefix)
+                    .await;
+            }
+            Err(error) => return toolError(tool, String::new(), error),
+        };
+        let path = parameterValue(tool, "path");
+        let vfs = self.vfs();
+
+        match vfs.fileExists(&path) {
+            Ok(existence) if existence.exists && !existence.isDirectory => {
+                let fileExt = fileExtension(&path);
+                if !matches!(
+                    fileExt.as_str(),
+                    "jpg" | "jpeg" | "png" | "gif" | "bmp" | "webp"
+                ) {
+                    return toolError(
+                        tool,
+                        String::new(),
+                        format!(
+                            "read_image only supports image files (jpg, jpeg, png, gif, bmp, webp): {path}. Use read_file for other files."
+                        ),
+                    );
+                }
+                // Force the direct-view stage of the shared image chain; the
+                // caller's optional intent stays as the recognition fallback.
+                let mut directTool = tool.clone();
+                directTool
+                    .parameters
+                    .retain(|parameter| parameter.name != "direct_image");
+                directTool.parameters.push(ToolParameter {
+                    name: "direct_image".to_string(),
+                    value: "true".to_string(),
+                });
+                self.handleImageFileRead(&directTool, &vfs, &path).await
+            }
+            Ok(_) => toolError(tool, String::new(), format!("Path is not a file: {path}")),
+            Err(error) => toolError(tool, String::new(), error),
+        }
+    }
+
+    #[allow(non_snake_case)]
     /// Reads a complete file or delegates special file handling.
     pub async fn readFileFull(&self, tool: &AITool) -> ToolResult {
         let tool = &match self.prepareFileToolCall(tool, &["path"], true) {
@@ -505,7 +562,7 @@ impl StandardFileSystemTools {
         fileExt: &str,
     ) -> ToolResult {
         match fileExt {
-            "jpg" | "jpeg" | "png" | "gif" | "bmp" => {
+            "jpg" | "jpeg" | "png" | "gif" | "bmp" | "webp" => {
                 self.handleImageFileRead(tool, vfs, path).await
             }
             "pdf" | "doc" | "docx" => self.handleDocumentFileRead(tool, vfs, path, fileExt),
@@ -2074,6 +2131,7 @@ pub enum FileSystemToolOperation {
     ReadFilePart,
     ReadFileFull,
     ReadFileBinary,
+    ReadImage,
     WriteFile,
     WriteFileBinary,
     DeleteFile,
@@ -2109,6 +2167,7 @@ impl AsyncToolExecutor for FileSystemToolExecutor {
             | FileSystemToolOperation::ReadFilePart
             | FileSystemToolOperation::ReadFileFull
             | FileSystemToolOperation::ReadFileBinary
+            | FileSystemToolOperation::ReadImage
             | FileSystemToolOperation::FileExists
             | FileSystemToolOperation::FindFiles
             | FileSystemToolOperation::FileInfo
@@ -2188,6 +2247,9 @@ impl AsyncToolExecutor for FileSystemToolExecutor {
                                 }
                                 FileSystemToolOperation::ReadFileBinary => {
                                     tools.readFileBinary(tool).await
+                                }
+                                FileSystemToolOperation::ReadImage => {
+                                    tools.readImage(tool).await
                                 }
                                 FileSystemToolOperation::WriteFile => tools.writeFile(tool).await,
                                 FileSystemToolOperation::WriteFileBinary => {
@@ -2298,6 +2360,7 @@ fn requiredParameters(operation: &FileSystemToolOperation) -> &'static [&'static
         | FileSystemToolOperation::ReadFilePart
         | FileSystemToolOperation::ReadFileFull
         | FileSystemToolOperation::ReadFileBinary
+        | FileSystemToolOperation::ReadImage
         | FileSystemToolOperation::DeleteFile
         | FileSystemToolOperation::FileExists
         | FileSystemToolOperation::MakeDirectory
@@ -2529,6 +2592,7 @@ fn imageMimeTypeFromPath(path: &str) -> &'static str {
         "jpg" | "jpeg" => "image/jpeg",
         "gif" => "image/gif",
         "bmp" => "image/bmp",
+        "webp" => "image/webp",
         _ => "image/png",
     }
 }
@@ -2587,6 +2651,7 @@ fn isSpecialFileType(fileExtension: &str) -> bool {
             | "png"
             | "gif"
             | "bmp"
+            | "webp"
             | "pdf"
             | "doc"
             | "docx"
