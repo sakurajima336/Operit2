@@ -473,8 +473,20 @@ impl StandardFileSystemTools {
                 });
                 self.handleImageFileRead(&directTool, &vfs, &path).await
             }
-            Ok(_) => toolError(tool, String::new(), format!("Path is not a file: {path}")),
-            Err(error) => toolError(tool, String::new(), error),
+            Ok(_) => {
+                operit_util::AppLogger::AppLogger::e(
+                    "ReadImageDiag",
+                    &format!("read_image rejected a non-file path: {path}"),
+                );
+                toolError(tool, String::new(), format!("Path is not a file: {path}"))
+            }
+            Err(error) => {
+                operit_util::AppLogger::AppLogger::e(
+                    "ReadImageDiag",
+                    &format!("read_image existence check failed for {path}: {error}"),
+                );
+                toolError(tool, String::new(), error)
+            }
         }
     }
 
@@ -739,6 +751,13 @@ impl StandardFileSystemTools {
             if directResult.success {
                 return directResult;
             }
+            operit_util::AppLogger::AppLogger::e(
+                "ReadImageDiag",
+                &format!(
+                    "direct stage failed for {path}: {}",
+                    directResult.error.as_deref().unwrap_or("unknown error")
+                ),
+            );
         }
 
         let physicalPath = match vfs
@@ -767,6 +786,10 @@ impl StandardFileSystemTools {
             }
         }
 
+        operit_util::AppLogger::AppLogger::e(
+            "ReadImageDiag",
+            &format!("degrading to OCR for {path}"),
+        );
         let content = match self.recognizeImageText(&physicalPath) {
             Ok(ocrText) if ocrText.trim().is_empty() => "No text detected in image.".to_string(),
             Ok(ocrText) => ocrText,
@@ -791,7 +814,7 @@ impl StandardFileSystemTools {
         path: &str,
         intent: &str,
     ) -> Option<String> {
-        let bytes = match vfs.readFileBytes(path) {
+        let bytes = match self.readImageBytes(vfs, path) {
             Ok(bytes) => bytes,
             Err(error) => {
                 operit_util::AppLogger::AppLogger::w(
@@ -845,6 +868,46 @@ impl StandardFileSystemTools {
     }
 
     #[allow(non_snake_case)]
+    /// Reads image bytes through the VFS host, falling back to a direct OS
+    /// read of the resolved native path when the host read fails or returns
+    /// nothing. The image chain swallows byte-read errors by design (it
+    /// degrades to recognition/OCR), so every failure is logged here to keep
+    /// a silent degradation diagnosable.
+    fn readImageBytes(&self, vfs: &VisualFileSystem, path: &str) -> Result<Vec<u8>, String> {
+        match vfs.readFileBytes(path) {
+            Ok(bytes) if !bytes.is_empty() => return Ok(bytes),
+            Ok(_) => {
+                operit_util::AppLogger::AppLogger::e(
+                    "ReadImageDiag",
+                    &format!("VFS byte read returned empty for {path}; trying native path"),
+                );
+            }
+            Err(error) => {
+                operit_util::AppLogger::AppLogger::e(
+                    "ReadImageDiag",
+                    &format!("VFS byte read failed for {path}: {error}; trying native path"),
+                );
+            }
+        }
+        let nativePath = vfs
+            .resolvePath(path)
+            .and_then(|resolved| resolved.nativePath())?;
+        let bytes = std::fs::read(&nativePath)
+            .map_err(|error| format!("native byte read failed for {nativePath}: {error}"))?;
+        if bytes.is_empty() {
+            return Err(format!("native byte read returned empty for {nativePath}"));
+        }
+        operit_util::AppLogger::AppLogger::e(
+            "ReadImageDiag",
+            &format!(
+                "native byte read recovered {} bytes for {path}",
+                bytes.len()
+            ),
+        );
+        Ok(bytes)
+    }
+
+    #[allow(non_snake_case)]
     /// Reads an image file into the process image pool and returns its media-link tag.
     fn handleDirectImageFileRead(
         &self,
@@ -852,7 +915,7 @@ impl StandardFileSystemTools {
         vfs: &VisualFileSystem,
         path: &str,
     ) -> ToolResult {
-        let bytes = match vfs.readFileBytes(path) {
+        let bytes = match self.readImageBytes(vfs, path) {
             Ok(bytes) => bytes,
             Err(error) => {
                 return toolError(
