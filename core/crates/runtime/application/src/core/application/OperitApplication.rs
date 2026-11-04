@@ -136,11 +136,11 @@ impl OperitApplication {
                 runtimeStorageHost.clone(),
             );
             let logFile = pathMapper
-                .resolve("/app/data/logs/operit.log")
+                .resolve("/operitapp/data/logs/operit.log")
                 .expect("runtime log path must resolve through the file-system host")
                 .physicalPath;
             let packageLogFile = pathMapper
-                .resolve("/app/data/logs/toolpkg.log")
+                .resolve("/operitapp/data/logs/toolpkg.log")
                 .expect("ToolPkg log path must resolve through the file-system host")
                 .physicalPath;
             if let Err(error) =
@@ -267,7 +267,7 @@ impl OperitApplication {
     #[allow(non_snake_case)]
     fn cleanOnExitFiles(&self) -> Result<(), String> {
         let fileSystem = self.runtimeFileSystem()?;
-        const CLEAN_ON_EXIT_PATH: &str = "/app/data/temp/clean_on_exit";
+        const CLEAN_ON_EXIT_PATH: &str = "/operitapp/data/temp/clean_on_exit";
         fileSystem.makeDirectory(CLEAN_ON_EXIT_PATH, true)?;
         for entry in fileSystem.listFiles(CLEAN_ON_EXIT_PATH)? {
             let path = PathMapper::joinVfsPath(CLEAN_ON_EXIT_PATH, &entry.name)?;
@@ -802,14 +802,6 @@ impl OperitApplication {
         Ok(path.to_string_lossy().into_owned())
     }
 
-    /// Returns the directory holding persisted chat attachment files.
-    #[allow(non_snake_case)]
-    pub fn chatAttachmentsPath(&self) -> Result<String, String> {
-        let path = OperitPaths::chatAttachmentsDir()?;
-        self.ensureHostDirectory(&path)?;
-        Ok(path.to_string_lossy().into_owned())
-    }
-
     /// Clears the current runtime log files.
     #[allow(non_snake_case)]
     pub fn resetLogs(&self) {
@@ -859,8 +851,11 @@ impl OperitApplication {
             }
         }
         let mut blobs = BTreeMap::new();
+        let managedFiles = self.runtimeWorkspaceFileSyncStore()?;
+        for reference in managedFiles.deferredBlobs()? { blobs.insert(reference.contentHash.clone(), reference); }
         for operation in states.into_values() {
             if !store.shouldApplyOperation(operation).map_err(|e|e.to_string())? { continue; }
+            if operit_store::WorkspaceFileSyncStore::WorkspaceFileSyncStore::owns(operation) && !managedFiles.wantsBlob(operation)? { continue; }
             match RuntimeFileSyncStore::requiredBlob(operation) {
                 Ok(Some(reference)) => { blobs.insert(reference.contentHash.clone(), reference); }
                 Ok(None) => {}
