@@ -181,6 +181,9 @@ android {
         }
 
         debug {
+            // Debug installs live beside the release install (app.operit)
+            // instead of colliding with it: package app.operit.debug.
+            applicationIdSuffix = ".debug"
             signingConfig = signingConfigs.getByName("debugLocal")
         }
 
