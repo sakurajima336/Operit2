@@ -614,6 +614,7 @@ impl SyncOperationStore {
         Ok(())
     }
 
+    #[inline(never)]
     fn projectedControlOperations(
         store: &crate::PreferencesDataStore::CoreNodeStateStore,
     ) -> Result<Vec<SyncOperation>, String> {
@@ -636,6 +637,7 @@ impl SyncOperationStore {
     }
 
     /// Called by the durable endpoint/import write path, never by state reads.
+    #[inline(never)]
     pub(crate) fn replaceProjectedControlOperations(
         &self,
         store: &crate::PreferencesDataStore::CoreNodeStateStore,
@@ -1698,7 +1700,16 @@ impl SyncOperationStore {
         let mut state = lockSyncState(&self.sharedState.journal, "transaction journal")?;
         if state.is_none() {
             let mut journal = crate::Transaction::Journal::open(self.storageHost.as_ref(), &self.rootPath)?;
-            self.importLegacyJournal(&mut journal)?;
+            if let Err(error) = self.importLegacyJournal(&mut journal) {
+                // Business files remain authoritative when the retired ledger cannot be imported.
+                // Opening owners against the empty journal rebuilds their normal replay baselines.
+                let clock = self.readJson(&self.clockPath()).unwrap_or_default();
+                journal.reset_failed_import(&clock)?;
+                operit_util::AppLogger::AppLogger::w("TransactionSync", &format!(
+                    "sync_legacy.reset root={} reason={error}; rebuilding baselines from business data",
+                    self.rootPath,
+                ));
+            }
             journal.reclaim_sql_copies()?;
             *state = Some(journal);
         }
