@@ -4,6 +4,14 @@ name: Auto Android Release
 # 更新说明 = 上一个 tag 到本次提交之间的 commits 列表，不另外写日志。
 # 日常开发在 preview 分支，合进 main 即发版。
 #
+# 手动触发（workflow_dispatch）：默认只编 release（求快）；需要 debug 包时
+# 勾选 build_debug。push 触发（合 main 发版）保持 release + debug 全套。
+#
+# 构建机从 windows-2025 换成 ubuntu-24.04：私有仓 Windows 分钟按 2 倍计费，
+# Linux 1 倍；且本地已验证的构建环境就是 Ubuntu，脚本按 Linux 原生写的。
+# 提速点：FVM/Pub/Gradle/Rust 桥 target/NDK 全部走 actions/cache，
+# 原生运行时复用已有 artifact，V8 用预编译成品。
+#
 # V8 用预编译成品：版本由桥接层 Cargo.lock 钉死，本工作流按版本号去
 # 本仓库的 Release 里找 operit2-android-v8-arm64-<版本>.tar.gz。
 # 合并上游后若 Cargo.lock 里的 v8 版本变了，必须先跑一次
@@ -13,6 +21,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      build_debug:
+        description: "同时编 debug 包（默认只编 release）"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -26,6 +39,8 @@ env:
   RUSTFLAGS: -Awarnings
   RUST_TOOLCHAIN_VERSION: 1.95.0
   FVM_VERSION: 4.3.0
+  # 私有仓标准 runner 资源有限，Rust 并行开太高会 OOM
+  CARGO_BUILD_JOBS: "2"
 
 jobs:
   # ── 1. 原生运行时（busybox / proot / bash / loader + alpine rootfs）───────
@@ -39,7 +54,7 @@ jobs:
       - name: Fetch latest runtime artifact
         id: fetch
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -u
           api="https://api.github.com/repos/${{ github.repository }}"
@@ -115,11 +130,11 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
-  # ── 2. 编译 APK（release + debug）──────────────────────────────────────
+  # ── 2. 编译 APK（release 必编；debug 仅 push 发版或手动勾选时编）─────────
   build:
     needs: runtime
-    runs-on: windows-2025
-    timeout-minutes: 120
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
       version_name: ${{ steps.version.outputs.name }}
@@ -133,17 +148,25 @@ jobs:
           name: operit2-android-runtime
           path: apps/flutter/app/android/app/src/main
 
+      - name: Plan build variants
+        id: plan
+        run: |
+          if [ "${{ github.event_name }}" = "push" ] || [ "${{ inputs.build_debug }}" = "true" ]; then
+            echo "build_debug=true" >> "$GITHUB_OUTPUT"
+            echo "variants: release + debug"
+          else
+            echo "build_debug=false" >> "$GITHUB_OUTPUT"
+            echo "variants: release only"
+          fi
+
       - name: Compute release tag
         id: tag
-        shell: pwsh
         run: |
           # tag 格式 v年.月.日.时分，按 Asia/Singapore（UTC+8）取时间，
-          # 例：v2026.11.1.905（.NET 格式 Hmm = 时无前导零 + 分两位数）
-          $tz = [TimeZoneInfo]::FindSystemTimeZoneById('Singapore Standard Time')
-          $now = [TimeZoneInfo]::ConvertTimeFromUtc([DateTime]::UtcNow, $tz)
-          $tag = 'v' + $now.ToString('yyyy.M.d.Hmm')
-          "tag=$tag" >> $env:GITHUB_OUTPUT
-          Write-Host "release tag: $tag"
+          # 例：v2026.11.1.905（时无前导零 + 分两位数）
+          tag="v$(TZ=Asia/Singapore date +'%Y.%-m.%-d.%-H%M')"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "release tag: $tag"
 
       - name: Install bootstrap Dart
         uses: dart-lang/setup-dart@v1
@@ -169,17 +192,17 @@ jobs:
           restore-keys: fvm-${{ runner.os }}-
 
       - name: Install FVM and project Flutter SDK
-        shell: pwsh
         working-directory: apps/flutter/app
         run: |
-          dart pub global activate fvm $env:FVM_VERSION
-          "$env:APPDATA\Pub\Cache\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          dart pub global activate fvm "$FVM_VERSION"
+          echo "$HOME/.pub-cache/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.pub-cache/bin:$PATH"
           fvm install --skip-pub-get
 
       - name: Cache Pub packages
         uses: actions/cache@v4
         with:
-          path: ~/AppData/Local/Pub/Cache
+          path: ~/.pub-cache
           key: pub-${{ runner.os }}-${{ hashFiles('apps/flutter/app/pubspec.lock') }}
           restore-keys: pub-${{ runner.os }}-
 
@@ -192,45 +215,71 @@ jobs:
           key: gradle-${{ runner.os }}-${{ hashFiles('apps/flutter/app/android/**/*.gradle*', 'apps/flutter/app/android/gradle/wrapper/gradle-wrapper.properties') }}
           restore-keys: gradle-${{ runner.os }}-
 
+      # Flutter SDK 钉住的 NDK 版本 + Gradle 写死的 cmake 3.22.1：runner 镜像
+      # 不一定带齐，缺了 AGP 会每次现下几 GB。解析出版本号后走 cache，
+      # 只有 cache 未命中才用 sdkmanager 装。
+      - name: Resolve Flutter-pinned NDK version
+        id: ndk
+        run: |
+          fver=$(jq -r .flutter .fvmrc)
+          sdk="$HOME/fvm/versions/$fver"
+          ver=$(grep -rhoE 'ndkVersion\s*=\s*"[0-9][0-9.]*"' "$sdk/packages/flutter_tools" 2>/dev/null \
+            | grep -oE '[0-9][0-9.]*' | head -1)
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "flutter-pinned NDK: '${ver:-unknown (AGP will auto-download)}'"
+
+      - name: Cache Android NDK
+        if: steps.ndk.outputs.version != ''
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.ANDROID_HOME }}/ndk/${{ steps.ndk.outputs.version }}
+          key: ndk-${{ runner.os }}-${{ steps.ndk.outputs.version }}
+
+      - name: Provision Android NDK and CMake
+        run: |
+          sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          ver="${{ steps.ndk.outputs.version }}"
+          if [ -n "$ver" ] && [ ! -d "$ANDROID_HOME/ndk/$ver" ]; then
+            yes | "$sdkmanager" "ndk;$ver" > /dev/null
+            echo "installed ndk;$ver"
+          fi
+          if [ ! -d "$ANDROID_HOME/cmake/3.22.1" ]; then
+            yes | "$sdkmanager" "cmake;3.22.1" > /dev/null
+            echo "installed cmake;3.22.1"
+          fi
+
       # gitee.com 的匿名 git 克隆在 CI 上经常断流，这三个插件只在 OHOS
       # 上用到，Android 构建完全不引用，直接摘掉依赖（同手动工作流）。
       - name: Drop OHOS-only gitee dependencies
-        shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
-          $path = 'apps/flutter/app/pubspec.yaml'
-          $lines = Get-Content $path
-          $out = New-Object System.Collections.Generic.List[string]
-          $targets = @('video_player_ohos','path_provider_ohos','url_launcher_ohos')
-          $i = 0
-          $removed = 0
-          while ($i -lt $lines.Count) {
-            $line = $lines[$i]
-            $name = $line.TrimEnd(':')
-            if ($targets -contains $name -and $line.StartsWith('  ') -and -not $line.StartsWith('    ')) {
-              $block = @($line)
-              $i++
-              while ($i -lt $lines.Count -and ($lines[$i].StartsWith('    ') -or $lines[$i].Trim() -eq '')) {
-                $block += $lines[$i]
-                $i++
-              }
-              if ($block -match 'gitee\.com') {
-                $out.Add("  # removed for CI (gitee clone unreliable): $name")
-                $removed++
-                continue
-              }
-              $block | ForEach-Object { $out.Add($_) }
-              continue
-            }
-            $out.Add($line)
-            $i++
-          }
-          if ($removed -gt 0) {
-            Set-Content -Path $path -Value $out -Encoding utf8
-            Write-Host "removed $removed gitee dependency block(s)"
-          } else {
-            Write-Host "no gitee dependency blocks present (upstream may have fixed it)"
-          }
+          python3 - <<'PYEOF'
+          path = 'apps/flutter/app/pubspec.yaml'
+          lines = open(path, encoding='utf-8').read().splitlines(keepends=True)
+          targets = {'video_player_ohos', 'path_provider_ohos', 'url_launcher_ohos'}
+          out = []
+          i = 0
+          removed = 0
+          while i < len(lines):
+              line = lines[i]
+              name = line.strip().rstrip(':')
+              if name in targets and line.startswith('  ') and not line.startswith('    '):
+                  block = [line]
+                  i += 1
+                  while i < len(lines) and (lines[i].startswith('    ') or lines[i].strip() == ''):
+                      block.append(lines[i])
+                      i += 1
+                  if any('gitee.com' in b for b in block):
+                      out.append(f"  # removed for CI (gitee clone unreliable): {name}\n")
+                      removed += 1
+                      continue
+                  out.extend(block)
+                  continue
+              out.append(line)
+              i += 1
+          if removed > 0:
+              open(path, 'w', encoding='utf-8').write(''.join(out))
+          print(f"removed {removed} gitee dependency block(s)")
+          PYEOF
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
@@ -243,32 +292,44 @@ jobs:
         with:
           workspaces: |
             apps/flutter/native/operit-flutter-bridge -> target
-          shared-key: android-arm64
+          shared-key: android-arm64-linux
 
+      # bindgen 用的 libclang：与 Windows 版同版本（21.1.8）的 linux-x64
+      # NuGet 包，解出后用 OPERIT_LIBCLANG_DIR 指过去（Gradle 脚本认这个
+      # 环境变量，优先于默认路径；有契约测试锁着这个行为）。
       - name: Prepare Android bindgen libclang
-        shell: pwsh
         run: |
-          $version = "21.1.8"
-          $packageName = "libclang.runtime.win-x64.$version"
-          $toolsDir = "target/operit-build-tools"
-          $packageDir = Join-Path $toolsDir $packageName
-          $archive = Join-Path $toolsDir "$packageName.nupkg"
-          New-Item -ItemType Directory -Force -Path $toolsDir | Out-Null
-          Invoke-WebRequest -Uri "https://www.nuget.org/api/v2/package/libclang.runtime.win-x64/$version" -OutFile $archive
-          Expand-Archive -Path $archive -DestinationPath $packageDir -Force
-          if (-not (Test-Path "$packageDir/runtimes/win-x64/native/libclang.dll")) {
-            throw "libclang was not prepared"
-          }
+          version="21.1.8"
+          pkg="libclang.runtime.linux-x64.$version"
+          tools_dir="target/operit-build-tools"
+          mkdir -p "$tools_dir"
+          curl -fsSL -o "$tools_dir/$pkg.nupkg" \
+            "https://www.nuget.org/api/v2/package/libclang.runtime.linux-x64/$version"
+          unzip -q -o "$tools_dir/$pkg.nupkg" -d "$tools_dir/$pkg"
+          native="$PWD/$tools_dir/$pkg/runtimes/linux-x64/native"
+          if [ ! -f "$native/libclang.so" ]; then
+            echo "libclang was not prepared" >&2
+            exit 1
+          fi
+          echo "OPERIT_LIBCLANG_DIR=$native" >> "$GITHUB_ENV"
+          echo "libclang ready at $native"
+
+      - name: Cache CI bootstrap tools
+        uses: actions/cache@v4
+        with:
+          path: |
+            .ci-tools
+            node_modules
+          key: ci-tools-v1-${{ runner.os }}
 
       - name: Bootstrap plugin build tools
-        shell: pwsh
         run: |
-          python -m venv .venv
-          .\.venv\Scripts\python.exe --version
+          python3 -m venv .venv
+          .venv/bin/python --version
           corepack enable
           corepack prepare pnpm@10.7.0 --activate
           corepack pnpm --version
-          New-Item -ItemType Directory -Force -Path .ci-tools/typescript | Out-Null
+          mkdir -p .ci-tools/typescript
           npm install --no-audit --no-fund --prefix .ci-tools/typescript typescript@5.9.2
           npm install --no-audit --no-fund --no-save --no-package-lock esbuild@0.25.10 fflate@0.8.2 typescript@5.9.2
 
@@ -279,53 +340,51 @@ jobs:
       # 用时会逐一验，验过就跳过几十分钟的源码编译）。
       # 找不到 = 合并上游时 V8 钉子变了：报错停下，先跑 Rebuild Android V8。
       - name: Fetch prebuilt Android V8
-        shell: pwsh
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          $ErrorActionPreference = 'Stop'
-          $lock = Get-Content 'apps/flutter/native/operit-flutter-bridge/Cargo.lock' -Raw
-          $m = [regex]::Match($lock, '(?ms)\[\[package\]\]\s+name\s*=\s*"v8"\s+version\s*=\s*"([^"]+)"')
-          if (-not $m.Success) { throw 'cannot find v8 version in bridge Cargo.lock' }
-          $ver = $m.Groups[1].Value
-          Write-Host "pinned V8 version: $ver"
-          $assetName = "operit2-android-v8-arm64-$ver.tar.gz"
-
-          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json' }
-          $api = "https://api.github.com/repos/${{ github.repository }}"
-          $releases = Invoke-RestMethod -Headers $headers -Uri "$api/releases?per_page=100"
-          $asset = $null
-          $sumAsset = $null
-          foreach ($rel in $releases) {
-            foreach ($a in $rel.assets) {
-              if ($a.name -eq $assetName) { $asset = $a }
-              if ($a.name -eq "$assetName.sha256") { $sumAsset = $a }
-            }
-          }
-          if (-not $asset) {
-            throw "No prebuilt V8 asset '$assetName' in this repo's releases. The Cargo.lock V8 pin ($ver) has no prebuilt package yet - run the 'Rebuild Android V8' workflow once, then re-run this build."
-          }
-          $tar = Join-Path $env:RUNNER_TEMP $assetName
-          Invoke-WebRequest -Headers $headers -OutFile $tar -Uri $asset.url -MaximumRedirection 5
-          # asset.url 是 API 地址，需要 Accept 媒体类型才给二进制；改用浏览器下载地址
-          if ((Get-Item $tar).Length -lt 1000000) {
-            Invoke-WebRequest -Headers @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/octet-stream' } -OutFile $tar -Uri $asset.url
-          }
-          if ($sumAsset) {
-            Invoke-WebRequest -Headers @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/octet-stream' } -OutFile "$tar.sha256" -Uri $sumAsset.url
-            $expected = ((Get-Content "$tar.sha256" -Raw) -split '\s+')[0].ToLower()
-            $actual = (Get-FileHash $tar -Algorithm SHA256).Hash.ToLower()
-            if ($expected -ne $actual) { throw "V8 tarball sha256 mismatch: expected $expected, got $actual" }
-            Write-Host "V8 tarball sha256 verified: $actual"
-          }
-          $dest = "tools/release/work/android-v8/$ver/aarch64-linux-android"
-          New-Item -ItemType Directory -Force -Path $dest | Out-Null
-          tar -xzf $tar -C $dest
-          Get-ChildItem $dest | ForEach-Object { Write-Host ("v8 cache: " + $_.Name + " (" + $_.Length + " B)") }
-          if (-not (Test-Path "$dest/manifest.json")) { throw "V8 tarball missing manifest.json after extract" }
+          set -eu
+          ver=$(grep -A2 'name = "v8"' apps/flutter/native/operit-flutter-bridge/Cargo.lock \
+            | grep -oE 'version = "[^"]+"' | head -1 | cut -d'"' -f2)
+          if [ -z "$ver" ]; then echo "cannot find v8 version in bridge Cargo.lock" >&2; exit 1; fi
+          echo "pinned V8 version: $ver"
+          asset_name="operit2-android-v8-arm64-$ver.tar.gz"
+          api="https://api.github.com/repos/${{ github.repository }}"
+          auth="Authorization: Bearer $GH_TOKEN"
+          releases=$(curl -fsSL -H "$auth" -H "Accept: application/vnd.github+json" \
+            "$api/releases?per_page=100")
+          asset_id=$(echo "$releases" | jq -r --arg n "$asset_name" \
+            '.[].assets[] | select(.name==$n) | .id' | head -1)
+          if [ -z "$asset_id" ]; then
+            echo "No prebuilt V8 asset '$asset_name' in this repo's releases. The Cargo.lock V8 pin ($ver) has no prebuilt package yet - run the 'Rebuild Android V8' workflow once, then re-run this build." >&2
+            exit 1
+          fi
+          tar_path="$RUNNER_TEMP/$asset_name"
+          curl -fsSL -H "$auth" -H "Accept: application/octet-stream" \
+            -o "$tar_path" "$api/releases/assets/$asset_id"
+          sum_id=$(echo "$releases" | jq -r --arg n "$asset_name.sha256" \
+            '.[].assets[] | select(.name==$n) | .id' | head -1)
+          if [ -n "$sum_id" ]; then
+            curl -fsSL -H "$auth" -H "Accept: application/octet-stream" \
+              -o "$tar_path.sha256" "$api/releases/assets/$sum_id"
+            expected=$(cut -d' ' -f1 "$tar_path.sha256" | tr 'A-F' 'a-f')
+            actual=$(sha256sum "$tar_path" | cut -d' ' -f1)
+            if [ "$expected" != "$actual" ]; then
+              echo "V8 tarball sha256 mismatch: expected $expected, got $actual" >&2
+              exit 1
+            fi
+            echo "V8 tarball sha256 verified: $actual"
+          fi
+          dest="tools/release/work/android-v8/$ver/aarch64-linux-android"
+          mkdir -p "$dest"
+          tar -xzf "$tar_path" -C "$dest"
+          ls -la "$dest"
+          if [ ! -f "$dest/manifest.json" ]; then
+            echo "V8 tarball missing manifest.json after extract" >&2
+            exit 1
+          fi
 
       - name: Restore signing material
-        shell: pwsh
         env:
           REL_KEYSTORE_B64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
           REL_STORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_STORE_PASSWORD }}
@@ -336,110 +395,110 @@ jobs:
           DBG_KEY_ALIAS: ${{ secrets.ANDROID_DEBUG_KEY_ALIAS }}
           DBG_KEY_PASSWORD: ${{ secrets.ANDROID_DEBUG_KEY_PASSWORD }}
         run: |
-          $missing = @()
-          foreach ($pair in @(
-            @{n='ANDROID_RELEASE_KEYSTORE_BASE64'; v=$env:REL_KEYSTORE_B64},
-            @{n='ANDROID_RELEASE_STORE_PASSWORD'; v=$env:REL_STORE_PASSWORD},
-            @{n='ANDROID_RELEASE_KEY_ALIAS'; v=$env:REL_KEY_ALIAS},
-            @{n='ANDROID_RELEASE_KEY_PASSWORD'; v=$env:REL_KEY_PASSWORD},
-            @{n='ANDROID_DEBUG_KEYSTORE_BASE64'; v=$env:DBG_KEYSTORE_B64},
-            @{n='ANDROID_DEBUG_STORE_PASSWORD'; v=$env:DBG_STORE_PASSWORD},
-            @{n='ANDROID_DEBUG_KEY_ALIAS'; v=$env:DBG_KEY_ALIAS},
-            @{n='ANDROID_DEBUG_KEY_PASSWORD'; v=$env:DBG_KEY_PASSWORD})) {
-            if ([string]::IsNullOrWhiteSpace($pair.v)) { $missing += $pair.n }
-          }
-          if ($missing.Count -gt 0) { throw "Missing secrets: $($missing -join ', ')" }
+          set -eu
+          missing=""
+          for pair in \
+            "ANDROID_RELEASE_KEYSTORE_BASE64:$REL_KEYSTORE_B64" \
+            "ANDROID_RELEASE_STORE_PASSWORD:$REL_STORE_PASSWORD" \
+            "ANDROID_RELEASE_KEY_ALIAS:$REL_KEY_ALIAS" \
+            "ANDROID_RELEASE_KEY_PASSWORD:$REL_KEY_PASSWORD" \
+            "ANDROID_DEBUG_KEYSTORE_BASE64:$DBG_KEYSTORE_B64" \
+            "ANDROID_DEBUG_STORE_PASSWORD:$DBG_STORE_PASSWORD" \
+            "ANDROID_DEBUG_KEY_ALIAS:$DBG_KEY_ALIAS" \
+            "ANDROID_DEBUG_KEY_PASSWORD:$DBG_KEY_PASSWORD"; do
+            if [ -z "${pair#*:}" ]; then missing="$missing ${pair%%:*}"; fi
+          done
+          if [ -n "$missing" ]; then echo "Missing secrets:$missing" >&2; exit 1; fi
 
-          $dir = "tools/release/secrets"
-          New-Item -ItemType Directory -Force -Path $dir | Out-Null
-          [IO.File]::WriteAllBytes("$dir/operit2-release.keystore", [Convert]::FromBase64String($env:REL_KEYSTORE_B64))
-          [IO.File]::WriteAllBytes("$dir/operit2-debug.keystore", [Convert]::FromBase64String($env:DBG_KEYSTORE_B64))
+          dir="tools/release/secrets"
+          mkdir -p "$dir"
+          echo "$REL_KEYSTORE_B64" | base64 -d > "$dir/operit2-release.keystore"
+          echo "$DBG_KEYSTORE_B64" | base64 -d > "$dir/operit2-debug.keystore"
 
-          $localProps = "apps/flutter/app/android/local.properties"
-          $list = New-Object System.Collections.Generic.List[string]
-          if (Test-Path $localProps) {
-            foreach ($line in Get-Content $localProps) {
-              if ([string]::IsNullOrWhiteSpace($line)) { continue }
-              if ($line -match '^\s*(RELEASE|DEBUG)_(STORE_FILE|STORE_PASSWORD|KEY_ALIAS|KEY_PASSWORD)=') { continue }
-              $list.Add($line)
-            }
-          }
-          $relAbs = (Resolve-Path "$dir/operit2-release.keystore").Path.Replace('\', '/')
-          $dbgAbs = (Resolve-Path "$dir/operit2-debug.keystore").Path.Replace('\', '/')
-          $list.Add("RELEASE_STORE_FILE=$relAbs")
-          $list.Add("RELEASE_STORE_PASSWORD=$env:REL_STORE_PASSWORD")
-          $list.Add("RELEASE_KEY_ALIAS=$env:REL_KEY_ALIAS")
-          $list.Add("RELEASE_KEY_PASSWORD=$env:REL_KEY_PASSWORD")
-          $list.Add("DEBUG_STORE_FILE=$dbgAbs")
-          $list.Add("DEBUG_STORE_PASSWORD=$env:DBG_STORE_PASSWORD")
-          $list.Add("DEBUG_KEY_ALIAS=$env:DBG_KEY_ALIAS")
-          $list.Add("DEBUG_KEY_PASSWORD=$env:DBG_KEY_PASSWORD")
-          $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-          $localPropsAbs = Join-Path (Resolve-Path -LiteralPath (Split-Path -Parent $localProps)).Path 'local.properties'
-          [IO.File]::WriteAllLines($localPropsAbs, $list, $utf8NoBom)
-          Write-Host "wrote $localProps"
+          props="apps/flutter/app/android/local.properties"
+          tmp="$(mktemp)"
+          if [ -f "$props" ]; then
+            grep -vE '^\s*(RELEASE|DEBUG)_(STORE_FILE|STORE_PASSWORD|KEY_ALIAS|KEY_PASSWORD)=' "$props" \
+              | grep -v '^[[:space:]]*$' > "$tmp" || true
+          fi
+          rel_abs="$(readlink -f "$dir/operit2-release.keystore")"
+          dbg_abs="$(readlink -f "$dir/operit2-debug.keystore")"
+          {
+            cat "$tmp"
+            echo "RELEASE_STORE_FILE=$rel_abs"
+            echo "RELEASE_STORE_PASSWORD=$REL_STORE_PASSWORD"
+            echo "RELEASE_KEY_ALIAS=$REL_KEY_ALIAS"
+            echo "RELEASE_KEY_PASSWORD=$REL_KEY_PASSWORD"
+            echo "DEBUG_STORE_FILE=$dbg_abs"
+            echo "DEBUG_STORE_PASSWORD=$DBG_STORE_PASSWORD"
+            echo "DEBUG_KEY_ALIAS=$DBG_KEY_ALIAS"
+            echo "DEBUG_KEY_PASSWORD=$DBG_KEY_PASSWORD"
+          } > "$props"
+          echo "wrote $props"
 
       - name: Generate Dart proxy artifacts
-        shell: pwsh
-        env:
-          CARGO_BUILD_JOBS: 2
         run: |
           cargo check --manifest-path core/crates/proxy/local/Cargo.toml --quiet
-          $files = @(
-            'apps/flutter/app/lib/core/proxy/generated/CoreProxyClients.g.dart',
-            'apps/flutter/app/lib/core/proxy/generated/CoreProxyModels.g.dart'
-          )
-          foreach ($f in $files) {
-            if (-not (Test-Path $f)) { throw "missing generated artifact: $f" }
-          }
+          for f in \
+            apps/flutter/app/lib/core/proxy/generated/CoreProxyClients.g.dart \
+            apps/flutter/app/lib/core/proxy/generated/CoreProxyModels.g.dart; do
+            if [ ! -f "$f" ]; then echo "missing generated artifact: $f" >&2; exit 1; fi
+          done
 
       - name: Resolve version
         id: version
-        shell: pwsh
         run: |
-          $m = Select-String -Path apps/flutter/app/pubspec.yaml -Pattern '^version:\s*(\d+\.\d+\.\d+)\+(\d+)\s*$'
-          if ($m.Matches.Count -ne 1) { throw "pubspec.yaml must contain exactly one version line" }
-          "name=$($m.Matches[0].Groups[1].Value)" >> $env:GITHUB_OUTPUT
-          "code=$($m.Matches[0].Groups[2].Value)" >> $env:GITHUB_OUTPUT
+          line=$(grep -E '^version:[[:space:]]*[0-9]+\.[0-9]+\.[0-9]+\+[0-9]+[[:space:]]*$' apps/flutter/app/pubspec.yaml)
+          name=$(echo "$line" | sed -E 's/^version:[[:space:]]*([0-9.]+)\+[0-9]+.*/\1/')
+          code=$(echo "$line" | sed -E 's/^version:[[:space:]]*[0-9.]+\+([0-9]+).*/\1/')
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "version: $name+$code"
 
       - name: Build release
-        shell: pwsh
         working-directory: apps/flutter/app
         run: |
-          fvm flutter build apk --release --split-per-abi --target-platform android-arm64 `
-            --build-name ${{ steps.version.outputs.name }} `
-            --build-number ${{ steps.version.outputs.code }}
+          export PATH="$HOME/.pub-cache/bin:$PATH"
+          fvm flutter build apk --release --split-per-abi --target-platform android-arm64 \
+            --build-name "${{ steps.version.outputs.name }}" \
+            --build-number "${{ steps.version.outputs.code }}"
 
       - name: Build debug
-        shell: pwsh
+        if: steps.plan.outputs.build_debug == 'true'
         working-directory: apps/flutter/app
         run: |
-          fvm flutter build apk --debug --target-platform android-arm64 `
-            --build-name ${{ steps.version.outputs.name }} `
-            --build-number ${{ steps.version.outputs.code }}
+          export PATH="$HOME/.pub-cache/bin:$PATH"
+          fvm flutter build apk --debug --split-per-abi --target-platform android-arm64 \
+            --build-name "${{ steps.version.outputs.name }}" \
+            --build-number "${{ steps.version.outputs.code }}"
 
       - name: Collect APKs
-        shell: pwsh
         run: |
-          $tag = '${{ steps.tag.outputs.tag }}'
-          $ver = '${{ steps.version.outputs.name }}'
-          $out = "dist"
-          New-Item -ItemType Directory -Force -Path $out | Out-Null
-          $src = 'apps/flutter/app/build/app/outputs/flutter-apk'
-          $rel = Get-ChildItem -Path $src -Filter 'app-arm64-v8a-release.apk' | Select-Object -First 1
-          $dbg = Get-ChildItem -Path $src -Filter 'app-arm64-v8a-debug.apk' | Select-Object -First 1
-          if (-not $rel) { throw 'release APK not found' }
-          if (-not $dbg) { throw 'debug APK not found' }
-          $relName = "operit2-app-android-arm64-v8a-$ver-$tag.apk"
-          $dbgName = "operit2-app-android-arm64-v8a-$ver-$tag-debug.apk"
-          Copy-Item $rel.FullName (Join-Path $out $relName) -Force
-          Copy-Item $dbg.FullName (Join-Path $out $dbgName) -Force
-          foreach ($n in @($relName, $dbgName)) {
-            $p = Join-Path $out $n
-            $hash = (Get-FileHash $p -Algorithm SHA256).Hash.ToLower()
-            "$hash  $n" | Out-File -FilePath "$out/SHA256SUMS.txt" -Append -Encoding utf8
-            Write-Host "built $n ($([math]::Round((Get-Item $p).Length/1MB,1)) MiB) sha256=$hash"
-          }
+          set -eu
+          tag="${{ steps.tag.outputs.tag }}"
+          ver="${{ steps.version.outputs.name }}"
+          out="dist"
+          mkdir -p "$out"
+          src="apps/flutter/app/build/app/outputs/flutter-apk"
+          rel=$(find "$src" -name 'app-arm64-v8a-release.apk' | head -1)
+          if [ -z "$rel" ]; then echo "release APK not found" >&2; exit 1; fi
+          rel_name="operit2-app-android-arm64-v8a-$ver-$tag.apk"
+          cp "$rel" "$out/$rel_name"
+          names="$rel_name"
+          if [ "${{ steps.plan.outputs.build_debug }}" = "true" ]; then
+            dbg=$(find "$src" -name 'app-arm64-v8a-debug.apk' | head -1)
+            if [ -z "$dbg" ]; then echo "debug APK not found" >&2; exit 1; fi
+            dbg_name="operit2-app-android-arm64-v8a-$ver-$tag-debug.apk"
+            cp "$dbg" "$out/$dbg_name"
+            names="$names $dbg_name"
+          fi
+          : > "$out/SHA256SUMS.txt"
+          for n in $names; do
+            hash=$(sha256sum "$out/$n" | cut -d' ' -f1)
+            echo "$hash  $n" >> "$out/SHA256SUMS.txt"
+            size=$(du -h "$out/$n" | cut -f1)
+            echo "built $n ($size) sha256=$hash"
+          done
 
       - name: Upload APKs
         uses: actions/upload-artifact@v4
@@ -468,7 +527,7 @@ jobs:
 
       - name: Create tag and release
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.build.outputs.tag }}
           VER_NAME: ${{ needs.build.outputs.version_name }}
           VER_CODE: ${{ needs.build.outputs.version_code }}
