@@ -517,6 +517,10 @@ pub(crate) const EXTENDED_SNAPSHOT_FIELDS: &[SnapshotField] = &[
     SnapshotField { json_key: "chatStyle", preference_key: "chat_style", kind: FieldKind::Enum(&["cursor", "bubble"]) },
     SnapshotField { json_key: "userChatStyle", preference_key: "user_chat_style", kind: FieldKind::Enum(&["cursor", "bubble"]) },
     SnapshotField { json_key: "aiChatStyle", preference_key: "ai_chat_style", kind: FieldKind::Enum(&["cursor", "bubble"]) },
+    // Background dimming veil, added after the released contract for the same
+    // reason: configurations saved before it existed do not own the field and
+    // fall back to no dimming.
+    SnapshotField { json_key: "backgroundDimAmount", preference_key: "background_dim_amount", kind: FieldKind::Number { min: 0.0, max: 1.0 } },
 ];
 
 /// Enumerates the declared ordinary appearance fields without inferring key names.

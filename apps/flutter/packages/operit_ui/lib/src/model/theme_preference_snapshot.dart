@@ -16,6 +16,7 @@ class ThemePreferenceSnapshot {
     required this.videoBackgroundLoop,
     required this.useBackgroundBlur,
     required this.backgroundBlurRadius,
+    this.backgroundDimAmount = 0,
     required this.transparentSurfaceEnabled,
     required this.chatInputFloating,
     required this.inputStyle,
@@ -122,6 +123,7 @@ class ThemePreferenceSnapshot {
   final bool videoBackgroundLoop;
   final bool useBackgroundBlur;
   final double backgroundBlurRadius;
+  final double backgroundDimAmount;
   final bool transparentSurfaceEnabled;
   final bool chatInputFloating;
   final String inputStyle;
@@ -230,6 +232,7 @@ class ThemePreferenceSnapshot {
       'videoBackgroundLoop': videoBackgroundLoop,
       'useBackgroundBlur': useBackgroundBlur,
       'backgroundBlurRadius': backgroundBlurRadius,
+      'backgroundDimAmount': backgroundDimAmount,
       'transparentSurfaceEnabled': transparentSurfaceEnabled,
       'chatInputFloating': chatInputFloating,
       'inputStyle': inputStyle,
@@ -358,6 +361,8 @@ class ThemePreferenceSnapshot {
       videoBackgroundLoop: requiredBool('videoBackgroundLoop'),
       useBackgroundBlur: requiredBool('useBackgroundBlur'),
       backgroundBlurRadius: requiredDouble('backgroundBlurRadius'),
+      backgroundDimAmount:
+          (json['backgroundDimAmount'] as num?)?.toDouble() ?? 0,
       transparentSurfaceEnabled: requiredBool('transparentSurfaceEnabled'),
       chatInputFloating: requiredBool('chatInputFloating'),
       inputStyle: requiredString('inputStyle'),

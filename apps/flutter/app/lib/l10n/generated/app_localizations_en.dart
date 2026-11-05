@@ -2783,6 +2783,9 @@ class AppLocalizationsEn extends AppLocalizations {
   String get settingsAppearanceBackgroundBlurRadius => 'Blur strength';
 
   @override
+  String get settingsAppearanceBackgroundDim => 'Background dimming';
+
+  @override
   String get settingsAppearanceBackgroundVideoMuted => 'Mute video background';
 
   @override
