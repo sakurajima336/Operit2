@@ -4,6 +4,9 @@ name: Auto Android Release
 # 更新说明 = 上一个 tag 到本次提交之间的 commits 列表，不另外写日志。
 # 日常开发在 preview 分支，合进 main 即发版。
 #
+# 定位（2026-11-05 宝宝定的）：工作流出的包一律算 prerelease（预发布），
+# Release 也带 prerelease 标记；正式版（release）以 Ubuntu 本地编译的为准。
+#
 # 手动触发（workflow_dispatch）：默认只编 release（求快）；需要 debug 包时
 # 勾选 build_debug。push 触发（合 main 发版）保持 release + debug 全套。
 #
@@ -561,6 +564,7 @@ jobs:
           gh release create "$TAG" \
             --target "$sha" \
             --title "$TAG" \
+            --prerelease \
             --notes-file /tmp/notes.md \
             dist/*.apk dist/SHA256SUMS.txt
           echo "released $TAG at $sha"
