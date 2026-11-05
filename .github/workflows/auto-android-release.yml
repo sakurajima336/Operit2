@@ -19,7 +19,7 @@ name: Auto Android Release
 # 明确报错停下——不会悄悄用错版本。
 on:
   push:
-    branches: [main]
+    branches: [main, test/actions-release-linux]
   workflow_dispatch:
     inputs:
       build_debug:
@@ -151,7 +151,7 @@ jobs:
       - name: Plan build variants
         id: plan
         run: |
-          if [ "${{ github.event_name }}" = "push" ] || [ "${{ inputs.build_debug }}" = "true" ]; then
+          if { [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref_name }}" = "main" ]; } || [ "${{ inputs.build_debug }}" = "true" ]; then
             echo "build_debug=true" >> "$GITHUB_OUTPUT"
             echo "variants: release + debug"
           else
@@ -519,6 +519,8 @@ jobs:
   # 更新说明 = 上一个 tag..本次提交 的 commits 列表（仓库定的规矩）。
   release:
     needs: build
+    # 只在 main 上正式打 tag 发版；测试分支只编包存 artifact，不污染版本历史
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
