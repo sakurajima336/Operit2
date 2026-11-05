@@ -85,6 +85,7 @@ class UserPreferencesManager {
     'videoBackgroundLoop': 'video_background_loop',
     'useBackgroundBlur': 'use_background_blur',
     'backgroundBlurRadius': 'background_blur_radius',
+    'backgroundDimAmount': 'background_dim_amount',
     'transparentSurfaceEnabled': 'transparent_surface_enabled',
     'chatInputFloating': 'chat_input_floating',
     'inputStyle': 'input_style',
@@ -361,6 +362,7 @@ class UserPreferencesManager {
     bool? videoBackgroundLoop,
     bool? useBackgroundBlur,
     double? backgroundBlurRadius,
+    double? backgroundDimAmount,
     bool? transparentSurfaceEnabled,
     bool? chatInputFloating,
     String? inputStyle,
@@ -451,6 +453,8 @@ class UserPreferencesManager {
       if (useBackgroundBlur != null) 'useBackgroundBlur': useBackgroundBlur,
       if (backgroundBlurRadius != null)
         'backgroundBlurRadius': backgroundBlurRadius,
+      if (backgroundDimAmount != null)
+        'backgroundDimAmount': backgroundDimAmount,
       if (transparentSurfaceEnabled != null)
         'transparentSurfaceEnabled': transparentSurfaceEnabled,
       if (chatInputFloating != null) 'chatInputFloating': chatInputFloating,

@@ -563,6 +563,7 @@ class OperitThemeController {
   void previewThemeSettings({
     double? backgroundImageOpacity,
     double? backgroundBlurRadius,
+    double? backgroundDimAmount,
     double? fontScale,
   }) {
     // Keep slider previews local until their explicit save operation.
@@ -570,6 +571,7 @@ class OperitThemeController {
       _themePreferenceSnapshot,
       backgroundImageOpacity: backgroundImageOpacity,
       backgroundBlurRadius: backgroundBlurRadius,
+      backgroundDimAmount: backgroundDimAmount,
       fontScale: fontScale,
     );
     _themePreferenceSnapshot = snapshot;
@@ -634,6 +636,7 @@ class OperitThemeController {
     bool? videoBackgroundLoop,
     bool? useBackgroundBlur,
     double? backgroundBlurRadius,
+    double? backgroundDimAmount,
     double? fontScale,
     String? customFontPath,
     bool? showThinkingProcess,
@@ -712,6 +715,7 @@ class OperitThemeController {
       videoBackgroundLoop: videoBackgroundLoop,
       useBackgroundBlur: useBackgroundBlur,
       backgroundBlurRadius: backgroundBlurRadius,
+      backgroundDimAmount: backgroundDimAmount,
       fontScale: fontScale,
       customFontPath: customFontPath,
       showThinkingProcess: showThinkingProcess,
@@ -837,6 +841,7 @@ ThemePreferenceSnapshot _themePreferenceSnapshotWith(
   ThemePreferenceSnapshot snapshot, {
   double? backgroundImageOpacity,
   double? backgroundBlurRadius,
+  double? backgroundDimAmount,
   double? fontScale,
 }) {
   return ThemePreferenceSnapshot(
@@ -854,6 +859,7 @@ ThemePreferenceSnapshot _themePreferenceSnapshotWith(
     videoBackgroundLoop: snapshot.videoBackgroundLoop,
     useBackgroundBlur: snapshot.useBackgroundBlur,
     backgroundBlurRadius: backgroundBlurRadius ?? snapshot.backgroundBlurRadius,
+    backgroundDimAmount: backgroundDimAmount ?? snapshot.backgroundDimAmount,
     transparentSurfaceEnabled: snapshot.transparentSurfaceEnabled,
     chatInputFloating: snapshot.chatInputFloating,
     inputStyle: snapshot.inputStyle,

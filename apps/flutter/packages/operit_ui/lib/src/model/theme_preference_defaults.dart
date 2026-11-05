@@ -37,6 +37,7 @@ class ThemePreferenceDefaults {
     videoBackgroundLoop: true,
     useBackgroundBlur: false,
     backgroundBlurRadius: 12,
+    backgroundDimAmount: 0,
     transparentSurfaceEnabled: false,
     chatInputFloating: false,
     inputStyle: INPUT_STYLE_AGENT,

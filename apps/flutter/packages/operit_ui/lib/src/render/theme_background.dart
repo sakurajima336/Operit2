@@ -50,6 +50,24 @@ class ThemeBackground extends StatelessWidget {
             const SizedBox.expand(
               key: ValueKey<String>('empty-theme-background'),
             ),
+          // Dimming veil above the media: opacity and blur alone cannot fix
+          // readability, because neither changes the luminance behind the
+          // content. Dark themes darken with black, light themes lift with
+          // white, so foreground contrast improves either way.
+          if (hasMedia && themePreferenceSnapshot.backgroundDimAmount > 0)
+            AnimatedContainer(
+              duration: _backgroundDuration,
+              curve: Curves.easeOutCubic,
+              color: (Theme.of(context).brightness == Brightness.dark
+                      ? Colors.black
+                      : Colors.white)
+                  .withValues(
+                    alpha: themePreferenceSnapshot.backgroundDimAmount.clamp(
+                      0,
+                      1,
+                    ),
+                  ),
+            ),
         ],
       ),
       child: child,
