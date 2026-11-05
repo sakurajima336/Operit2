@@ -223,8 +223,15 @@ jobs:
         run: |
           fver=$(jq -r .flutter .fvmrc)
           sdk="$HOME/fvm/versions/$fver"
-          ver=$(grep -rhoE 'ndkVersion\s*=\s*"[0-9][0-9.]*"' "$sdk/packages/flutter_tools" 2>/dev/null \
+          # Flutter 工具的真实默认写在 Kotlin 源码里（ndkVersion: String = "…"）；
+          # 退而求其次才找等号写法。范围只限 flutter_tools/gradle，
+          # 整个 flutter_tools 里有测试夹具的旧版本号，会误命中。
+          ver=$(grep -rhoE 'ndkVersion:\s*String\s*=\s*"[0-9][0-9.]*"' "$sdk/packages/flutter_tools/gradle" 2>/dev/null \
             | grep -oE '[0-9][0-9.]*' | head -1)
+          if [ -z "$ver" ]; then
+            ver=$(grep -rhoE 'ndkVersion\s*=\s*"[0-9][0-9.]*"' "$sdk/packages/flutter_tools/gradle" 2>/dev/null \
+              | grep -oE '[0-9][0-9.]*' | head -1)
+          fi
           echo "version=$ver" >> "$GITHUB_OUTPUT"
           echo "flutter-pinned NDK: '${ver:-unknown (AGP will auto-download)}'"
 
