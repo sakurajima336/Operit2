@@ -522,7 +522,7 @@ fn join_non_empty_lines(lines: Vec<String>) -> String {
 
 #[allow(non_snake_case)]
 fn hostPromptHeader(host_environment: &HostEnvironmentDescriptor, use_english: bool) -> String {
-    if use_english {
+    let mut header = if use_english {
         format!(
             "Current file host: {} (`{}`). Relative paths use the current file directory `.`: the primary workspace when bound, otherwise the conversation family's persistent output area. File tools and terminal sessions use this same base. Read supplied relative attachment paths directly; do not scan root/home directories or run a global search to rediscover them. If a terminal cannot enter the current file directory, report a launch/mount failure and use file tools or another available terminal; do not guess its location. For a task that explicitly needs another location, inspect its accessible VFS mount with file tools and use the Host-resolved terminal path. VFS paths outside `.` are not necessarily terminal paths. Prefix a path with `nodeName:` to address another device.",
             host_environment.displayName,
@@ -534,7 +534,15 @@ fn hostPromptHeader(host_environment: &HostEnvironmentDescriptor, use_english: b
             host_environment.displayName,
             host_environment.id
         )
+    };
+    if host_environment.id == "android" {
+        header.push_str(if use_english {
+            "\n- Android path mapping: the phone's shared storage is mounted at `/virtual/android/sdcard` (e.g. `/virtual/android/sdcard/Pictures/...`); the older spelling `/mnt/android/sdcard` opens the same mount. Never use `/storage/emulated/0/...` or `/sdcard/...` to reach it: those spellings are legacy aliases that resolve into the app's plugin storage area, NOT the shared storage, so files there appear missing. When a file is presented with a raw `/data/user/0/...` path, prefer the VFS path shown by `list_files` (workspaces live under `/operitapp/workspaces/...`). Always translate Android-native paths into VFS paths before calling file tools."
+        } else {
+            "\n- Android 路径映射：手机共享存储挂载在 `/virtual/android/sdcard`（例如 `/virtual/android/sdcard/Pictures/...`）；旧写法 `/mnt/android/sdcard` 打开的是同一个挂载。不要用 `/storage/emulated/0/...` 或 `/sdcard/...` 去访问它：这两种写法是旧别名，会被解析进应用的插件存储区、不是共享存储，在那边会显得文件不存在。遇到以 `/data/user/0/...` 原生路径展示的文件，优先用 `list_files` 给出的 VFS 路径（工作区在 `/operitapp/workspaces/...` 下）。调用文件工具前，务必先把 Android 原生路径翻译成 VFS 路径。"
+        });
     }
+    header
 }
 
 #[allow(non_snake_case)]
@@ -897,6 +905,10 @@ fn file_system_tools_en() -> SystemToolPromptCategory {
             param("direct_audio", "boolean", "optional, when true: return an <link type=\"audio\"> tag for models that support audio", false, None),
             param("direct_video", "boolean", "optional, when true: return an <link type=\"video\"> tag for models that support video", false, None),
         ]),
+        tool("read_image", "View an image file yourself. The image is loaded as visual input, so you actually SEE the picture (a screenshot, photo, chart, diagram or UI capture) instead of guessing from its file name or relying on OCR text. Use this whenever understanding an image's content matters, e.g. checking a screenshot you just took or an image the user mentions by path. Supported formats: jpg, jpeg, png, gif, bmp, webp.", vec![
+            param("path", "string", "VFS file path", true, None),
+            param("intent", "string", "optional, your question about the image (only used as a fallback for backend recognition when you cannot view images directly)", false, None),
+        ]),
         tool("read_file_part", "Read file content by line range.", vec![param("path", "string", "VFS file path", true, None), param("start_line", "integer", "starting line number, 1-indexed", false, Some("1")), param("end_line", "integer", "ending line number, 1-indexed, inclusive, optional", false, Some("start_line + 99"))]),
         tool("write_file", "Write content to a file. Creates the file if it does not exist; overwrites it by default, or appends when append=true.", vec![param("path", "string", "VFS file path", true, None), param("content", "string", "file content", true, None), param("append", "boolean", "append instead of overwriting", false, Some("false"))]),
         tool("edit_file", "Edit an existing file by replacing matched content with new content.", vec![param("path", "string", "VFS file path", true, None), param("old", "string", "the exact content to be matched and replaced", true, None), param("new", "string", "the new content to insert", true, None)]),
@@ -922,6 +934,10 @@ fn file_system_tools_cn() -> SystemToolPromptCategory {
             param("direct_image", "boolean", "可选，为true时：返回<link type=\"image\">标签供支持识图的模型直接查看", false, None),
             param("direct_audio", "boolean", "可选，为true时：返回<link type=\"audio\">标签供支持音频的模型直接处理", false, None),
             param("direct_video", "boolean", "可选，为true时：返回<link type=\"video\">标签供支持视频的模型直接处理", false, None),
+        ]),
+        tool("read_image", "自己查看一张图片文件。图片会作为视觉输入加载给你，你能真正看到画面本身（截图、照片、图表、示意图、界面捕获），而不是靠文件名猜、或只看 OCR 提取的文字。只要需要理解图片内容就用它，比如检查你刚截的图、或用户按路径提到的图片。支持 jpg、jpeg、png、gif、bmp、webp。", vec![
+            param("path", "string", "VFS 文件路径", true, None),
+            param("intent", "string", "可选，你对这张图片的问题（仅在你无法直接看图时，作为后端识别的备用方式）", false, None),
         ]),
         tool("read_file_part", "按行号范围读取文件内容。", vec![param("path", "string", "VFS 文件路径", true, None), param("start_line", "integer", "起始行号，从1开始", false, Some("1")), param("end_line", "integer", "结束行号，从1开始，包括该行，可选", false, Some("start_line + 99"))]),
         tool("write_file", "写入文件内容。文件不存在则创建；默认全量覆写，append=true 时追加内容。", vec![param("path", "string", "VFS 文件路径", true, None), param("content", "string", "文件内容", true, None), param("append", "boolean", "追加内容而非覆写", false, Some("false"))]),

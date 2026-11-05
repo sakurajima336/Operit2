@@ -17,6 +17,8 @@ pub struct ToolResultMap {
     pub read_file_full: FileContentData,
     #[display(action = "read", icon = "file", target = "path")]
     pub read_file_binary: BinaryFileContentData,
+    #[display(action = "read", icon = "image", target = "path")]
+    pub read_image: FileContentData,
     #[display(action = "write", icon = "edit", target = "path", result = "fileDiff")]
     pub write_file: FileApplyResultData,
     #[display(action = "write", icon = "edit", target = "path")]

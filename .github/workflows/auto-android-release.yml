@@ -42,8 +42,9 @@ env:
   RUSTFLAGS: -Awarnings
   RUST_TOOLCHAIN_VERSION: 1.95.0
   FVM_VERSION: 4.3.0
-  # 私有仓标准 runner 资源有限，Rust 并行开太高会 OOM
-  CARGO_BUILD_JOBS: "2"
+  # 公开仓标准 runner 是 4 vCPU / 16 GB，Rust 并行按 4 开
+  #（原先按私有仓小 runner 钉的 2 会白白压住代码生成和桥编译的速度）
+  CARGO_BUILD_JOBS: "4"
 
 jobs:
   # ── 1. 原生运行时（busybox / proot / bash / loader + alpine rootfs）───────

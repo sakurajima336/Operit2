@@ -421,6 +421,75 @@ impl StandardFileSystemTools {
     }
 
     #[allow(non_snake_case)]
+    /// Views an image file directly, the way Codex's view_image or Claude
+    /// Code's Read do: the picture is registered in the image pool and its
+    /// media link is returned, so a vision-capable model sees the image
+    /// itself instead of OCR text or a file name. When direct viewing is
+    /// unavailable the shared image chain falls back to intent recognition
+    /// and then OCR, exactly like read_file on an image.
+    pub async fn readImage(&self, tool: &AITool) -> ToolResult {
+        let tool = &match self.prepareFileToolCall(tool, &["path"], true) {
+            Ok(PreparedFileToolCall::Local(call)) => call,
+            Ok(PreparedFileToolCall::Remote {
+                call,
+                nodeId,
+                typedPath,
+                nodePrefix,
+            }) => {
+                return self
+                    .dispatchRemoteFileTool(call, nodeId, &typedPath, &nodePrefix)
+                    .await;
+            }
+            Err(error) => return toolError(tool, String::new(), error),
+        };
+        let path = parameterValue(tool, "path");
+        let vfs = self.vfs();
+
+        match vfs.fileExists(&path) {
+            Ok(existence) if existence.exists && !existence.isDirectory => {
+                let fileExt = fileExtension(&path);
+                if !matches!(
+                    fileExt.as_str(),
+                    "jpg" | "jpeg" | "png" | "gif" | "bmp" | "webp"
+                ) {
+                    return toolError(
+                        tool,
+                        String::new(),
+                        format!(
+                            "read_image only supports image files (jpg, jpeg, png, gif, bmp, webp): {path}. Use read_file for other files."
+                        ),
+                    );
+                }
+                // Force the direct-view stage of the shared image chain; the
+                // caller's optional intent stays as the recognition fallback.
+                let mut directTool = tool.clone();
+                directTool
+                    .parameters
+                    .retain(|parameter| parameter.name != "direct_image");
+                directTool.parameters.push(ToolParameter {
+                    name: "direct_image".to_string(),
+                    value: "true".to_string(),
+                });
+                self.handleImageFileRead(&directTool, &vfs, &path).await
+            }
+            Ok(_) => {
+                operit_util::AppLogger::AppLogger::e(
+                    "ReadImageDiag",
+                    &format!("read_image rejected a non-file path: {path}"),
+                );
+                toolError(tool, String::new(), format!("Path is not a file: {path}"))
+            }
+            Err(error) => {
+                operit_util::AppLogger::AppLogger::e(
+                    "ReadImageDiag",
+                    &format!("read_image existence check failed for {path}: {error}"),
+                );
+                toolError(tool, String::new(), error)
+            }
+        }
+    }
+
+    #[allow(non_snake_case)]
     /// Reads a complete file or delegates special file handling.
     pub async fn readFileFull(&self, tool: &AITool) -> ToolResult {
         let tool = &match self.prepareFileToolCall(tool, &["path"], true) {
@@ -504,7 +573,7 @@ impl StandardFileSystemTools {
         fileExt: &str,
     ) -> ToolResult {
         match fileExt {
-            "jpg" | "jpeg" | "png" | "gif" | "bmp" => {
+            "jpg" | "jpeg" | "png" | "gif" | "bmp" | "webp" => {
                 self.handleImageFileRead(tool, vfs, path).await
             }
             "pdf" | "doc" | "docx" => self.handleDocumentFileRead(tool, vfs, path, fileExt),
@@ -681,6 +750,13 @@ impl StandardFileSystemTools {
             if directResult.success {
                 return directResult;
             }
+            operit_util::AppLogger::AppLogger::e(
+                "ReadImageDiag",
+                &format!(
+                    "direct stage failed for {path}: {}",
+                    directResult.error.as_deref().unwrap_or("unknown error")
+                ),
+            );
         }
 
         let physicalPath = match vfs
@@ -709,6 +785,10 @@ impl StandardFileSystemTools {
             }
         }
 
+        operit_util::AppLogger::AppLogger::e(
+            "ReadImageDiag",
+            &format!("degrading to OCR for {path}"),
+        );
         let content = match self.recognizeImageText(&physicalPath) {
             Ok(ocrText) if ocrText.trim().is_empty() => "No text detected in image.".to_string(),
             Ok(ocrText) => ocrText,
@@ -733,7 +813,7 @@ impl StandardFileSystemTools {
         path: &str,
         intent: &str,
     ) -> Option<String> {
-        let bytes = match vfs.readFileBytes(path) {
+        let bytes = match self.readImageBytes(vfs, path) {
             Ok(bytes) => bytes,
             Err(error) => {
                 operit_util::AppLogger::AppLogger::w(
@@ -787,6 +867,46 @@ impl StandardFileSystemTools {
     }
 
     #[allow(non_snake_case)]
+    /// Reads image bytes through the VFS host, falling back to a direct OS
+    /// read of the resolved native path when the host read fails or returns
+    /// nothing. The image chain swallows byte-read errors by design (it
+    /// degrades to recognition/OCR), so every failure is logged here to keep
+    /// a silent degradation diagnosable.
+    fn readImageBytes(&self, vfs: &VisualFileSystem, path: &str) -> Result<Vec<u8>, String> {
+        match vfs.readFileBytes(path) {
+            Ok(bytes) if !bytes.is_empty() => return Ok(bytes),
+            Ok(_) => {
+                operit_util::AppLogger::AppLogger::e(
+                    "ReadImageDiag",
+                    &format!("VFS byte read returned empty for {path}; trying native path"),
+                );
+            }
+            Err(error) => {
+                operit_util::AppLogger::AppLogger::e(
+                    "ReadImageDiag",
+                    &format!("VFS byte read failed for {path}: {error}; trying native path"),
+                );
+            }
+        }
+        let nativePath = vfs
+            .resolvePath(path)
+            .and_then(|resolved| resolved.nativePath())?;
+        let bytes = std::fs::read(&nativePath)
+            .map_err(|error| format!("native byte read failed for {nativePath}: {error}"))?;
+        if bytes.is_empty() {
+            return Err(format!("native byte read returned empty for {nativePath}"));
+        }
+        operit_util::AppLogger::AppLogger::e(
+            "ReadImageDiag",
+            &format!(
+                "native byte read recovered {} bytes for {path}",
+                bytes.len()
+            ),
+        );
+        Ok(bytes)
+    }
+
+    #[allow(non_snake_case)]
     /// Reads an image file into the process image pool and returns its media-link tag.
     fn handleDirectImageFileRead(
         &self,
@@ -794,7 +914,7 @@ impl StandardFileSystemTools {
         vfs: &VisualFileSystem,
         path: &str,
     ) -> ToolResult {
-        let bytes = match vfs.readFileBytes(path) {
+        let bytes = match self.readImageBytes(vfs, path) {
             Ok(bytes) => bytes,
             Err(error) => {
                 return toolError(
@@ -2073,6 +2193,7 @@ pub enum FileSystemToolOperation {
     ReadFilePart,
     ReadFileFull,
     ReadFileBinary,
+    ReadImage,
     WriteFile,
     WriteFileBinary,
     DeleteFile,
@@ -2108,6 +2229,7 @@ impl AsyncToolExecutor for FileSystemToolExecutor {
             | FileSystemToolOperation::ReadFilePart
             | FileSystemToolOperation::ReadFileFull
             | FileSystemToolOperation::ReadFileBinary
+            | FileSystemToolOperation::ReadImage
             | FileSystemToolOperation::FileExists
             | FileSystemToolOperation::FindFiles
             | FileSystemToolOperation::FileInfo
@@ -2187,6 +2309,9 @@ impl AsyncToolExecutor for FileSystemToolExecutor {
                                 }
                                 FileSystemToolOperation::ReadFileBinary => {
                                     tools.readFileBinary(tool).await
+                                }
+                                FileSystemToolOperation::ReadImage => {
+                                    tools.readImage(tool).await
                                 }
                                 FileSystemToolOperation::WriteFile => tools.writeFile(tool).await,
                                 FileSystemToolOperation::WriteFileBinary => {
@@ -2297,6 +2422,7 @@ fn requiredParameters(operation: &FileSystemToolOperation) -> &'static [&'static
         | FileSystemToolOperation::ReadFilePart
         | FileSystemToolOperation::ReadFileFull
         | FileSystemToolOperation::ReadFileBinary
+        | FileSystemToolOperation::ReadImage
         | FileSystemToolOperation::DeleteFile
         | FileSystemToolOperation::FileExists
         | FileSystemToolOperation::MakeDirectory
@@ -2516,6 +2642,7 @@ fn imageMimeTypeFromPath(path: &str) -> &'static str {
         "jpg" | "jpeg" => "image/jpeg",
         "gif" => "image/gif",
         "bmp" => "image/bmp",
+        "webp" => "image/webp",
         _ => "image/png",
     }
 }
@@ -2574,6 +2701,7 @@ fn isSpecialFileType(fileExtension: &str) -> bool {
             | "png"
             | "gif"
             | "bmp"
+            | "webp"
             | "pdf"
             | "doc"
             | "docx"

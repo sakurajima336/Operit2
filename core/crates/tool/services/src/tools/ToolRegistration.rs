@@ -1345,6 +1345,12 @@ fn registerFileSystemTools(handler: &mut AIToolHandler, fileSystemTools: Standar
     registerFileSystemTool(
         handler,
         &fileSystemTools,
+        BuiltinToolName::ReadImage,
+        FileSystemToolOperation::ReadImage,
+    );
+    registerFileSystemTool(
+        handler,
+        &fileSystemTools,
         BuiltinToolName::WriteFile,
         FileSystemToolOperation::WriteFile,
     );
