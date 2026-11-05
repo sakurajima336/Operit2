@@ -146,6 +146,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 公开仓 runner 的磁盘很紧：几套缓存恢复进来，再加上插件预构建的
+      # node_modules 和构建产物，14 GB 级别的可用空间会被吃光（2026-11-05
+      # 实测在 pnpm install 和写 app.dill 时 ENOSPC 挂掉）。先清掉镜像里
+      # 本工作流用不上的预装件：dotnet、GHC、boost、CodeQL 和 docker 镜像。
+      # 注意别动 /usr/local/lib/android——那是 ANDROID_HOME，NDK 还要往里装。
+      - name: Free disk space
+        run: |
+          df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost \
+            /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force >/dev/null 2>&1 || true
+          df -h / | tail -1
+
       - name: Download runtime from this run
         uses: actions/download-artifact@v4
         with:
