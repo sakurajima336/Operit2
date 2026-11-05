@@ -37,6 +37,25 @@ impl MessagePartCodec {
             })
     }
 
+    /// Parses assistant output whose stream ended away from a tag boundary:
+    /// a cancelled response, or one the provider cut off mid-tag.
+    ///
+    /// Complete parts parse exactly as live output. A trailing incomplete
+    /// semantic tag is dropped, never shown: its payload is protocol data,
+    /// not readable text. Markup that fails for any other reason degrades
+    /// to the parts parsed before it, so finalizing a message can neither
+    /// fail nor panic over the shape of the model's output.
+    pub fn parseAssistantMarkupAfterStreamEnd(content: &str) -> Vec<MessagePart> {
+        let mut state = AssistantMarkupStreamState {
+            dropIncompleteTail: true,
+            ..AssistantMarkupStreamState::new()
+        };
+        match state.push(content).and_then(|()| state.finish()) {
+            Ok(parts) => parts,
+            Err(_) => state.parts().to_vec(),
+        }
+    }
+
     /// Serializes canonical parts for a text-only provider protocol boundary.
     pub fn assistantMarkup(parts: &[MessagePart]) -> String {
         let mut markup = String::new();
@@ -252,6 +271,7 @@ pub struct AssistantMarkupStreamState {
     activeThinkingOpenTag: Option<String>,
     activeThinkingCloseTag: Option<String>,
     preserveUnsupportedTags: bool,
+    dropIncompleteTail: bool,
 }
 
 impl Default for AssistantMarkupStreamState {
@@ -268,6 +288,7 @@ impl Default for AssistantMarkupStreamState {
             activeThinkingOpenTag: None,
             activeThinkingCloseTag: None,
             preserveUnsupportedTags: false,
+            dropIncompleteTail: false,
         }
     }
 }
@@ -362,6 +383,12 @@ impl AssistantMarkupStreamState {
             let Some(openEndOffset) = self.pending.find('>') else {
                 if self.isPotentialSemanticOpening() {
                     if isFinal {
+                        // Stream-end finalization drops the partial opening
+                        // bytes instead of rejecting the whole message.
+                        if self.dropIncompleteTail {
+                            self.pending.clear();
+                            return Ok(());
+                        }
                         return Err("assistant semantic opening tag is incomplete".into());
                     }
                     return Ok(());
@@ -411,6 +438,13 @@ impl AssistantMarkupStreamState {
                 findAsciiCaseInsensitive(&self.pending[openEnd..], &closeTag)
             else {
                 if isFinal {
+                    // Stream-end finalization drops the unfinished tag: the
+                    // call it belonged to never completed, and its partial
+                    // payload is protocol data, not readable text.
+                    if self.dropIncompleteTail {
+                        self.pending.clear();
+                        return Ok(());
+                    }
                     // Historical storage includes unfinished output as literal source.
                     if self.preserveUnsupportedTags {
                         let content = std::mem::take(&mut self.pending);
@@ -852,6 +886,64 @@ mod tests {
             "Before<tool name=\"search\"><param name=\"various_search</param></tool>After",
             "Before<tool_result name=\"search\" status=\"success\">PRIVATE-RESULT</tool_result>",
         ] { assert!(MessagePartCodec::parseAssistantMarkup(content).is_err(), "{content}"); }
+    }
+
+    /// A stream that ends inside a semantic tag finalizes with the parts
+    /// before it; the unfinished tail is dropped, never shown as text.
+    #[test]
+    fn stream_end_drops_incomplete_semantic_tail() {
+        for source in [
+            "Before<tool_G543 name=\"read_file\"><param name=\"path\">a.txt</param>",
+            "Before<tool name=\"read_file\">",
+            "Before<tool_G5",
+        ] {
+            let parts = MessagePartCodec::parseAssistantMarkupAfterStreamEnd(source);
+            assert_eq!(parts.len(), 1, "{source}");
+            assert_eq!(parts[0].kind, MessagePartKind::Markdown);
+            assert_eq!(parts[0].content, "Before");
+            assert_eq!(MessagePartCodec::visibleText(&parts), "Before");
+            assert!(
+                MessagePartCodec::parseAssistantMarkup(source).is_err(),
+                "{source}"
+            );
+        }
+    }
+
+    /// Complete parts ahead of a cut-off tail survive stream-end finalization.
+    #[test]
+    fn stream_end_keeps_complete_parts_before_tail() {
+        let source = "Answer<status type=\"warning\">careful</status>tail<tool name=\"read_file\"><param name=\"path\">a.txt</param>";
+        let parts = MessagePartCodec::parseAssistantMarkupAfterStreamEnd(source);
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[0].kind, MessagePartKind::Markdown);
+        assert_eq!(parts[0].content, "Answer");
+        assert_eq!(parts[1].kind, MessagePartKind::Status);
+        assert_eq!(parts[1].content, "careful");
+        assert_eq!(parts[2].kind, MessagePartKind::Markdown);
+        assert_eq!(parts[2].content, "tail");
+    }
+
+    /// A malformed complete tag degrades to the parts parsed before it; its
+    /// payload never becomes visible text and finalization never fails.
+    #[test]
+    fn stream_end_degrades_malformed_markup_without_leaking_payload() {
+        let source =
+            "Before<tool_result name=\"search\" status=\"success\">PRIVATE-RESULT</tool_result>After";
+        let parts = MessagePartCodec::parseAssistantMarkupAfterStreamEnd(source);
+        assert!(parts
+            .iter()
+            .all(|part| !part.content.contains("PRIVATE-RESULT")));
+        assert_eq!(MessagePartCodec::visibleText(&parts), "Before");
+    }
+
+    /// Stream-end parsing matches the strict parser for complete markup.
+    #[test]
+    fn stream_end_matches_strict_parser_for_valid_markup() {
+        let source = "Answer<think>reasoning</think><tool name=\"read_file\"><param name=\"path\">README.md</param></tool><tool_result name=\"read_file\" status=\"success\"><content>done</content></tool_result><status type=\"warning\">careful</status>";
+        assert_eq!(
+            MessagePartCodec::parseAssistantMarkupAfterStreamEnd(source),
+            MessagePartCodec::parseAssistantMarkup(source).unwrap(),
+        );
     }
 
     /// Verifies that visible text excludes internal thinking and tool protocol payloads.

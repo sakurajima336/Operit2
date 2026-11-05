@@ -505,8 +505,10 @@ impl MessageCoordinationDelegate {
                 content.push_str(&chunk);
             })
             .await;
-        variantMessage.parts = MessagePartCodec::parseAssistantMarkup(&content)
-            .expect("regenerated assistant markup must parse into message parts");
+        variantMessage.parts = match MessagePartCodec::parseAssistantMarkup(&content) {
+            Ok(parts) => parts,
+            Err(_) => MessagePartCodec::parseAssistantMarkupAfterStreamEnd(&content),
+        };
         variantMessage.isVariantPreview = false;
         self.chatHistoryDelegate.addMessageVariant(
             targetMessage.timestamp,
