@@ -221,16 +221,20 @@ jobs:
       - name: Resolve Flutter-pinned NDK version
         id: ndk
         run: |
-          fver=$(jq -r .flutter .fvmrc)
+          # .fvmrc 只在 apps/flutter/app/ 里，仓库根目录没有；之前在这里
+          # 读根目录的 .fvmrc，jq 直接失败、整步在 pipefail 下中止。
+          fver=$(jq -r .flutter apps/flutter/app/.fvmrc 2>/dev/null || echo "")
           sdk="$HOME/fvm/versions/$fver"
           # Flutter 工具的真实默认写在 Kotlin 源码里（ndkVersion: String = "…"）；
           # 退而求其次才找等号写法。范围只限 flutter_tools/gradle，
           # 整个 flutter_tools 里有测试夹具的旧版本号，会误命中。
+          # 管道尾加 || true：grep 无命中时不让 pipefail 直接杀掉本步，
+          # 好让空结果落到下面的兜底分支（AGP 自动下载）。
           ver=$(grep -rhoE 'ndkVersion:\s*String\s*=\s*"[0-9][0-9.]*"' "$sdk/packages/flutter_tools/gradle" 2>/dev/null \
-            | grep -oE '[0-9][0-9.]*' | head -1)
+            | grep -oE '[0-9][0-9.]*' | head -1 || true)
           if [ -z "$ver" ]; then
             ver=$(grep -rhoE 'ndkVersion\s*=\s*"[0-9][0-9.]*"' "$sdk/packages/flutter_tools/gradle" 2>/dev/null \
-              | grep -oE '[0-9][0-9.]*' | head -1)
+              | grep -oE '[0-9][0-9.]*' | head -1 || true)
           fi
           echo "version=$ver" >> "$GITHUB_OUTPUT"
           echo "flutter-pinned NDK: '${ver:-unknown (AGP will auto-download)}'"
