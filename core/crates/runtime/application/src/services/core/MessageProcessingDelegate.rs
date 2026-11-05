@@ -1537,12 +1537,18 @@ impl MessageProcessingDelegate {
         let snapshot = self.readCurrentTurnCancellationSnapshot(chatId)?;
         let mut aiMessage = snapshot.aiMessage?;
         let mut partStream = AssistantMarkupStreamState::new();
-        partStream
+        // A cancelled response routinely ends inside a semantic tag. Keep the
+        // strict parse for well-formed content, but never let the unfinished
+        // tail fail the cancellation itself: degrade to stream-end parsing.
+        aiMessage.parts = match partStream
             .resetToSnapshot(&snapshot.partialContent)
-            .expect("cancelled assistant snapshot must parse into message parts");
-        aiMessage.parts = partStream
-            .finish()
-            .expect("cancelled assistant markup must parse into message parts");
+            .and_then(|()| partStream.finish())
+        {
+            Ok(parts) => parts,
+            Err(_) => {
+                MessagePartCodec::parseAssistantMarkupAfterStreamEnd(&snapshot.partialContent)
+            }
+        };
         if let Some(observer) = &snapshot.turnOptions.outputObserver {
             observer.snapshot(aiMessage.timestamp, &aiMessage.parts);
         }
@@ -2391,12 +2397,20 @@ impl MessageProcessingDelegate {
                                 let mut partStream = completionPartStream
                                     .lock()
                                     .expect("assistant message-part stream mutex poisoned");
-                                partStream.resetToSnapshot(&finalContent).expect(
-                                    "terminal assistant snapshot must parse into message parts",
-                                );
-                                partStream.finish().expect(
-                                    "terminal assistant markup must parse into message parts",
-                                )
+                                // A provider stream can end inside a semantic
+                                // tag; degrade to stream-end parsing instead of
+                                // panicking on the unfinished tail.
+                                match partStream
+                                    .resetToSnapshot(&finalContent)
+                                    .and_then(|()| partStream.finish())
+                                {
+                                    Ok(parts) => parts,
+                                    Err(_) => {
+                                        MessagePartCodec::parseAssistantMarkupAfterStreamEnd(
+                                            &finalContent,
+                                        )
+                                    }
+                                }
                             };
                             let mut workerAiMessage = completionAiMessage
                                 .lock()
