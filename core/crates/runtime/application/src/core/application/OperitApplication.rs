@@ -5,6 +5,7 @@ use crate::core::chat::AIMessageManager::AIMessageManager;
 use crate::core::chat::ChatRuntimeHolder::ChatRuntimeHolder;
 use crate::core::events::RuntimeEvent::RuntimeEvent;
 use crate::data::preferences::ApiPreferences::ApiPreferences;
+use crate::data::preferences::GitHubAuthPreferences::GitHubAuthPreferences;
 use crate::data::preferences::ModelConfigManager::ModelConfigManager;
 use crate::data::preferences::PreferenceSpaceMerge;
 use crate::data::preferences::ThemeConfigManager::ThemeConfigManager;
@@ -15,6 +16,9 @@ use crate::plugins::toolpkg::ToolPkgInputMenuToggleBridge::ToolPkgInputMenuToggl
 use crate::plugins::PluginRegistry::PluginRegistry;
 use crate::services::ProviderRuntimeSupportService::ProviderRuntimeSupportService;
 use crate::services::ToolRuntimeSupportService::ToolRuntimeSupportService;
+use crate::core::application::ExtensionCatalogSupport::{
+    ExtensionCatalogDiagnostic, ExtensionCatalogSnapshot, ExtensionCatalogUpdateCheck,
+};
 #[cfg(feature = "javascript")]
 use operit_host_api::HostManager::setDefaultHostJavaScriptRuntimeHost;
 use operit_host_api::HostManager::{
@@ -26,6 +30,9 @@ use operit_host_api::{HostRuntimeEventRegistration, HostRuntimeTaskSchedulerHost
 #[cfg(feature = "javascript")]
 use operit_js_bridge::javascript::JsExecutionProvider::HostJsExecutionProvider;
 use operit_providers::chat::llmprovider::ModelConfigConnectionTester::ModelConnectionTestReport;
+use operit_providers::market::MarketStatsApiService::{
+    setDefaultGitHubTokenSource, GitHubTokenSource,
+};
 use operit_providers::runtime_support::ProviderRuntimeContext;
 use operit_store::sync::SqlChatSyncStore::{SqlChatSyncStore, CHAT_SYNC_DOMAIN};
 use operit_store::CoreNodeBindingStore::{CoreNodeBindingStore, BINDING_SYNC_DOMAIN};
@@ -95,6 +102,18 @@ use operit_util::AppLogger::AppLogger;
 use operit_util::OperitPaths;
 
 static HOST_MANAGER: OnceLock<Mutex<Option<HostManager>>> = OnceLock::new();
+
+/// Gives marketplace clients the access token of the saved GitHub login.
+struct GitHubLoginTokenSource;
+
+impl GitHubTokenSource for GitHubLoginTokenSource {
+    /// Reads the token on every request so signing in or out applies immediately.
+    fn current_access_token(&self) -> Result<Option<String>, String> {
+        GitHubAuthPreferences::getInstance()
+            .getCurrentAccessToken()
+            .map_err(|error| error.to_string())
+    }
+}
 
 /// Owns process-wide runtime initialization and exposes host-facing application operations.
 pub struct OperitApplication {
@@ -168,6 +187,7 @@ impl OperitApplication {
         if let Some(httpHost) = hostManager.httpHost.clone() {
             setDefaultHttpHost(httpHost);
         }
+        setDefaultGitHubTokenSource(Arc::new(GitHubLoginTokenSource));
         if let Some(webSocketHost) = hostManager.webSocketHost.clone() {
             setDefaultWebSocketHost(webSocketHost);
         }
@@ -540,6 +560,53 @@ impl OperitApplication {
         MCPRepository::getInstance(&self.hostManager, self.toolHandler.runtimeSupport())
     }
 
+    /// Imports portable A2A connection definitions into the extension/package registry.
+    #[allow(non_snake_case)]
+    pub fn importA2AConfig(&self, configJson: String) -> Result<Vec<String>, String> {
+        let ids = operit_tools::tools::a2a::A2ARepository::A2ARepository::new(self.hostManager.clone())?.import(&configJson)?;
+        self.packageManager().lock().map_err(|e| e.to_string())?.reloadA2APackages();
+        Ok(ids)
+    }
+
+    /// Reads the saved connection manifest for editing or export.
+    #[allow(non_snake_case)]
+    pub fn getA2AConfig(&self, id: String) -> Result<String, String> {
+        let config = operit_tools::tools::a2a::A2ARepository::A2ARepository::new(self.hostManager.clone())?.config(&id)?;
+        serde_json::to_string(&config).map_err(|e| e.to_string())
+    }
+
+    /// Fetches and validates an Agent Card before the user saves a connection.
+    #[allow(non_snake_case)]
+    pub async fn discoverA2AAgent(&self, configJson: String) -> Result<String, String> {
+        let config = serde_json::from_str(&configJson).map_err(|e| e.to_string())?;
+        let config = operit_tools::tools::a2a::A2ARepository::A2ARepository::new(self.hostManager.clone())?.discover(config).await?;
+        serde_json::to_string(&config).map_err(|e| e.to_string())
+    }
+
+    /// Enables or disables an installed A2A package through its canonical owner record.
+    #[allow(non_snake_case)]
+    pub fn setA2AEnabled(&self, id: String, enabled: bool) -> Result<(), String> {
+        operit_tools::tools::a2a::A2ARepository::A2ARepository::new(self.hostManager.clone())?.set_enabled(&id, enabled)?;
+        self.packageManager().lock().map_err(|e| e.to_string())?.reloadA2APackages();
+        Ok(())
+    }
+
+    /// Deletes an A2A installation and removes its package tools.
+    #[allow(non_snake_case)]
+    pub fn deleteA2A(&self, id: String) -> Result<(), String> {
+        operit_tools::tools::a2a::A2ARepository::A2ARepository::new(self.hostManager.clone())?.delete(&id)?;
+        self.packageManager().lock().map_err(|e| e.to_string())?.reloadA2APackages();
+        Ok(())
+    }
+
+    /// Executes the same A2A operations used by the installed package's tools.
+    #[allow(non_snake_case)]
+    pub async fn invokeA2A(&self, id: String, operation: String, argumentsJson: String) -> Result<String, String> {
+        let arguments = serde_json::from_str(&argumentsJson).map_err(|e| e.to_string())?;
+        let result = operit_tools::tools::a2a::A2ARepository::A2ARepository::new(self.hostManager.clone())?.invoke(&id, &operation, arguments).await?;
+        serde_json::to_string(&result).map_err(|e| e.to_string())
+    }
+
     /// Creates a skill repository with this runtime's host and tool support.
     #[allow(non_snake_case)]
     pub fn skillRepository(&self) -> SkillRepository {
@@ -550,6 +617,32 @@ impl OperitApplication {
     #[allow(non_snake_case)]
     pub fn extensionCatalogRevisionFlow(&self) -> StateFlow<i64> {
         operit_store::ExtensionStore::catalogRevisionFlow()
+    }
+
+    /// Returns one normalized local catalog for the redesigned package manager.
+    #[allow(non_snake_case)]
+    #[operit_route_macros::operit_plugin_sdk_expose]
+    pub fn getExtensionCatalogSnapshot(
+        &self,
+    ) -> Result<ExtensionCatalogSnapshot, String> {
+        super::ExtensionCatalogSupport::snapshot(self)
+    }
+
+    /// Checks installed marketplace entries against their latest published versions.
+    #[allow(non_snake_case)]
+    pub fn checkExtensionCatalogUpdates(
+        &self,
+    ) -> Result<Vec<ExtensionCatalogUpdateCheck>, String> {
+        super::ExtensionCatalogSupport::check_updates(self)
+    }
+
+    /// Deletes one package-manager diagnostic after the redesigned card confirms it.
+    #[allow(non_snake_case)]
+    pub fn deleteExtensionCatalogDiagnostic(
+        &self,
+        diagnostic: ExtensionCatalogDiagnostic,
+    ) -> Result<bool, String> {
+        super::ExtensionCatalogSupport::delete_diagnostic(self, diagnostic)
     }
 
     /// Lists explicit installation scopes, including subpackages that inherit their container scope.
@@ -570,7 +663,7 @@ impl OperitApplication {
                 self.skillRepository().getAvailableSkillPackages();
                 None
             }
-            "mcp" => None,
+            "mcp" | "a2a" => None,
             _ => return Err(format!("Unknown extension kind: {kind}")),
         };
         let mut result = BTreeMap::new();
@@ -617,7 +710,7 @@ impl OperitApplication {
                 operit_store::ExtensionStore::ExtensionStore::default()
                     .moveScope(&kind, &id, &scope)
             }
-            "mcp" => operit_store::ExtensionStore::ExtensionStore::default()
+            "mcp" | "a2a" => operit_store::ExtensionStore::ExtensionStore::default()
                 .moveScope(&kind, &id, &scope),
             _ => Err(format!("Unknown extension kind: {kind}")),
         }

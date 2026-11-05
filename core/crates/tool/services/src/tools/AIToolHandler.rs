@@ -832,7 +832,9 @@ impl AIToolHandler {
         let context = self.getContext();
         for packageTool in executableTools {
             let toolName = format!("{}:{}", toolPackage.name, packageTool.name);
-            if isMcpPackage {
+            if crate::tools::a2a::A2ARepository::is_a2a_package(&toolPackage) {
+                self.registerAsyncTool(toolName, Box::new(crate::tools::a2a::A2AToolExecutor::A2AToolExecutor::new(context.clone())));
+            } else if isMcpPackage {
                 self.registerAsyncTool(
                     toolName,
                     Box::new(MCPToolExecutor::new(MCPManager::getInstance(
@@ -1224,6 +1226,17 @@ impl JsExecutionHost for AIToolHandler {
         let mut host = self.clone();
         host.invocationSnapshot = ToolInvocationContext::capture(self.clone()).snapshot();
         Arc::new(host)
+    }
+
+    /// Exposes only this invocation's captured identity; role interpretation belongs to the v1 adapter.
+    fn toolpkg_caller_context(&self) -> Option<Value> {
+        Some(
+            self.invocationSnapshot.turnSnapshot.as_ref().map(|context| json!({
+                "chatId": context.callerChatId,
+                "participantId": context.callerParticipantId,
+                "extensionOwner": context.extensionOwner,
+            })).unwrap_or_else(|| json!({})),
+        )
     }
 
     /// Authenticates the actual registered container before binding an immutable per-engine owner.
@@ -2562,6 +2575,26 @@ mod tests {
         assert_eq!(probe.calls.load(Ordering::SeqCst), 2);
         assert_eq!(probe.accessCalls.load(Ordering::SeqCst), 2);
         assert_eq!(approvals.load(Ordering::SeqCst), 1);
+    }
+
+    /// Neutral SDK identity survives native scheduling without exposing provider execution data.
+    #[tokio::test]
+    async fn sdk_caller_identity_uses_captured_native_turn() {
+        let fixture = PipelineFixture::new();
+        let turn = ToolRuntimeContext {
+            callerChatId: Some("summary-chat".into()), callerParticipantId: Some("opaque-participant".into()),
+            workspacePath: None, workspaceFolders: Vec::new(), toolExposureMode: ToolExposureMode::CLI,
+            extensionOwner: "independent.configuration.provider".into(),
+            executionData: serde_json::from_value(json!({"private":"provider-only"})).unwrap(),
+        };
+        let host = ToolExecutionManager::scopeToolRuntimeContext(turn, async {
+            fixture.handler.capture_tool_invocation_host()
+        }).await;
+        assert_eq!(host.toolpkg_caller_context(), Some(json!({
+            "chatId":"summary-chat", "participantId":"opaque-participant",
+            "extensionOwner":"independent.configuration.provider",
+        })));
+        assert_eq!(fixture.handler.capture_tool_invocation_host().toolpkg_caller_context(), Some(json!({})));
     }
 
     /// A captured AI turn must not promote direct JS requests into AI admission.
