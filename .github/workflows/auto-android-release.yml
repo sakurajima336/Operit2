@@ -464,6 +464,12 @@ jobs:
           } > "$props"
           echo "wrote $props"
 
+      - name: Sync plugin package assets
+        # operit-runtime's build.rs (since upstream b3011b7d) requires the
+        # generated plugin assets to exist before any cargo compilation;
+        # in local builds Gradle runs this sync, so CI must run it first too.
+        run: python3 plugins/tools/sync_plugin_packages.py --source runtime --no-hot-reload
+
       - name: Generate Dart proxy artifacts
         run: |
           cargo check --manifest-path core/crates/proxy/local/Cargo.toml --quiet
