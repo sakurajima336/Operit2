@@ -62,6 +62,34 @@ pub struct RuntimeBundledExternalSkillAsset {
     pub bytes: &'static [u8],
 }
 
+/// References a skill example file inside an already bundled runtime package.
+#[derive(Clone, Copy)]
+#[allow(non_snake_case)]
+pub struct RuntimeBundledExternalSkillPackageAsset {
+    pub skillName: &'static str,
+    pub path: &'static str,
+    pub archive: &'static [u8],
+    pub member: &'static str,
+}
+
+impl RuntimeBundledExternalSkillPackageAsset {
+    /// Reads one required example file without installing or enabling its owning plugin.
+    #[allow(non_snake_case)]
+    pub fn readBytes(&self) -> Result<Vec<u8>, String> {
+        use std::io::{Cursor, Read};
+        let mut archive = zip::ZipArchive::new(Cursor::new(self.archive))
+            .map_err(|error| format!("Invalid bundled skill package archive: {error}"))?;
+        let mut member = archive
+            .by_name(self.member)
+            .map_err(|error| format!("Missing bundled skill package member '{}': {error}", self.member))?;
+        let mut bytes = Vec::new();
+        member
+            .read_to_end(&mut bytes)
+            .map_err(|error| format!("Cannot read bundled skill package member '{}': {error}", self.member))?;
+        Ok(bytes)
+    }
+}
+
 /// Cached MCP tool metadata exposed by the runtime crate.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CachedMcpToolInfo {
@@ -167,6 +195,7 @@ pub struct RuntimeChatCallRequest {
     pub functionType: operit_model::FunctionType::FunctionType,
     pub turns: Vec<operit_model::PromptTurn::PromptTurn>,
     pub recordTokenUsage: bool,
+    /// Lets the model think at the level set on it; `false` asks it not to think.
     pub enableThinking: bool,
 }
 
@@ -534,6 +563,10 @@ pub trait ToolRuntimeSupport: Send + Sync {
     /// Returns bundled external skill assets owned by the runtime.
     #[allow(non_snake_case)]
     fn bundledExternalSkillAssets(&self) -> &'static [RuntimeBundledExternalSkillAsset];
+
+    /// Returns skill example references into the existing bundled plugin archives.
+    #[allow(non_snake_case)]
+    fn bundledExternalSkillPackageAssets(&self) -> &'static [RuntimeBundledExternalSkillPackageAsset];
 
     /// Returns whether a skill is visible to AI package activation.
     #[allow(non_snake_case)]
