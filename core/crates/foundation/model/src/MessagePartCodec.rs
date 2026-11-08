@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use operit_util::AppLogger::AppLogger;
 use operit_util::ChatMarkupRegex::{attr_value, tag_ranges, ChatMarkupRegex};
 
 use super::MessagePart::{MessagePart, MessagePartKind};
@@ -288,6 +289,32 @@ impl MessagePartCodec {
     }
 }
 
+/// Returns the source unchanged when it fits within twice the edge budget,
+/// otherwise its head and tail joined by a marker naming the elided character
+/// count. Slices only on char boundaries.
+fn cappedMarkupPreview(raw: &str, edgeChars: usize) -> String {
+    let totalChars = raw.chars().count();
+    if totalChars <= edgeChars * 2 {
+        return raw.to_string();
+    }
+    let headEnd = raw
+        .char_indices()
+        .nth(edgeChars)
+        .map(|(index, _)| index)
+        .unwrap_or(raw.len());
+    let tailStart = raw
+        .char_indices()
+        .nth(totalChars - edgeChars)
+        .map(|(index, _)| index)
+        .unwrap_or(0);
+    format!(
+        "{} [elided {} chars] {}",
+        &raw[..headEnd],
+        totalChars - edgeChars * 2,
+        &raw[tailStart..],
+    )
+}
+
 /// Incrementally converts an assistant response stream into canonical message parts.
 pub struct AssistantMarkupStreamState {
     source: String,
@@ -444,9 +471,11 @@ impl AssistantMarkupStreamState {
                     self.pending = self.pending[openEnd..].to_string();
                     continue;
                 }
-                return Err(format!(
+                let error = format!(
                     "assistant semantic tag cannot be self-closing: {tagName}"
-                ));
+                );
+                Self::captureParseFailure(&tagName, &openingTag, &error, isFinal);
+                return Err(error);
             }
             if normalizedTagName == "think" || normalizedTagName == "thinking" {
                 let sequence = self.parts.len() as i32;
@@ -501,10 +530,34 @@ impl AssistantMarkupStreamState {
                 "status" => MessagePartCodec::parseStatus(partId, sequence, &raw),
                 _ => unreachable!("semantic tag classification must match its parser"),
             };
-            let part = parsedPart?;
+            let part = match parsedPart {
+                Ok(part) => part,
+                Err(error) => {
+                    Self::captureParseFailure(&normalizedTagName, &raw, &error, isFinal);
+                    return Err(error);
+                }
+            };
             self.parts.push(part);
             self.pending = self.pending[rawEnd..].to_string();
         }
+    }
+
+    /// Records a semantic segment that failed to parse so its raw source is
+    /// available in diagnostics exports. Observation only: parsing behavior is
+    /// unchanged, the caller still receives the original error, and this
+    /// helper only formats a string and writes a log record.
+    fn captureParseFailure(tagName: &str, raw: &str, error: &str, isFinal: bool) {
+        AppLogger::e(
+            "MarkupParseCapture",
+            &format!(
+                "semantic segment failed to parse tag={} final={} error={} rawChars={} raw={}",
+                tagName,
+                isFinal,
+                error,
+                raw.chars().count(),
+                cappedMarkupPreview(raw, 5000),
+            ),
+        );
     }
 
     /// Appends Markdown source to the active Markdown part or creates the next one.
@@ -699,6 +752,37 @@ mod tests {
             let parts = MessagePartCodec::parseAssistantMarkupForImport(source);
             assert_eq!(MessagePartCodec::assistantMarkup(&parts), source);
         }
+    }
+
+    /// A tool result without its content tag fails the strict parser with the
+    /// original error; the failure capture must not change that behavior.
+    #[test]
+    fn strict_parse_still_rejects_tool_result_without_content_tag() {
+        let result = MessagePartCodec::parseAssistantMarkup(
+            "text<tool_result name=\"read_file\">missing payload</tool_result>end",
+        );
+        assert_eq!(
+            result.err().as_deref(),
+            Some("tool result is missing its content tag"),
+        );
+    }
+
+    /// Short sources pass through the diagnostics preview unchanged; long
+    /// sources keep their head and tail with the elided count in between,
+    /// without splitting a multibyte character.
+    #[test]
+    fn capped_markup_preview_keeps_edges() {
+        assert_eq!(super::cappedMarkupPreview("short", 5000), "short");
+        let long = format!("{}TAIL", "a".repeat(25000));
+        let preview = super::cappedMarkupPreview(&long, 5000);
+        assert!(preview.starts_with(&"a".repeat(5000)));
+        assert!(preview.ends_with("TAIL"));
+        assert!(preview.contains("[elided 15004 chars]"));
+        let wide = "文".repeat(12000);
+        let preview = super::cappedMarkupPreview(&wide, 5000);
+        assert!(preview.starts_with(&"文".repeat(5000)));
+        assert!(preview.ends_with(&"文".repeat(5000)));
+        assert!(preview.contains("[elided 2000 chars]"));
     }
 
     /// Valid historical markup retains the normal canonical representation.
