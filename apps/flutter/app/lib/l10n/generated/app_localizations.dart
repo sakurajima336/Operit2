@@ -140,6 +140,18 @@ abstract class AppLocalizations {
   /// **'Fullscreen input'**
   String get fullscreenInput;
 
+  /// No description provided for @noticeExpand.
+  ///
+  /// In en, this message translates to:
+  /// **'Expand'**
+  String get noticeExpand;
+
+  /// No description provided for @noticeCollapse.
+  ///
+  /// In en, this message translates to:
+  /// **'Collapse'**
+  String get noticeCollapse;
+
   /// No description provided for @expandInput.
   ///
   /// In en, this message translates to:
@@ -409,6 +421,48 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Generating summary...'**
   String get summaryGenerating;
+
+  /// No description provided for @summaryStageCore.
+  ///
+  /// In en, this message translates to:
+  /// **'Summarizing the core task...'**
+  String get summaryStageCore;
+
+  /// No description provided for @summaryStageConstraints.
+  ///
+  /// In en, this message translates to:
+  /// **'Summarizing user requests and constraints...'**
+  String get summaryStageConstraints;
+
+  /// No description provided for @summaryStageFiles.
+  ///
+  /// In en, this message translates to:
+  /// **'Summarizing key files and code...'**
+  String get summaryStageFiles;
+
+  /// No description provided for @summaryStageErrors.
+  ///
+  /// In en, this message translates to:
+  /// **'Summarizing errors and fixes...'**
+  String get summaryStageErrors;
+
+  /// No description provided for @summaryStageInteraction.
+  ///
+  /// In en, this message translates to:
+  /// **'Summarizing interaction and context...'**
+  String get summaryStageInteraction;
+
+  /// No description provided for @summaryStageNext.
+  ///
+  /// In en, this message translates to:
+  /// **'Summarizing next steps...'**
+  String get summaryStageNext;
+
+  /// No description provided for @summaryStageFormatting.
+  ///
+  /// In en, this message translates to:
+  /// **'Formatting the summary...'**
+  String get summaryStageFormatting;
 
   /// No description provided for @chatCompressingHistory.
   ///
@@ -7841,13 +7895,13 @@ abstract class AppLocalizations {
   /// No description provided for @settingsAppearanceThemeConfigCustomHint.
   ///
   /// In en, this message translates to:
-  /// **'Click + to create and manage independent theme configurations.'**
+  /// **'Create a theme to save your appearance. Tap a card to switch; choose Edit to customize.'**
   String get settingsAppearanceThemeConfigCustomHint;
 
   /// No description provided for @settingsAppearanceThemeConfigEditingHint.
   ///
   /// In en, this message translates to:
-  /// **'Appearance changes are saved to the selected theme configuration.'**
+  /// **'Tap a card to switch themes. Choose Edit to customize; changes are saved automatically.'**
   String get settingsAppearanceThemeConfigEditingHint;
 
   /// No description provided for @settingsAppearanceThemeConfigFailed.
@@ -8629,6 +8683,90 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Savings unknown for {count} requests'**
   String settingsDataTimelineUnknownSavings(int count);
+
+  /// No description provided for @contextStatsSummaryLoadFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Unable to load context statistics'**
+  String get contextStatsSummaryLoadFailed;
+
+  /// No description provided for @contextStatsDevicesLoadFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Unable to load device information'**
+  String get contextStatsDevicesLoadFailed;
+
+  /// No description provided for @settingsAppearanceThemeLibrary.
+  ///
+  /// In en, this message translates to:
+  /// **'Your themes'**
+  String get settingsAppearanceThemeLibrary;
+
+  /// No description provided for @settingsAppearanceThemeLibraryHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Choose a look. Make it yours.'**
+  String get settingsAppearanceThemeLibraryHint;
+
+  /// No description provided for @settingsAppearanceThemeActive.
+  ///
+  /// In en, this message translates to:
+  /// **'In use'**
+  String get settingsAppearanceThemeActive;
+
+  /// No description provided for @settingsAppearanceThemeApply.
+  ///
+  /// In en, this message translates to:
+  /// **'Use this theme'**
+  String get settingsAppearanceThemeApply;
+
+  /// No description provided for @settingsAppearanceThemeMore.
+  ///
+  /// In en, this message translates to:
+  /// **'More theme actions'**
+  String get settingsAppearanceThemeMore;
+
+  /// No description provided for @settingsAppearanceThemeDuplicate.
+  ///
+  /// In en, this message translates to:
+  /// **'Create a copy'**
+  String get settingsAppearanceThemeDuplicate;
+
+  /// No description provided for @settingsAppearanceThemeUnboundHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Keep the current look and edit without binding a saved theme.'**
+  String get settingsAppearanceThemeUnboundHint;
+
+  /// No description provided for @settingsAppearanceThemeDeleteTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete theme'**
+  String get settingsAppearanceThemeDeleteTitle;
+
+  /// No description provided for @settingsAppearanceThemeDeleteConfirm.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete “{name}”? This cannot be undone.'**
+  String settingsAppearanceThemeDeleteConfirm(String name);
+
+  /// No description provided for @settingsAppearancePreviewCollapse.
+  ///
+  /// In en, this message translates to:
+  /// **'Collapse'**
+  String get settingsAppearancePreviewCollapse;
+
+  /// No description provided for @settingsAppearancePreviewExpand.
+  ///
+  /// In en, this message translates to:
+  /// **'Expand'**
+  String get settingsAppearancePreviewExpand;
+
+  /// No description provided for @settingsAppearanceThemeNew.
+  ///
+  /// In en, this message translates to:
+  /// **'New theme'**
+  String get settingsAppearanceThemeNew;
 }
 
 class _AppLocalizationsDelegate

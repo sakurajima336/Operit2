@@ -7,6 +7,8 @@
   "askOperitHint": "Ask Operit",
   "aiChat": "AI Chat",
   "fullscreenInput": "Fullscreen input",
+  "noticeExpand": "Expand",
+  "noticeCollapse": "Collapse",
   "expandInput": "Expand input",
   "collapseInput": "Collapse input",
   "settings": "Settings",
@@ -59,6 +61,13 @@
   "receivingToolResultAiResponse": "Receiving AI response after tool execution...",
   "summarizingMemories": "Summarizing memories...",
   "summaryGenerating": "Generating summary...",
+  "summaryStageCore": "Summarizing the core task...",
+  "summaryStageConstraints": "Summarizing user requests and constraints...",
+  "summaryStageFiles": "Summarizing key files and code...",
+  "summaryStageErrors": "Summarizing errors and fixes...",
+  "summaryStageInteraction": "Summarizing interaction and context...",
+  "summaryStageNext": "Summarizing next steps...",
+  "summaryStageFormatting": "Formatting the summary...",
   "chatCompressingHistory": "Compressing history records...",
   "executingPlan": "Executing plan...",
   "executingTool": "Executing tool: {toolName}",
@@ -2347,8 +2356,8 @@
   "settingsAppearanceThemeConfigDelete": "Delete an inactive theme configuration",
   "settingsAppearanceThemeConfigName": "Theme name",
   "settingsAppearanceThemeConfigNameRequired": "Enter a theme name",
-  "settingsAppearanceThemeConfigCustomHint": "Click + to create and manage independent theme configurations.",
-  "settingsAppearanceThemeConfigEditingHint": "Appearance changes are saved to the selected theme configuration.",
+  "settingsAppearanceThemeConfigCustomHint": "Create a theme to save your appearance. Tap a card to switch; choose Edit to customize.",
+  "settingsAppearanceThemeConfigEditingHint": "Tap a card to switch themes. Choose Edit to customize; changes are saved automatically.",
   "settingsAppearanceThemeConfigFailed": "Theme operation failed: {detail}",
   "@settingsAppearanceThemeConfigFailed": {
     "placeholders": {
@@ -2590,5 +2599,20 @@
         "type": "int"
       }
     }
-  }
+  },
+  "contextStatsSummaryLoadFailed": "Unable to load context statistics",
+  "contextStatsDevicesLoadFailed": "Unable to load device information",
+  "settingsAppearanceThemeLibrary": "Your themes",
+  "settingsAppearanceThemeLibraryHint": "Choose a look. Make it yours.",
+  "settingsAppearanceThemeActive": "In use",
+  "settingsAppearanceThemeApply": "Use this theme",
+  "settingsAppearanceThemeMore": "More theme actions",
+  "settingsAppearanceThemeDuplicate": "Create a copy",
+  "settingsAppearanceThemeUnboundHint": "Keep the current look and edit without binding a saved theme.",
+  "settingsAppearanceThemeDeleteTitle": "Delete theme",
+  "settingsAppearanceThemeDeleteConfirm": "Delete “{name}”? This cannot be undone.",
+  "settingsAppearancePreviewCollapse": "Collapse",
+  "settingsAppearancePreviewExpand": "Expand",
+  "@settingsAppearanceThemeDeleteConfirm": {"placeholders": {"name": {"type": "String"}}},
+  "settingsAppearanceThemeNew": "New theme"
 }

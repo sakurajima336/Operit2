@@ -31,6 +31,12 @@ class AppLocalizationsEn extends AppLocalizations {
   String get fullscreenInput => 'Fullscreen input';
 
   @override
+  String get noticeExpand => 'Expand';
+
+  @override
+  String get noticeCollapse => 'Collapse';
+
+  @override
   String get expandInput => 'Expand input';
 
   @override
@@ -173,6 +179,29 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get summaryGenerating => 'Generating summary...';
+
+  @override
+  String get summaryStageCore => 'Summarizing the core task...';
+
+  @override
+  String get summaryStageConstraints =>
+      'Summarizing user requests and constraints...';
+
+  @override
+  String get summaryStageFiles => 'Summarizing key files and code...';
+
+  @override
+  String get summaryStageErrors => 'Summarizing errors and fixes...';
+
+  @override
+  String get summaryStageInteraction =>
+      'Summarizing interaction and context...';
+
+  @override
+  String get summaryStageNext => 'Summarizing next steps...';
+
+  @override
+  String get summaryStageFormatting => 'Formatting the summary...';
 
   @override
   String get chatCompressingHistory => 'Compressing history records...';
@@ -4421,11 +4450,11 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get settingsAppearanceThemeConfigCustomHint =>
-      'Click + to create and manage independent theme configurations.';
+      'Create a theme to save your appearance. Tap a card to switch; choose Edit to customize.';
 
   @override
   String get settingsAppearanceThemeConfigEditingHint =>
-      'Appearance changes are saved to the selected theme configuration.';
+      'Tap a card to switch themes. Choose Edit to customize; changes are saved automatically.';
 
   @override
   String settingsAppearanceThemeConfigFailed(String detail) {
@@ -4902,4 +4931,52 @@ class AppLocalizationsEn extends AppLocalizations {
   String settingsDataTimelineUnknownSavings(int count) {
     return 'Savings unknown for $count requests';
   }
+
+  @override
+  String get contextStatsSummaryLoadFailed =>
+      'Unable to load context statistics';
+
+  @override
+  String get contextStatsDevicesLoadFailed =>
+      'Unable to load device information';
+
+  @override
+  String get settingsAppearanceThemeLibrary => 'Your themes';
+
+  @override
+  String get settingsAppearanceThemeLibraryHint =>
+      'Choose a look. Make it yours.';
+
+  @override
+  String get settingsAppearanceThemeActive => 'In use';
+
+  @override
+  String get settingsAppearanceThemeApply => 'Use this theme';
+
+  @override
+  String get settingsAppearanceThemeMore => 'More theme actions';
+
+  @override
+  String get settingsAppearanceThemeDuplicate => 'Create a copy';
+
+  @override
+  String get settingsAppearanceThemeUnboundHint =>
+      'Keep the current look and edit without binding a saved theme.';
+
+  @override
+  String get settingsAppearanceThemeDeleteTitle => 'Delete theme';
+
+  @override
+  String settingsAppearanceThemeDeleteConfirm(String name) {
+    return 'Delete “$name”? This cannot be undone.';
+  }
+
+  @override
+  String get settingsAppearancePreviewCollapse => 'Collapse';
+
+  @override
+  String get settingsAppearancePreviewExpand => 'Expand';
+
+  @override
+  String get settingsAppearanceThemeNew => 'New theme';
 }
