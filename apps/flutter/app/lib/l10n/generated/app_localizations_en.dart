@@ -1923,12 +1923,6 @@ class AppLocalizationsEn extends AppLocalizations {
   String get settingsModelSummaryThreshold => 'Summarize at';
 
   @override
-  String get settingsModelSummaryByMessageCount => 'Summarize by message count';
-
-  @override
-  String get settingsModelSummaryMessageCount => 'Summary message threshold';
-
-  @override
   String get settingsModelCustomHeaders => 'Custom headers';
 
   @override
@@ -2119,6 +2113,15 @@ class AppLocalizationsEn extends AppLocalizations {
   }
 
   @override
+  String settingsModelTestSummaryWithRestricted(
+    int passed,
+    int failed,
+    int restricted,
+  ) {
+    return '$passed passed, $failed failed, $restricted restricted';
+  }
+
+  @override
   String settingsModelTestAllPassed(int count) {
     return 'All $count passed';
   }
@@ -2176,6 +2179,17 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get settingsModelConnectionTestFailed => 'Some checks failed';
+
+  @override
+  String get settingsModelConnectionTestRestricted => 'Test restricted';
+
+  @override
+  String get settingsModelTestCreditRestricted =>
+      'Credit or output budget limit';
+
+  @override
+  String get settingsModelTestRateRestricted =>
+      'Upstream rate limit or cooldown';
 
   @override
   String get settingsModelCapabilitiesApplied =>
@@ -4454,7 +4468,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get settingsAppearanceThemeConfigEditingHint =>
-      'Tap a card to switch themes. Choose Edit to customize; changes are saved automatically.';
+      'Tap a card to switch themes. Mode shortcuts change only the current theme. Edits save automatically.';
 
   @override
   String settingsAppearanceThemeConfigFailed(String detail) {

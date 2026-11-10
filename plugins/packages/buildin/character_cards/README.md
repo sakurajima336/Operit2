@@ -258,18 +258,35 @@ resolves the explicit participant's actual memory binding and reuses the
 plugin's existing query implementation. Results contain complete typed
 matches and document chunks; snapshots remain in the provider's main runtime.
 A `null` snapshot ID requests a fresh query. An explicit snapshot ID retains
-owner-scoped deduplication across calls.
+owner-scoped deduplication across calls. Calls sharing an owner and snapshot
+serialize exclusion reads, page retrieval and successful result registration,
+so concurrent callers receive disjoint pages without losing available matches.
+A failed query releases the snapshot and does not consume its memory IDs;
+other owners and snapshots remain independent. Like Operit1, snapshots are
+in memory only and each owner retains at most 32, evicting the least recently
+used. A runtime restart or snapshot eviction can allow previously returned
+memories to be recalled again in a later user turn.
 
 ## Built-in memory recall
 
-The plugin owns per-turn memory recall through its prompt finalize hook
-(`src/memory-recall.ts`). On every main character or group turn it strips host
-markup from the authored input, queries the speaking participant's primary
+The plugin owns per-turn memory recall through its `before_process` input hook
+(`src/memory-recall.ts`). When preprocessing input with an explicit character
+participant, it strips host markup from the authored input and queries that
+participant's primary
 memory owner with a per-chat snapshot for owner-scoped deduplication, and
-appends the configured number of matches as a transient `<memory_context>`
-block to the final model request. Injections never persist into chat history,
-an empty result injects nothing, and provider failures fail closed without
-blocking the send.
+appends the configured number of matches as an inline `<attachment>` with
+`id="character_memory_recall"`, `filename="相关记忆"`, and `type="text/plain"`
+before the host commits the user message. Its XML-escaped text is recognized
+by the Dart UI as supplementary information. The block persists with that user message
+and is reused in later history and regeneration requests, preserving the
+previous prompt prefix for model caching. Input that already contains the
+block skips retrieval, including after a plugin restart. Legacy
+`<memory_context source="character-memory">` blocks also skip retrieval to
+preserve stored prompts. An empty result
+injects nothing. Retrieval exceptions are logged and skip injection; host hook
+timeouts still follow the shared pre-hook timeout policy. Group `record_only`
+submissions and their empty-input continuations bypass this input hook; the
+previous finalize hook also skipped these empty-input continuation requests.
 
 The memory menu's expanded section controls the persisted `memoryRecall` state
 field: the 自动检索注入记忆 switch, a numeric input for the per-turn injection

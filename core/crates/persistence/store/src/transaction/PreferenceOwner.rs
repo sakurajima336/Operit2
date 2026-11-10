@@ -64,7 +64,19 @@ fn state(store: &PreferencesDataStore) -> Result<Option<OwnerState>, Error> {
     Ok(owner)
 }
 
-fn replay_start(store: &PreferencesDataStore, history: &[SyncOperation], format: u32) -> Result<Snapshot,Error> {
+fn replay_start(store: &PreferencesDataStore, history: &[SyncOperation], format: u32, local: &Preferences) -> Result<Snapshot,Error> {
+    // Schema-only checkpoints carry unversioned engine metadata. Resolve it
+    // before joining checkpoints, including contracts in covered originals.
+    // Normalize replay views only; immutable originals retain their payloads.
+    let mut contract = crate::PluginPreferenceSchema::contract(history.iter())?;
+    if let Some(value) = local.get(&stringPreferencesKey(crate::PluginPreferenceSchema::KEY)) {
+        let local = serde_json::from_value(value.clone())?;
+        contract = Some(match contract {
+            Some(incoming) => crate::PluginPreferenceSchema::combine(&local,&incoming)?,
+            None => local,
+        });
+    }
+    let contract = contract.as_ref().map(serde_json::to_value).transpose()?;
     let initializations = history.iter().filter_map(|operation|
         super::compaction::Initialization::decode(operation).transpose().map(|result| result.map(|initialization| (operation, initialization))))
         .collect::<Result<Vec<_>, _>>().map_err(Error::Message)?;
@@ -78,6 +90,9 @@ fn replay_start(store: &PreferencesDataStore, history: &[SyncOperation], format:
         current.data.relocate(&store.storagePath).map_err(Error::Message)?;
         let source = current.data.clone();
         let mut values = preferences(&current);
+        if let Some(contract) = &contract {
+            values.set(&stringPreferencesKey(crate::PluginPreferenceSchema::KEY), contract.clone());
+        }
         store.migratePreferencesToCurrentSchema(&mut values)?;
         current.data = data(store,&values)?;
         if source.owner.format != current.data.owner.format {
@@ -86,11 +101,37 @@ fn replay_start(store: &PreferencesDataStore, history: &[SyncOperation], format:
         if index == 0 { snapshot.data = current.data; }
         else { snapshot.data.merge(&current.data).map_err(Error::Message)?; }
     }
+    if let Some(contract) = contract {
+        snapshot.data.values.insert(crate::PluginPreferenceSchema::KEY.into(), contract);
+    }
     Ok(snapshot)
 }
 
 fn initialization(store: &PreferencesDataStore, snapshot: &Snapshot) -> Result<SyncOperation,Error> {
     super::compaction::Initialization::from_snapshot(snapshot).operation("preferences",store.encryption.is_some()).map_err(Error::Message)
+}
+
+/// Record only known-safe local effects. Replay can seed this same index from
+/// the originals it already loaded; ordinary commits never load old payloads.
+fn compact_local(
+    tx: &mut dyn operit_host_api::RuntimeSqliteTransaction,
+    path: &str, format: u32, node: &str, originals: &[SyncOperation],
+) -> Result<(), crate::SyncOperationStore::SyncOperationStoreError> {
+    if tx.query("SELECT 1 FROM preference_compaction_policy WHERE path=?1 AND format=?2 AND safe=1",
+        vec![super::text(path), operit_host_api::SqliteValue::Integer(format.into())])?.is_empty() { return Ok(()); }
+    let local_origin = format!("{node}:preferences");
+    for original in originals.iter().filter(|op| op.originDeviceId == local_origin
+        && op.payload["contractVersion"] == 1 && op.operation != "initialize"
+        && !crate::PreferenceMerge::isMergeMetadata(op)) {
+        let transaction = PreferencesSyncedEntry::fromOperation(original).and_then(|entry| entry.transaction())
+            .map_err(|error| crate::SyncOperationStore::SyncOperationStoreError::Message(error.to_string()))?;
+        let super::Target::Data(owner) = &transaction.target else { continue; };
+        if owner.path != path || owner.format != format || transaction.edits.iter()
+            .any(|edit| crate::PluginPreferenceSchema::reserved(edit.key())) { continue; }
+        let retired = super::compaction::record_preference(tx, original, &transaction)?;
+        Journal::retire_ids(tx, retired)?;
+    }
+    Ok(())
 }
 
 /// Complete a file/SQL handoff before reading its replay state or accepting another edit.
@@ -146,6 +187,7 @@ pub(crate) fn recover(store: &PreferencesDataStore, values: &mut Preferences) ->
                 Journal::retire_covered(tx,&paths,&sealed)?;
             }
             Journal::retire_ids(tx, commit.retired.iter().cloned())?;
+            compact_local(tx, &store.storagePath, owner.format_progress, &current.node, &originals)?;
             tx.execute(
                 "INSERT OR IGNORE INTO transaction_commits(id) VALUES(?1)",
                 vec![super::text(&commit.id)],
@@ -210,7 +252,7 @@ fn initialize(store: &PreferencesDataStore, values: &mut Preferences) -> Result<
     if let Some(mut existing) = state(store)? {
         if existing.current.data.owner.format != PreferencesDataStore::readSchemaVersion(values)? {
             let history = journal(store)?.archivedPreferenceHistory(&store.storagePath)?;
-            let source = replay_start(store,&history,existing.current.data.owner.format)?.data;
+            let source = replay_start(store,&history,existing.current.data.owner.format,values)?.data;
             let mut converted = preferences(&existing.current);
             store.migratePreferencesToCurrentSchema(&mut converted)?;
             existing.current.data = data(store,&converted)?;
@@ -280,12 +322,12 @@ fn initialize(store: &PreferencesDataStore, values: &mut Preferences) -> Result<
 }
 
 /// Publishes a portable format contract as migrated state, preserving business order and coverage.
-pub(crate) fn declare_format(store: &PreferencesDataStore, key: &str, value: serde_json::Value) -> Result<(), Error> {
+pub(crate) fn declare_format(store: &PreferencesDataStore, key: &str, mut value: serde_json::Value) -> Result<(), Error> {
     let _lock = store.lockTransaction();
     store.loadUnlocked()?;
     let mut values = store.loadedPreferences().expect("loaded file");
     if let Some(existing) = values.get(&stringPreferencesKey(key)) {
-        crate::PluginPreferenceSchema::combine(&serde_json::from_value(existing.clone())?,&serde_json::from_value(value.clone())?)?;
+        value = serde_json::to_value(crate::PluginPreferenceSchema::combine(&serde_json::from_value(existing.clone())?,&serde_json::from_value(value.clone())?)?)?;
     }
     let migrated = store.migratePreferencesToCurrentSchema(&mut values)?;
     let mut current = initialize(store,&mut values)?.current;
@@ -409,14 +451,6 @@ pub(crate) fn commit_local(
     let origin = format!("{}:preferences", journal(store)?.localDeviceId()?);
     let original = journal(store)?.withJournal(|j| j.reserve(&origin, mutation))?;
     let entry = PreferencesSyncedEntry::fromOperation(&original)?;
-    let retired = {
-        let mut history = journal(store)?.preferenceCompactionHistory(&store.storagePath, format)?;
-        history.push(original.clone());
-        let transactions = history.iter().filter(|operation| !crate::PreferenceMerge::isMergeMetadata(operation)
-            && !operation.originDeviceId.starts_with("~import:"))
-            .map(|operation| PreferencesSyncedEntry::fromOperation(operation)?.transaction()).collect::<Result<Vec<_>, _>>()?;
-        super::compaction::superseded(&transactions).map_err(Error::Message)?
-    };
     let mut current = owner.current;
     current
         .data
@@ -425,7 +459,7 @@ pub(crate) fn commit_local(
     current.data.values = data(store, values)?.values;
     current.covered.insert(original.opId.clone());
     current.generation += 1;
-    save_file(store, values, current, vec![original], vec![], false, None, retired)
+    save_file(store, values, current, vec![original], vec![], false, None, BTreeSet::new())
 }
 
 pub fn snapshot(store: &PreferencesDataStore) -> Result<Snapshot, Error> {
@@ -534,7 +568,7 @@ where
         Revision::fromOperation,
     )
     .map_err(Error::Message)?;
-    let start = replay_start(store,&history,owner.current.data.owner.format)?;
+    let start = replay_start(store,&history,owner.current.data.owner.format,&values)?;
     values = preferences(&start);
     if start.covered.iter().all(|id| !id.starts_with("~init:") || owner.current.covered.contains(id)) {
         values.setMergeAliases(owner.current.data.aliases.clone());
@@ -561,12 +595,20 @@ where
     current.covered.extend(history_initialization_ids(originals));
     current.covered.extend(uncovered.iter().map(|op| op.opId.clone()));
     if current.data == owner.current.data && current.covered == owner.current.covered {
-        journal(store)?.withJournal(|j|j.transaction(|tx|Journal::retire_ids(tx, retired.iter().cloned())))?;
+        journal(store)?.withJournal(|j|j.transaction(|tx| {
+            Journal::retire_ids(tx, retired.iter().cloned())?;
+            compact_local(tx, &store.storagePath, current.data.owner.format, &current.node, &uncovered)
+        }))?;
         journal(store)?.completeOperations(originals)?;
         return Ok(aliases);
     }
     save_file(store, &mut values, current, originals.to_vec(),
         originals.iter().map(|op| op.opId.clone()).collect(), false, None, retired)?;
+    // Validation already materialized this batch. Seed surviving local effects
+    // here without adding any history query to the ordinary commit path.
+    journal(store)?.withJournal(|j|j.transaction(|tx|
+        compact_local(tx, &store.storagePath, values.view.as_ref().expect("replayed view").owner.format,
+            &owner.current.node, &uncovered)))?;
     store.notifyChanged();
     Ok(aliases)
 }

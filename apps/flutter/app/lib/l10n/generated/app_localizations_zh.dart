@@ -1851,12 +1851,6 @@ class AppLocalizationsZh extends AppLocalizations {
   String get settingsModelSummaryThreshold => '总结阈值';
 
   @override
-  String get settingsModelSummaryByMessageCount => '按消息数总结';
-
-  @override
-  String get settingsModelSummaryMessageCount => '总结消息数阈值';
-
-  @override
   String get settingsModelCustomHeaders => '自定义 Headers';
 
   @override
@@ -2037,6 +2031,15 @@ class AppLocalizationsZh extends AppLocalizations {
   }
 
   @override
+  String settingsModelTestSummaryWithRestricted(
+    int passed,
+    int failed,
+    int restricted,
+  ) {
+    return '$passed 个通过，$failed 个失败，$restricted 个受限';
+  }
+
+  @override
   String settingsModelTestAllPassed(int count) {
     return '$count 个全部通过';
   }
@@ -2092,6 +2095,15 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get settingsModelConnectionTestFailed => '存在失败项';
+
+  @override
+  String get settingsModelConnectionTestRestricted => '检测受限';
+
+  @override
+  String get settingsModelTestCreditRestricted => '账户额度或输出预算受限';
+
+  @override
+  String get settingsModelTestRateRestricted => '上游限流或冷却中';
 
   @override
   String get settingsModelCapabilitiesApplied => '已按测试结果更新模型能力开关。';
@@ -4276,7 +4288,7 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get settingsAppearanceThemeConfigEditingHint =>
-      '点击卡片即可切换主题；进入编辑后，修改会自动保存。';
+      '点击卡片切换主题；上方明暗切换仅修改当前主题。编辑后自动保存。';
 
   @override
   String settingsAppearanceThemeConfigFailed(String detail) {
