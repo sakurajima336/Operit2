@@ -768,38 +768,12 @@ impl MessageCoordinationDelegate {
                 return Err(error.to_string());
             }
         };
-        self.tokenStatisticsDelegate
-            .updateCumulativeStatistics(Some(chatId.clone()), Some(enhancedAiService));
-        let (inputTokens, outputTokens) = self
-            .tokenStatisticsDelegate
-            .getCumulativeTokenCounts(Some(chatId.clone()));
-        let windowSize = result.nextWindowSize.unwrap_or_else(|| {
-            self.tokenStatisticsDelegate
-                .getLastCurrentWindowSize(Some(chatId.clone()))
-        });
-        self.tokenStatisticsDelegate.setTokenCounts(
-            Some(chatId.clone()),
-            inputTokens,
-            outputTokens,
-            windowSize,
-        );
-        if turnOptions.persistTurn {
-            self.chatHistoryDelegate.saveCurrentChat(
-                inputTokens,
-                outputTokens,
-                windowSize,
-                Some(chatId.clone()),
-            );
-        }
+        // Usage is committed with the terminal assistant segment. Dispatch returns before
+        // streaming settles and must not overwrite persisted totals from a previous turn.
         ChainLogger::verbose_with_level(
             SEND_CHAIN,
             "send.dispatch.accepted",
-            &[
-                ("chatId", chatId.clone()),
-                ("inputTokens", inputTokens.to_string()),
-                ("outputTokens", outputTokens.to_string()),
-                ("windowSize", windowSize.to_string()),
-            ],
+            &[("chatId", chatId.clone())],
             operit_util::AppLogger::VERBOSE_LEVEL_2,
         );
         Ok(result.completion)
@@ -846,13 +820,10 @@ impl MessageCoordinationDelegate {
                 .ok_or_else(|| format!("Chat does not exist: {chatId}"))?;
             if !messages.is_empty()
                 && AIMessageManager::shouldGenerateSummary(
-                    messages.clone(),
                     chat.currentWindowSize,
                     maxTokens,
                     policy.tokenUsageThreshold,
                     true,
-                    settings.summary.enableSummaryByMessageCount,
-                    settings.summary.summaryMessageCountThreshold,
                 )
             {
                 let _summaryCompletion = self.launchSummary(
@@ -894,9 +865,8 @@ impl MessageCoordinationDelegate {
                 &participant.modelBinding.providerId, &participant.modelBinding.modelId,
             ).map_err(|error| error.to_string())?;
             if AIMessageManager::shouldGenerateSummary(
-                messages.clone(), window, settings.context.maxContextTokens(),
+                window, settings.context.maxContextTokens(),
                 settings.summary.tokenThresholdRatio(), settings.summary.enableSummary,
-                settings.summary.enableSummaryByMessageCount, settings.summary.summaryMessageCountThreshold,
             ) {
                 return self.launchSummary(service, messages, ConversationSummaryRequest {
                     chatId, participantId: Some(configuration.profile.id.clone()),
@@ -1266,13 +1236,10 @@ mod summary_send_policy_tests {
                 let policy = SummarySendPolicy::new(&settings, &options, false, background);
                 assert!(!policy.checkBeforeSend);
                 assert!(AIMessageManager::shouldGenerateSummary(
-                    Vec::new(),
                     i64::from(maxTokens) * 98 / 100,
                     maxTokens,
                     policy.tokenUsageThreshold,
                     true,
-                    false,
-                    16,
                 ));
             }
         }
@@ -1313,13 +1280,10 @@ mod summary_send_policy_tests {
             let policy = SummarySendPolicy::new(&settings, &options, true, false);
             assert!(!policy.checkBeforeSend);
             assert!(!AIMessageManager::shouldGenerateSummary(
-                Vec::new(),
                 196_000,
                 200_000,
                 policy.tokenUsageThreshold,
                 true,
-                false,
-                16,
             ));
         }
     }

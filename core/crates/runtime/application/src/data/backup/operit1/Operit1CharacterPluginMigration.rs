@@ -43,7 +43,7 @@ impl Operit1SnapshotImportManager {
             }
         }
         if writer.get("imports", &source)?.is_some() {
-            writer.migrateThemes(&source, &theme_preferences, &theme_targets, false)?;
+            writer.migrateThemes(&source, &theme_preferences, &theme_targets)?;
             return Ok((0, 0));
         }
         let api_preferences = parsed
@@ -123,14 +123,12 @@ impl Operit1SnapshotImportManager {
                     if collection != "memories" {
                         continue;
                     }
-                    for field in ["documentPath", "chunkIndexFilePath"] {
-                        if let Some(path) = envelope["record"][field].as_str() {
-                            if path.starts_with("runtime/") || path.starts_with("workspaces/") {
-                                self.storageHost
-                                    .readBytes(path)
-                                    .map_err(|error| error.to_string())?;
-                                envelope["record"][field] = serde_json::json!(crate::data::backup::CharacterPluginMigration::publicResourcePath(path)?);
-                            }
+                    if let Some(path) = envelope["record"]["documentPath"].as_str() {
+                        if path.starts_with("runtime/") || path.starts_with("workspaces/") {
+                            self.storageHost
+                                .readBytes(path)
+                                .map_err(|error| error.to_string())?;
+                            envelope["record"]["documentPath"] = serde_json::json!(crate::data::backup::CharacterPluginMigration::publicResourcePath(path)?);
                         }
                     }
                 }
@@ -174,7 +172,7 @@ impl Operit1SnapshotImportManager {
             }
         });
         writer.import(&source, data)?;
-        writer.migrateThemes(&source, &theme_preferences, &theme_targets, false)?;
+        writer.migrateThemes(&source, &theme_preferences, &theme_targets)?;
         Ok((memory_count, link_count))
     }
 }
@@ -217,7 +215,75 @@ fn resolveOperit1ArchiveBindings(
                 return Err("Operit1 archive already has a character namespace".into());
             }
         }
+        for message in &mut chat.messages {
+            if message.baseMessage.sender != "ai" {
+                continue;
+            }
+            adoptOperit1MessageIdentity(
+                &mut message.baseMessage.pluginExtensions,
+                &message.baseMessage.roleName,
+                &cards,
+            )?;
+            for variant in &mut message.variants {
+                adoptOperit1MessageIdentity(
+                    &mut variant.pluginExtensions,
+                    &variant.roleName,
+                    &cards,
+                )?;
+            }
+        }
     }
+    Ok(())
+}
+
+/// Publishes only bindings whose chats completed this explicit snapshot import.
+fn publishOperit1ArchiveBindings(
+    chatIds: &[String],
+    sqlite: Arc<dyn RuntimeSqliteHost>,
+    storage: Arc<dyn RuntimeStorageHost>,
+) -> Result<(), String> {
+    use crate::data::backup::CharacterPluginMigration::CharacterPluginWriter;
+    let writer = CharacterPluginWriter::open(sqlite, storage)?;
+    for id in chatIds {
+        let Some(draft) = writer.get("chat_drafts", id)? else {
+            continue;
+        };
+        writer.adoptRecord("chat_bindings", id, draft["value"].clone())?;
+        let version = draft["version"]
+            .as_str()
+            .ok_or("Invalid Operit1 chat draft version")?;
+        writer.remove("chat_drafts", id, version)?;
+    }
+    Ok(())
+}
+
+/// Captures the uniquely named Operit1 author directly in each imported message revision.
+fn adoptOperit1MessageIdentity(
+    extensions: &mut BTreeMap<String, serde_json::Value>,
+    roleName: &str,
+    cards: &[serde_json::Value],
+) -> Result<(), String> {
+    if roleName.trim().is_empty() {
+        return Ok(());
+    }
+    let mut matching = cards.iter().filter(|card| card["name"] == roleName);
+    let Some(card) = matching.next() else {
+        return Ok(());
+    };
+    if matching.next().is_some() {
+        return Ok(());
+    }
+    let id = card["id"]
+        .as_str()
+        .ok_or("Invalid imported character identity")?;
+    extensions.insert(
+        crate::data::backup::CharacterPluginMigration::PLUGIN_ID.into(),
+        serde_json::json!({"participantId":id}),
+    );
+    extensions.insert(
+        "host.chat.identity".into(),
+        serde_json::json!({"title":roleName,"avatarUri":card["avatarUri"]}),
+    );
     Ok(())
 }
 

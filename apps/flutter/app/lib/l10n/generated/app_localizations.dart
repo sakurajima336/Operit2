@@ -3524,18 +3524,6 @@ abstract class AppLocalizations {
   /// **'Summarize at'**
   String get settingsModelSummaryThreshold;
 
-  /// No description provided for @settingsModelSummaryByMessageCount.
-  ///
-  /// In en, this message translates to:
-  /// **'Summarize by message count'**
-  String get settingsModelSummaryByMessageCount;
-
-  /// No description provided for @settingsModelSummaryMessageCount.
-  ///
-  /// In en, this message translates to:
-  /// **'Summary message threshold'**
-  String get settingsModelSummaryMessageCount;
-
   /// No description provided for @settingsModelCustomHeaders.
   ///
   /// In en, this message translates to:
@@ -3878,6 +3866,16 @@ abstract class AppLocalizations {
   /// **'{passed} passed, {failed} failed'**
   String settingsModelTestSummary(int passed, int failed);
 
+  /// No description provided for @settingsModelTestSummaryWithRestricted.
+  ///
+  /// In en, this message translates to:
+  /// **'{passed} passed, {failed} failed, {restricted} restricted'**
+  String settingsModelTestSummaryWithRestricted(
+    int passed,
+    int failed,
+    int restricted,
+  );
+
   /// No description provided for @settingsModelTestAllPassed.
   ///
   /// In en, this message translates to:
@@ -3967,6 +3965,24 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Some checks failed'**
   String get settingsModelConnectionTestFailed;
+
+  /// No description provided for @settingsModelConnectionTestRestricted.
+  ///
+  /// In en, this message translates to:
+  /// **'Test restricted'**
+  String get settingsModelConnectionTestRestricted;
+
+  /// No description provided for @settingsModelTestCreditRestricted.
+  ///
+  /// In en, this message translates to:
+  /// **'Credit or output budget limit'**
+  String get settingsModelTestCreditRestricted;
+
+  /// No description provided for @settingsModelTestRateRestricted.
+  ///
+  /// In en, this message translates to:
+  /// **'Upstream rate limit or cooldown'**
+  String get settingsModelTestRateRestricted;
 
   /// No description provided for @settingsModelCapabilitiesApplied.
   ///
@@ -7901,7 +7917,7 @@ abstract class AppLocalizations {
   /// No description provided for @settingsAppearanceThemeConfigEditingHint.
   ///
   /// In en, this message translates to:
-  /// **'Tap a card to switch themes. Choose Edit to customize; changes are saved automatically.'**
+  /// **'Tap a card to switch themes. Mode shortcuts change only the current theme. Edits save automatically.'**
   String get settingsAppearanceThemeConfigEditingHint;
 
   /// No description provided for @settingsAppearanceThemeConfigFailed.

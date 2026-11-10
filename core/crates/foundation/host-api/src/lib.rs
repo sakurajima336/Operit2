@@ -945,7 +945,9 @@ fn ohosOnboardingRequirements() -> Vec<HostOnboardingRequirement> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HostErrorKind {
     General,
+    NotFound,
     Timeout,
+    PermissionDenied,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -981,8 +983,16 @@ impl Display for HostError {
 impl Error for HostError {}
 
 impl From<std::io::Error> for HostError {
+    /// Preserves missing and inaccessible resources across the Host boundary.
     fn from(value: std::io::Error) -> Self {
-        Self::new(value.to_string())
+        Self {
+            kind: match value.kind() {
+                std::io::ErrorKind::NotFound => HostErrorKind::NotFound,
+                std::io::ErrorKind::PermissionDenied => HostErrorKind::PermissionDenied,
+                _ => HostErrorKind::General,
+            },
+            message: value.to_string(),
+        }
     }
 }
 
@@ -1751,6 +1761,16 @@ pub type TerminalOutputCallback = Box<dyn FnMut(&[u8], bool) -> HostResult<()> +
 pub type TerminalCompletionCallback = Box<dyn FnOnce(HostResult<TerminalCommandOutput>) + Send>;
 
 pub trait TerminalHost: Send + Sync {
+    /// Converts a host filesystem locator to a directory usable by this terminal.
+    /// Resource backends require explicit platform support; opaque locators must never reach a shell.
+    fn resolveNativeWorkingDirectory(&self, path: &str) -> HostResult<String> {
+        if FileSystemResource::FileSystemResource::parse(path)?.is_some() {
+            return Err(HostError::new(
+                "Document/resource mount does not expose a native terminal working directory",
+            ));
+        }
+        Ok(path.to_string())
+    }
     /// Resolves a working directory in the exact selected terminal filesystem.
     fn resolveWorkingDirectory(
         &self,
@@ -1844,6 +1864,12 @@ pub struct RuntimeStorageEntry {
 }
 
 pub trait RuntimeStorageHost: Send + Sync {
+    /// Opens a private sequential writer; commit publishes the complete file atomically.
+    /// Returning None allows small legacy hosts to use their ordinary bounded write path.
+    fn openWriteSession(&self, _path: &str) -> HostResult<Option<Box<dyn RuntimeStorageWriteSession>>> {
+        Ok(None)
+    }
+
     /// Opens a transaction journal in this storage namespace.
     fn openTransactionDatabase(&self, _path: &str) -> HostResult<Box<dyn RuntimeSqliteConnection>> {
         Err(HostError::new("This storage host does not provide a SQL transaction journal"))
@@ -1897,6 +1923,77 @@ pub trait RuntimeStorageHost: Send + Sync {
     /// Lists committed logical entries under a virtual runtime storage prefix.
     /// Host-owned write staging files are private and must not be exposed.
     fn list(&self, prefix: &str) -> HostResult<Vec<RuntimeStorageEntry>>;
+}
+
+/// Implements the shared native storage boundary for a platform wrapper.
+/// Keeping delegation here prevents platform hosts from missing new streaming APIs.
+#[macro_export]
+macro_rules! delegate_runtime_storage {
+    ($host:ty, $field:ident) => {
+        impl $crate::RuntimeStorageHost for $host {
+            fn openWriteSession(&self, path: &str) -> $crate::HostResult<Option<Box<dyn $crate::RuntimeStorageWriteSession>>> {
+                $crate::RuntimeStorageHost::openWriteSession(&self.$field, path)
+            }
+            fn openTransactionDatabase(&self, path: &str) -> $crate::HostResult<Box<dyn $crate::RuntimeSqliteConnection>> {
+                $crate::RuntimeSqliteHost::openSqliteDatabase(self, path)
+            }
+            fn runtimeRootDir(&self) -> Option<std::path::PathBuf> {
+                $crate::RuntimeStorageHost::runtimeRootDir(&self.$field)
+            }
+            fn workspaceRootDir(&self) -> Option<std::path::PathBuf> {
+                $crate::RuntimeStorageHost::workspaceRootDir(&self.$field)
+            }
+            fn readBytes(&self, path: &str) -> $crate::HostResult<Vec<u8>> {
+                $crate::RuntimeStorageHost::readBytes(&self.$field, path)
+            }
+            fn readBytesRange(&self, path: &str, offset: u64, length: usize) -> $crate::HostResult<Vec<u8>> {
+                $crate::RuntimeStorageHost::readBytesRange(&self.$field, path, offset, length)
+            }
+            fn writeBytes(&self, path: &str, content: &[u8]) -> $crate::HostResult<()> {
+                $crate::RuntimeStorageHost::writeBytes(&self.$field, path, content)
+            }
+            fn modifiedAt(&self, path: &str) -> $crate::HostResult<i64> {
+                $crate::RuntimeStorageHost::modifiedAt(&self.$field, path)
+            }
+            fn setModifiedAt(&self, path: &str, modified: i64) -> $crate::HostResult<()> {
+                $crate::RuntimeStorageHost::setModifiedAt(&self.$field, path, modified)
+            }
+            fn writeBytesAtomically(&self, path: &str, content: &[u8]) -> $crate::HostResult<()> {
+                $crate::RuntimeStorageHost::writeBytesAtomically(&self.$field, path, content)
+            }
+            fn appendBytes(&self, path: &str, content: &[u8]) -> $crate::HostResult<()> {
+                $crate::RuntimeStorageHost::appendBytes(&self.$field, path, content)
+            }
+            fn flushFile(&self, path: &str) -> $crate::HostResult<()> {
+                $crate::RuntimeStorageHost::flushFile(&self.$field, path)
+            }
+            fn delete(&self, path: &str, recursive: bool) -> $crate::HostResult<()> {
+                $crate::RuntimeStorageHost::delete(&self.$field, path, recursive)
+            }
+            fn exists(&self, path: &str) -> $crate::HostResult<bool> {
+                $crate::RuntimeStorageHost::exists(&self.$field, path)
+            }
+            fn list(&self, prefix: &str) -> $crate::HostResult<Vec<$crate::RuntimeStorageEntry>> {
+                $crate::RuntimeStorageHost::list(&self.$field, prefix)
+            }
+        }
+        impl $crate::RuntimeSqliteHost for $host {
+            fn runtimeStorage(&self) -> Option<std::sync::Arc<dyn $crate::RuntimeStorageHost>> {
+                Some(std::sync::Arc::new(self.clone()))
+            }
+            fn openSqliteDatabase(&self, path: &str) -> $crate::HostResult<Box<dyn $crate::RuntimeSqliteConnection>> {
+                $crate::RuntimeSqliteHost::openSqliteDatabase(&self.$field, path)
+            }
+        }
+    };
+    ($host:ty, $field:ident, writer) => {
+        $crate::delegate_runtime_storage!($host, $field);
+        impl $crate::RuntimeStorageWriteHost for $host {
+            fn createWriteSession(&self, path: &str) -> $crate::HostResult<Box<dyn $crate::RuntimeStorageWriteSession>> {
+                $crate::RuntimeStorageWriteHost::createWriteSession(&self.$field, path)
+            }
+        }
+    };
 }
 
 /// Owns one sequential write into a runtime storage file.
@@ -2021,10 +2118,30 @@ impl SqliteRow {
     }
 }
 
+// Portable hosts page one row; native hosts override this with a prepared cursor.
+fn visit_sqlite_pages(sql:&str, params:Vec<SqliteValue>, mut query:impl FnMut(&str,Vec<SqliteValue>)->HostResult<Vec<SqliteRow>>,
+    visitor:&mut dyn FnMut(SqliteRow)->HostResult<()>) -> HostResult<()> {
+    for offset in 0u64.. {
+        let rows=query(&format!("SELECT * FROM ({sql}) LIMIT 1 OFFSET {offset}"),params.clone())?;
+        if rows.is_empty() { return Ok(()); }
+        for row in rows { visitor(row)?; }
+    }
+    Ok(())
+}
+
 pub trait RuntimeSqliteConnection: Send {
     fn executeBatch(&mut self, sql: &str) -> HostResult<()>;
     fn execute(&mut self, sql: &str, params: Vec<SqliteValue>) -> HostResult<usize>;
     fn query(&mut self, sql: &str, params: Vec<SqliteValue>) -> HostResult<Vec<SqliteRow>>;
+    fn columnSize(&mut self, _table:&str, _column:&str, _row:i64)->HostResult<usize> { Err(HostError::new("SQLite host does not support incremental column sizes")) }
+    /// Reads a TEXT/BLOB column incrementally without copying the complete cell.
+    fn readColumnRange(&mut self, _table:&str, _column:&str, _row:i64, _offset:usize, _length:usize) -> HostResult<Vec<u8>> {
+        Err(HostError::new("SQLite host does not support incremental column reads"))
+    }
+    /// Visits owned rows without retaining the complete result set.
+    fn visitRows(&mut self, sql: &str, params: Vec<SqliteValue>, visitor: &mut dyn FnMut(SqliteRow) -> HostResult<()>) -> HostResult<()> {
+        visit_sqlite_pages(sql, params, |page, params| self.query(page, params), visitor)
+    }
     fn lastInsertRowId(&self) -> HostResult<i64>;
     fn beginTransaction(&mut self) -> HostResult<Box<dyn RuntimeSqliteTransaction + '_>>;
 }
@@ -2032,6 +2149,15 @@ pub trait RuntimeSqliteConnection: Send {
 pub trait RuntimeSqliteTransaction {
     fn execute(&mut self, sql: &str, params: Vec<SqliteValue>) -> HostResult<usize>;
     fn query(&mut self, sql: &str, params: Vec<SqliteValue>) -> HostResult<Vec<SqliteRow>>;
+    fn columnSize(&mut self, _table:&str, _column:&str, _row:i64)->HostResult<usize> { Err(HostError::new("SQLite host does not support incremental column sizes")) }
+    /// Reads a TEXT/BLOB column incrementally without copying the complete cell.
+    fn readColumnRange(&mut self, _table:&str, _column:&str, _row:i64, _offset:usize, _length:usize) -> HostResult<Vec<u8>> {
+        Err(HostError::new("SQLite host does not support incremental column reads"))
+    }
+    /// Visits owned rows without retaining the complete result set.
+    fn visitRows(&mut self, sql: &str, params: Vec<SqliteValue>, visitor: &mut dyn FnMut(SqliteRow) -> HostResult<()>) -> HostResult<()> {
+        visit_sqlite_pages(sql, params, |page, params| self.query(page, params), visitor)
+    }
     fn lastInsertRowId(&self) -> HostResult<i64>;
     fn commit(self: Box<Self>) -> HostResult<()>;
     /// Aborts this transaction explicitly and reports any rollback failure.
@@ -2039,6 +2165,8 @@ pub trait RuntimeSqliteTransaction {
 }
 
 pub trait RuntimeSqliteHost: Send + Sync {
+    /// The same storage boundary supplies disk-backed synchronization staging and blobs.
+    fn runtimeStorage(&self) -> Option<Arc<dyn RuntimeStorageHost>> { None }
     fn openSqliteDatabase(&self, path: &str) -> HostResult<Box<dyn RuntimeSqliteConnection>>;
 }
 

@@ -62,7 +62,7 @@ impl Journal {
         }
         if super::compaction::retired(tx,original)? { return Ok(()); }
         if !tx.query("SELECT 1 FROM _operit_initialization_coverage WHERE id=?1",vec![text(&original.opId)])?.is_empty() { return Ok(()); }
-        let fingerprint = crate::Transaction::digest(original).map_err(Error::Message)?;
+        let fingerprint = crate::Transaction::operation_digest(original).map_err(Error::Message)?;
         let previous = tx.query("SELECT fingerprint FROM originals WHERE id=?1 UNION ALL SELECT fingerprint FROM legacy_fingerprints WHERE id=?1", vec![text(&original.opId)])?;
         for row in &previous {
             if row.valueAt(0)?.asString()? != fingerprint {
@@ -73,7 +73,8 @@ impl Journal {
         let completed = !pending || !tx.query("SELECT 1 FROM legacy_receipts WHERE origin=?1 AND first<=?2 AND last>=?2", vec![text(&original.originDeviceId), SqliteValue::Integer(original.sequence)])?.is_empty();
         let header = JournalRecord::parse(&serde_json::to_vec(original)?, 0)?;
         tx.execute("INSERT INTO originals(id,origin,sequence,domain,header,original,fingerprint,pending,business_time,target,format_version)
-            VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11) ON CONFLICT(id) DO NOTHING", vec![
+            VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11) ON CONFLICT(id) DO UPDATE SET domain=excluded.domain,header=excluded.header,original=excluded.original,
+                business_time=excluded.business_time,target=excluded.target,format_version=excluded.format_version WHERE originals.pending=1", vec![
             text(&original.opId), text(&original.originDeviceId), SqliteValue::Integer(original.sequence), text(&original.domain),
             text(&serde_json::to_string(&header)?), text(&serde_json::to_string(stored)?), text(&fingerprint), SqliteValue::Integer(i64::from(!completed)),
             SqliteValue::Integer(crate::Transaction::Revision::fromOperation(original).createdAt),
@@ -93,17 +94,6 @@ impl Journal {
         self.0.query(
             "SELECT original FROM originals WHERE target=?1 AND pending=0 AND domain='preferences' ORDER BY origin,sequence",
             vec![text(path)],
-        )?.into_iter().map(|row| Ok(serde_json::from_str(&row.valueAt(0)?.asString()?)?)).collect()
-    }
-
-    /// Local edits compare current-format originals only; initialization blobs stay unopened.
-    pub(crate) fn preference_compaction_history(&mut self, path: &str, format: u32) -> Result<Vec<SyncOperation>, Error> {
-        self.0.query(
-            "SELECT o.original FROM originals o JOIN preference_compaction_policy p
-             ON p.path=o.target AND p.format=o.format_version AND p.safe=1
-             WHERE o.target=?1 AND p.format=?2 AND o.pending=0 AND o.domain='preferences'
-             AND json_extract(o.header,'$.operation') NOT IN ('initialize','alias') ORDER BY o.origin,o.sequence",
-            vec![text(path), SqliteValue::Integer(format.into())],
         )?.into_iter().map(|row| Ok(serde_json::from_str(&row.valueAt(0)?.asString()?)?)).collect()
     }
 
@@ -314,14 +304,13 @@ impl Journal {
         self.0.query("SELECT path,encrypted FROM transaction_files ORDER BY path", vec![])?.iter()
             .map(|row| Ok((row.valueAt(0)?.asString()?, row.valueAt(1)?.asI64()? != 0))).collect()
     }
+    /// Tracks the latest local write policy; historical operations retain their original format.
     pub(crate) fn register_file(&mut self, path: &str, encrypted: bool) -> Result<(), Error> {
         self.transaction(|tx| {
-            let rows = tx.query("SELECT encrypted FROM transaction_files WHERE path=?1",vec![text(path)])?;
-            if let Some(row) = rows.first() {
-                if (row.valueAt(0)?.asI64()? != 0) != encrypted { return Err(Error::Message("Conflicting preference encryption policy".into())); }
-                return Ok(());
-            }
-            tx.execute("INSERT INTO transaction_files VALUES(?1,?2)",vec![text(path), SqliteValue::Integer(i64::from(encrypted))])?;
+            tx.execute(
+                "INSERT INTO transaction_files VALUES(?1,?2) ON CONFLICT(path) DO UPDATE SET encrypted=excluded.encrypted WHERE encrypted<>excluded.encrypted",
+                vec![text(path), SqliteValue::Integer(i64::from(encrypted))],
+            )?;
             Ok(())
         })
     }

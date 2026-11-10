@@ -2,6 +2,58 @@ use super::*;
 use std::io::Cursor;
 use crate::data::backup::Operit1RoomSchemaMigration::tests::TestSqliteConnection;
 
+/// Retires Android grants while preserving archive-backed documents and propagating invalid archive paths.
+#[test]
+fn memory_attachments_do_not_import_source_app_document_grants() {
+    let plan = SnapshotFileImportPlan::new();
+    assert_eq!(plan.rewriteMemoryAttachmentPath(None).unwrap(), None);
+    assert_eq!(plan.rewriteMemoryAttachmentPath(Some("content://com.android.providers.media.documents/document/document%3A122474")).unwrap(), None);
+    let document = "/data/user/0/com.ai.assistance.operit/files/documents/source.txt";
+    assert_eq!(plan.rewriteMemoryAttachmentPath(Some(document)).unwrap(), Some(plan.rewritePath(document).unwrap()));
+    assert!(plan.rewriteMemoryAttachmentPath(Some("/data/user/0/com.ai.assistance.operit/files/../outside.txt")).is_err());
+}
+
+/// Runs a supplied snapshot through the full importer and retains isolated output for plugin diagnostics.
+#[test]
+#[ignore]
+fn diagnose_external_operit1_snapshot() {
+    use operit_host_native_storage::NativeRuntimeStorageHost;
+    let source = std::env::var("OPERIT1_IMPORT_SNAPSHOT").unwrap();
+    let root = std::env::temp_dir().join(format!("operit1-diagnostic-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let databasePath = root.join("fixture.db");
+    std::fs::write(&databasePath, []).unwrap();
+    let fixture = Arc::new(SnapshotFixture { bytes: std::fs::read(source).unwrap(), databasePath });
+    let host = Arc::new(NativeRuntimeStorageHost::new(root.join("runtime"), root.join("workspaces")));
+    operit_util::RuntimeStoreRoot::setDefaultRuntimeStoreRootConfig(
+        operit_util::RuntimeStoreRoot::RuntimeStoreRootConfig::new(root.join("runtime"), root.join("workspaces")),
+    );
+    operit_store::RuntimeStorageHost::setDefaultRuntimeStorageHost(host.clone());
+    operit_store::RuntimeStorageHost::setDefaultRuntimeSqliteHost(host.clone());
+    operit_store::RuntimeStorageHost::setDefaultHostSecretStore(Arc::new(
+        operit_host_native_storage::NativeFileSecretStore(root.join("secrets")),
+    ));
+    let manager = Operit1SnapshotImportManager::new(RuntimeStorePaths::new(root.join("runtime"), root.join("workspaces")), host.clone(), host.clone(), host.clone());
+    let preview = manager.inspectSnapshotSource(fixture.clone()).expect("snapshot inspection");
+    let imported = manager.importSnapshotSource(fixture).expect("full snapshot import");
+    assert_eq!(imported.importedChats, preview.chatCount);
+    assert_eq!(imported.importedMessages, preview.messageCount);
+    let writer = crate::data::backup::CharacterPluginMigration::CharacterPluginWriter::open(host.clone(), host.clone()).unwrap();
+    assert!(writer.get("meta", "state").unwrap().unwrap()["value"].get("legacyImportPending").is_none(), "Fresh imports must be ready without a second plugin migration");
+    for owner in writer.list("owners").unwrap() {
+        assert_eq!(owner["key"], owner["value"]["ownerKey"], "memory owner identity mismatch");
+    }
+    for memory in writer.list("memories").unwrap() {
+        assert_eq!(memory["value"]["record"]["chunkIndexFilePath"], Value::Null);
+        if let Some(path) = memory["value"]["record"]["documentPath"].as_str() {
+            assert!(!path.starts_with("content://"), "Source-app document grant survived import");
+        }
+    }
+    assert!(writer.list("chat_drafts").unwrap().is_empty());
+    eprintln!("Full import chats={} messages={} memories={} links={} usage={} bindings={}", imported.importedChats, imported.importedMessages, imported.importedMemories, imported.importedMemoryLinks, imported.importedTokenUsageRecords, writer.list("chat_bindings").unwrap().len());
+    eprintln!("Diagnostic storage: {}", root.display());
+}
+
 // These fixtures preserve the source schema; Rust tests exercise actual readers and projections when run.
 const ROOM_V10_SQL: &str = r#"
 CREATE TABLE chats (
@@ -138,6 +190,9 @@ fn completeSnapshotFixture(version: i32) -> Arc<SnapshotFixture> {
         ("payload/shared_prefs/cloud_embedding_settings_default.xml", br#"<map><boolean name="enabled" value="true"/><string name="endpoint">https://embedding.invalid</string><string name="api_key">actual-source-key</string><string name="model">source-model</string></map>"#.to_vec()),
         (ENTRY_DATABASE, std::fs::read(&databasePath).expect("real SQLite bytes must be readable")),
         (ENTRY_OBJECTBOX_DEFAULT_DATA, b"opaque source memory database: not decoded or adopted".to_vec()),
+        ("payload/files/.vector_index/doc_index_default_25_1024.hnsw", b"Retired vector index".to_vec()),
+        ("payload/files/doc_index_default_25_1024.hnsw", b"Retired top-level document index".to_vec()),
+        ("payload/files/memory_hnsw_default_1024.idx", b"Retired top-level memory index".to_vec()),
         ("payload/files/memory-space-profiles/default/user.md", b"Legacy user document".to_vec()),
         ("payload/files/workspace/demo/USER.md", b"Workspace-owned USER.md remains a normal file".to_vec()),
         ("payload/files/attachment.txt", b"Preserved attachment".to_vec()),
@@ -500,7 +555,7 @@ fn complete_snapshot_keeps_legacy_source_entries_and_preview_domains() {
     assert_eq!((preview.importedFileCount, preview.importedExternalFileCount), (2, 1));
 }
 
-/// Applies the actual resource plan and ZIP streaming copy, retaining workspace USER.md while excluding legacy memory storage.
+/// Streams documents and attachments while excluding legacy memory storage and HNSW indexes.
 #[test]
 fn resource_copy_plan_keeps_normal_files_and_does_not_copy_legacy_domain_storage() {
     let fixture = completeSnapshotFixture(20);
@@ -813,11 +868,11 @@ fn operit1_github_user_info_rejects_invalid_source_types() {
 /// Uses exact source memory directories rather than deleting normal workspace and externally supplied USER.md files.
 #[test]
 fn memory_copy_exclusion_is_scoped_to_declared_legacy_storage_directories() {
-    for entry in [ENTRY_OBJECTBOX_DEFAULT_DATA, "payload/files/objectbox_profile/data.mdb", "payload/files/memory-space-profiles/default/user.md"] {
+    for entry in [ENTRY_OBJECTBOX_DEFAULT_DATA, "payload/files/objectbox_profile/data.mdb", "payload/files/memory-space-profiles/default/user.md", "payload/files/.vector_index/doc_index_default_25_1024.hnsw", "payload/files/.vector_index/nested/index.hnsw", "payload/files/doc_index_default_25_1024.hnsw", "payload/files/memory_hnsw_default_1024.idx"] {
         assert!(isOperit1LegacyMemoryEntry(entry));
         assert!(!entryMatchesCopyPrefix(entry, ENTRY_FILES_PREFIX));
     }
-    for entry in ["payload/files/workspace/demo/USER.md", "payload/external_files/USER.md", "payload/files/objectbox_notes.txt", "payload/files/normal/memory-notes.md"] {
+    for entry in ["payload/files/workspace/demo/USER.md", "payload/external_files/USER.md", "payload/files/objectbox_notes.txt", "payload/files/normal/memory-notes.md", "payload/files/workspace/demo/.vector_index/user.hnsw", "payload/files/.vector_index_notes.txt", "payload/files/doc_index_notes.txt", "payload/files/normal/doc_index_default_25_1024.hnsw"] {
         assert!(!isOperit1LegacyMemoryEntry(entry));
     }
 }
@@ -893,7 +948,7 @@ fn objectbox_table_preserves_long_ids_and_explicit_scalar_defaults() {
     assert!(broken.scalarI32(0, "chunkIndex").is_err());
 }
 
-/// Imports historical chats without a deleted role and emits draft references only for resolved bindings.
+/// Resolves archive bindings and publishes them through the import's own completion path.
 #[test]
 fn archive_binding_migration_cleans_unresolved_references_without_replacing_them() {
     use crate::data::backup::CharacterPluginMigration::{
@@ -953,18 +1008,38 @@ fn archive_binding_migration_cleans_unresolved_references_without_replacing_them
             assert_eq!(archive, expected);
             let writer = CharacterPluginWriter::open(host.clone(), host.clone()).unwrap();
             let drafts = writer.list("chat_drafts").unwrap();
-            match expected_binding {
+            match &expected_binding {
                 Some(binding) => {
                     assert_eq!(drafts.len(), 1);
-                    assert_eq!(drafts[0]["value"], binding);
+                    assert_eq!(&drafts[0]["value"], binding);
                 }
                 None => assert!(drafts.is_empty()),
             }
             assert!(writer.list("chat_bindings").unwrap().is_empty());
+            publishOperit1ArchiveBindings(&[archive.chats[0].id.clone()], host.clone(), host.clone()).unwrap();
+            assert!(writer.list("chat_drafts").unwrap().is_empty());
+            assert_eq!(writer.get("chat_bindings", &archive.chats[0].id).unwrap().map(|entry| entry["value"].clone()), expected_binding);
+            assert!(!host.exists(operit_util::RuntimeStorageLayout::CHARACTER_CARDS_PREFERENCES_PATH).unwrap());
             assert!(writer.list("cards").unwrap().is_empty());
             assert!(writer.list("groups").unwrap().is_empty());
         }
         assert_eq!(root.parent().unwrap(), std::env::temp_dir());
         std::fs::remove_dir_all(&root).unwrap();
+    }
+}
+
+/// Preserves unrelated extensions while capturing only an unambiguous historical role.
+#[test]
+fn operit1_message_authors_are_adopted_without_scanning_existing_core_history() {
+    let cards = vec![serde_json::json!({"id":"author-1","name":"Historical role","avatarUri":"/operitapp/data/avatar.png"})];
+    let mut extensions = BTreeMap::from([("other.plugin".into(), serde_json::json!({"keep":true}))]);
+    adoptOperit1MessageIdentity(&mut extensions, "Historical role", &cards).unwrap();
+    assert_eq!(extensions["com.operit.character_cards"], serde_json::json!({"participantId":"author-1"}));
+    assert_eq!(extensions["host.chat.identity"], serde_json::json!({"title":"Historical role","avatarUri":"/operitapp/data/avatar.png"}));
+    assert_eq!(extensions["other.plugin"], serde_json::json!({"keep":true}));
+    for (name, available) in [("Deleted role", cards.clone()), ("Historical role", vec![cards[0].clone(), cards[0].clone()])] {
+        let mut extensions = BTreeMap::new();
+        adoptOperit1MessageIdentity(&mut extensions, name, &available).unwrap();
+        assert!(extensions.is_empty());
     }
 }

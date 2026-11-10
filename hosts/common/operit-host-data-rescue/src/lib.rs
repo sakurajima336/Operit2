@@ -237,9 +237,15 @@ struct JournalSecrets { imported: BTreeMap<String, String>, previous: BTreeMap<S
 impl NativeRescueHost {
     /// Removes interrupted archive transfers from the exact Host-owned staging namespaces.
     fn cleanup_abandoned_archives(&self) -> Result<(), String> {
-        for parent in [&self.application, &self.roots["runtime"], &self.roots["runtime"].join("identities")] {
+        let runtime = &self.roots["runtime"];
+        let runtimeParent = runtime.parent().ok_or("Runtime root has no parent")?;
+        let parents = BTreeSet::from([
+            self.application.as_path(), runtimeParent, runtime.as_path(),
+        ]);
+        for parent in parents {
             NativeArchiveStagingHost::cleanupAbandonedArchivesForRuntimeParent(parent).map_err(text)?;
         }
+        NativeArchiveStagingHost::cleanupAbandonedArchivesForRuntimeParent(&runtime.join("identities")).map_err(text)?;
         Ok(())
     }
 
@@ -652,13 +658,12 @@ impl RescueHost for NativeRescueHost {
         File::open(source).map_err(text)?.take(MAX_PREFERENCES_EXPORT_BYTES as u64 + 1).read_to_end(&mut content).map_err(text)?;
         if content.len() > MAX_PREFERENCES_EXPORT_BYTES { return Err(format!("Preferences exceed 16 MiB: {path}")); }
         let profile_secrets = NativeFileSecretStore(root.join("secrets"));
-        let storage = NativeRuntimeStorageHost::new(root, self.roots["workspaces"].clone());
         let secrets = if self.profile_file_secrets {
             Some(&profile_secrets as &dyn HostSecretStore)
         } else {
             self.secrets.as_deref()
         };
-        exportPreferences(&storage_path, content, || readPreferencesExportKey(&storage, secrets))
+        exportPreferences(&storage_path, content, || readPreferencesExportKey(secrets))
             .map(Some).map_err(|error| format!("{path}: {error}"))
     }
 

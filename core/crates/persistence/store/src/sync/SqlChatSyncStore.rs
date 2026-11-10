@@ -137,6 +137,7 @@ impl SqlChatSyncStore {
 
     /// Compares synchronized chat contents independently of local storage identities.
     pub fn snapshotContentDigest(snapshot: &crate::Transaction::Snapshot) -> Result<String, String> {
+        if let Some(sql)=&snapshot.data.sql { return sql.content_digest(&snapshot.data.owner); }
         snapshot.projected_content_digest(|table, value| match table {
             "messages" => crate::Transaction::project_sql_table(value, &["messageId"], None).map(Some),
             "message_variants" => crate::Transaction::project_sql_table(value, &["variantId"], None).map(Some),
@@ -223,12 +224,13 @@ impl SqlChatSyncStore {
         Ok(())
     }
 
-    /// Atomically commits one assistant segment together with chat metadata and sync state.
+    /// Commits an assistant segment and its usage delta against transaction-local chat totals.
     pub fn commitAssistantMessageSegment(
         &self,
         chat: ChatEntity,
         message: MessageEntity,
         baseParts: Vec<MessagePartEntity>,
+        currentWindowSize: Option<i64>,
     ) -> Result<SyncClock, SqlChatSyncStoreError> {
         if message.chatId != chat.id {
             return Err(SqlChatSyncStoreError::Message(format!(
@@ -267,11 +269,16 @@ impl SqlChatSyncStore {
             partRows.extend(baseParts);
 
             let mut chat = chat.clone();
-            let chatRow = transaction.queryOne("SELECT pluginExtensions FROM chats WHERE id = ?1", sqliteParams![chat.id])?.ok_or_else(|| SqliteStoreError::Message(format!("Chat does not exist: {}", chat.id)))?;
+            let chatRow = transaction.queryOne("SELECT pluginExtensions, inputTokens, outputTokens, currentWindowSize FROM chats WHERE id = ?1", sqliteParams![chat.id])?.ok_or_else(|| SqliteStoreError::Message(format!("Chat does not exist: {}", chat.id)))?;
             chat.pluginExtensions = decodePluginExtensions(&chatRow.get::<_, String>(0)?)?;
             let mut message = message.clone();
-            let messageRow = transaction.queryOne("SELECT pluginExtensions FROM messages WHERE chatId = ?1 AND timestamp = ?2", sqliteParams![message.chatId, message.timestamp])?.ok_or_else(|| SqliteStoreError::Message("Assistant base record does not exist".to_string()))?;
+            let messageRow = transaction.queryOne("SELECT pluginExtensions, inputTokens, outputTokens FROM messages WHERE chatId = ?1 AND timestamp = ?2", sqliteParams![message.chatId, message.timestamp])?.ok_or_else(|| SqliteStoreError::Message("Assistant base record does not exist".to_string()))?;
             message.pluginExtensions = decodePluginExtensions(&messageRow.get::<_, String>(0)?)?;
+            // Repeated presentation/final commits must account only for newly persisted usage.
+            // Read both sides under this transaction so stale runtime snapshots cannot reset totals.
+            chat.inputTokens = chatRow.get::<_, i64>(1)? + message.inputTokens - messageRow.get::<_, i64>(1)?;
+            chat.outputTokens = chatRow.get::<_, i64>(2)? + message.outputTokens - messageRow.get::<_, i64>(2)?;
+            chat.currentWindowSize = currentWindowSize.unwrap_or(chatRow.get::<_, i64>(3)?);
             if let Some(presentation) = &presentation {
                 message.pluginExtensions.insert(PRESENTATION_EXTENSION.to_string(),
                     serde_json::to_value(presentation).map_err(|error| SqliteStoreError::Message(error.to_string()))?);
@@ -513,6 +520,14 @@ impl SqlChatSyncStore {
         domains: &[String],
         limit: usize,
     ) -> Result<Vec<SyncOperation>, SqlChatSyncStoreError> {
+        self.operationsSinceWithBudget(clock, domains, limit, usize::MAX)
+    }
+
+    /// Selects metadata first and stops hydrating payloads at the shared byte budget.
+    pub fn operationsSinceWithBudget<K: SyncOperationKnowledge>(
+        &self, clock: &K, domains: &[String], limit: usize, maxBytes: usize,
+    ) -> Result<Vec<SyncOperation>, SqlChatSyncStoreError> {
+        if limit == 0 { return Ok(Vec::new()); }
         let domainSet = domains.iter().cloned().collect::<BTreeSet<_>>();
         if !domainSet.is_empty() && !domainSet.contains(CHAT_SYNC_DOMAIN) {
             return Ok(Vec::new());
@@ -561,11 +576,19 @@ impl SqlChatSyncStore {
         });
         let mut operations = compactSyncOperations(operations);
         operations.truncate(limit);
-        for operation in &mut operations {
+        let mut page = Vec::new();
+        let mut bytes = 0usize;
+        for mut operation in operations {
             operation.payload = serde_json::to_value(readPayload(
                 &mut |sql, params| self.store.queryRows(sql, params), &operation.opId,
             )?)?;
+            let mut measured = crate::SyncOperationStore::SerializedByteCount::default();
+            serde_json::to_writer(&mut measured, &operation)?;
+            if !page.is_empty() && bytes.saturating_add(measured.0) > maxBytes { break; }
+            bytes = bytes.saturating_add(measured.0);
+            page.push(operation);
         }
+        let mut operations = page;
         if limit > 0 {
             if let Some((_,origin,sequence)) = crate::Transaction::compaction::initialization_identity(&self.store)? {
                 if !clock.containsSequence(&origin,sequence) {
@@ -576,7 +599,7 @@ impl SqlChatSyncStore {
                 }
             }
         }
-        Ok(operations)
+        Ok(crate::SyncOperationStore::boundSyncOperationPage(operations, maxBytes))
     }
 
     /// Applies a remote SQL chat sync operation to the local database.
@@ -600,7 +623,7 @@ impl SqlChatSyncStore {
         operation: &SyncOperation,
         ignoreNewerEntityState: bool,
     ) -> Result<(), SqlChatSyncStoreError> {
-        if crate::Transaction::compaction::Initialization::decode(operation).map_err(SqlChatSyncStoreError::Message)?.is_some() {
+        if operation.operation == "initialize" && operation.entityType == "initialization" {
             self.dataset().receive_initialization(operation, |tx,snapshot| self.reconcileInitialization(tx,snapshot,true))
                 .map_err(SqlChatSyncStoreError::Message)?;
             return Ok(());

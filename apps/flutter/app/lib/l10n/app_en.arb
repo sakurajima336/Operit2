@@ -918,8 +918,6 @@
   "settingsModelMaxContextLength": "Max context length",
   "settingsModelMaxContextLengthInvalid": "Enter a max context length greater than 0",
   "settingsModelSummaryThreshold": "Summarize at",
-  "settingsModelSummaryByMessageCount": "Summarize by message count",
-  "settingsModelSummaryMessageCount": "Summary message threshold",
   "settingsModelCustomHeaders": "Custom headers",
   "settingsModelCustomParameters": "Custom parameters JSON",
   "settingsModelToolCall": "Tool calling",
@@ -1004,6 +1002,20 @@
       }
     }
   },
+  "settingsModelTestSummaryWithRestricted": "{passed} passed, {failed} failed, {restricted} restricted",
+  "@settingsModelTestSummaryWithRestricted": {
+    "placeholders": {
+      "passed": {
+        "type": "int"
+      },
+      "failed": {
+        "type": "int"
+      },
+      "restricted": {
+        "type": "int"
+      }
+    }
+  },
   "settingsModelTestAllPassed": "All {count} passed",
   "@settingsModelTestAllPassed": {
     "placeholders": {
@@ -1064,6 +1076,9 @@
   "settingsModelTestedModel": "Tested model",
   "settingsModelConnectionTestPassed": "All checks passed",
   "settingsModelConnectionTestFailed": "Some checks failed",
+  "settingsModelConnectionTestRestricted": "Test restricted",
+  "settingsModelTestCreditRestricted": "Credit or output budget limit",
+  "settingsModelTestRateRestricted": "Upstream rate limit or cooldown",
   "settingsModelCapabilitiesApplied": "Model capability switches were updated from the test result.",
   "settingsModelCapabilitiesNeedChat": "Chat test did not pass, so model capability switches were not updated.",
   "settingsModelConnectionTestError": "Connection test failed: {error}",
@@ -2357,7 +2372,7 @@
   "settingsAppearanceThemeConfigName": "Theme name",
   "settingsAppearanceThemeConfigNameRequired": "Enter a theme name",
   "settingsAppearanceThemeConfigCustomHint": "Create a theme to save your appearance. Tap a card to switch; choose Edit to customize.",
-  "settingsAppearanceThemeConfigEditingHint": "Tap a card to switch themes. Choose Edit to customize; changes are saved automatically.",
+  "settingsAppearanceThemeConfigEditingHint": "Tap a card to switch themes. Mode shortcuts change only the current theme. Edits save automatically.",
   "settingsAppearanceThemeConfigFailed": "Theme operation failed: {detail}",
   "@settingsAppearanceThemeConfigFailed": {
     "placeholders": {
