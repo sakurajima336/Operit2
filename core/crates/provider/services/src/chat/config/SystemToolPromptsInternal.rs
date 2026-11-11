@@ -150,6 +150,24 @@ fn internalToolCategoriesEnSource() -> Vec<SystemToolPromptCategory> {
                     "",
                 ),
                 tool(
+                    "list_terminal_sessions",
+                    "List all live terminal sessions (id, name, type, working directory, whether a command is running).",
+                    "",
+                    vec![],
+                    "",
+                    "",
+                ),
+                tool(
+                    "reset_terminal_session",
+                    "Close a terminal session and recreate it fresh under the same name and type. Use this to recover a session whose shell is stuck or wedged.",
+                    "",
+                    vec![
+                        param("session_id", "string", "terminal session id", true, None)
+                    ],
+                    "",
+                    "",
+                ),
+                tool(
                     "music_play",
                     "Play audio inside the app using the built-in music player.",
                     "",
@@ -1378,6 +1396,24 @@ fn internalToolCategoriesCnSource() -> Vec<SystemToolPromptCategory> {
                 tool(
                     "get_terminal_session_screen",
                     "获取终端会话当前可见 PTY 屏幕内容（仅一屏，不包含历史滚动缓冲）。",
+                    "",
+                    vec![
+                        param("session_id", "string", "终端会话 ID", true, None)
+                    ],
+                    "",
+                    "",
+                ),
+                tool(
+                    "list_terminal_sessions",
+                    "列出所有存活的终端会话（ID、名称、类型、工作目录、是否有命令在运行）。",
+                    "",
+                    vec![],
+                    "",
+                    "",
+                ),
+                tool(
+                    "reset_terminal_session",
+                    "关闭一个终端会话，并用相同名称和类型重新创建一个干净的会话。会话的 shell 卡死或坏掉时，用它来恢复。",
                     "",
                     vec![
                         param("session_id", "string", "终端会话 ID", true, None)

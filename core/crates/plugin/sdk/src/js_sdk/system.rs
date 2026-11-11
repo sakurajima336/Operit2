@@ -662,6 +662,17 @@ pub trait SystemTerminalHost: Send + Sync {
     ///
     fn close(&self, sessionId: String) -> JsFuture<TerminalSessionCloseResultData>;
     ///
+    ///List all live terminal sessions.
+    ///@returns Promise resolving to a text listing of the sessions.
+    ///
+    fn list(&self) -> JsFuture<String>;
+    ///
+    ///Close a terminal session and recreate it fresh under the same name and type.
+    ///@param sessionId The ID of the session to reset.
+    ///@returns Promise resolving to the new session creation result.
+    ///
+    fn reset(&self, sessionId: String) -> JsFuture<TerminalSessionCreationResultData>;
+    ///
     ///Get the current visible terminal screen content for a session (single screen only, no history).
     ///@param sessionId The ID of the session.
     ///@returns Promise resolving to the current screen snapshot result.

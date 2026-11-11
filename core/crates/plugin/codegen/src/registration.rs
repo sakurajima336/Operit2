@@ -417,6 +417,8 @@ fn expected_operation_variant(family: &str, builtin: &str) -> Option<String> {
                 "CloseTerminalSession" => "CloseSession",
                 "InputInTerminalSession" => "InputInSession",
                 "GetTerminalSessionScreen" => "GetSessionScreen",
+                "ListTerminalSessions" => "ListSessions",
+                "ResetTerminalSession" => "ResetSession",
                 _ => return None,
             }
             .to_string(),

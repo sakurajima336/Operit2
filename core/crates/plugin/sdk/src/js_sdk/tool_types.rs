@@ -166,6 +166,9 @@ pub struct ToolResultMap {
     pub input_in_terminal_session: String,
     #[display(action = "read", icon = "terminal", target = "session_id")]
     pub get_terminal_session_screen: TerminalSessionScreenResultData,
+    pub list_terminal_sessions: String,
+    #[display(action = "execute", icon = "terminal", target = "session_id")]
+    pub reset_terminal_session: TerminalSessionCreationResultData,
     #[display(action = "play", icon = "audio", target = "path")]
     pub music_play: MusicPlaybackResultData,
     #[display(action = "pause", icon = "audio")]

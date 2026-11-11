@@ -37,6 +37,8 @@ pub enum TerminalToolOperation {
     InputInSession,
     CloseSession,
     GetSessionScreen,
+    ListSessions,
+    ResetSession,
 }
 
 #[derive(Clone)]
@@ -271,6 +273,71 @@ impl StandardTerminalTools {
     }
 
     #[allow(non_snake_case)]
+    /// Lists all live terminal sessions on the host.
+    pub fn listSessions(&self, tool: &AITool) -> ToolResult {
+        match self.host().and_then(|host| host.listSessions()) {
+            Ok(entries) => {
+                let mut value = format!("Terminal sessions: {}", entries.len());
+                for entry in &entries {
+                    value.push_str(&format!(
+                        "\n- id={} name={} type={} working_dir={} command_running={}",
+                        entry.sessionId,
+                        entry.sessionName,
+                        entry.terminalType,
+                        entry.workingDir,
+                        entry.commandRunning
+                    ));
+                }
+                toolSuccessStringData(tool, StringResultData { value })
+            }
+            Err(error) => toolError(
+                tool,
+                format!("Error listing terminal sessions: {}", error.message),
+            ),
+        }
+    }
+
+    #[allow(non_snake_case)]
+    /// Closes a terminal session and recreates it under the same name and type.
+    pub fn resetSession(&self, tool: &AITool) -> ToolResult {
+        let sessionId = parameterValue(tool, "session_id");
+        let result = self.host().and_then(|host| {
+            let entry = host
+                .listSessions()?
+                .into_iter()
+                .find(|entry| entry.sessionId == sessionId)
+                .ok_or_else(|| {
+                    HostError::new(format!("Terminal session does not exist: {sessionId}"))
+                })?;
+            let workingDir = entry.workingDir.clone();
+            host.closeSession(&sessionId)?;
+            let session = host.createOrGetTypedSession(&entry.sessionName, &entry.terminalType)?;
+            if !workingDir.trim().is_empty() {
+                let _ = enterTerminalDirectory(
+                    host,
+                    &session.sessionId,
+                    &entry.terminalType,
+                    &workingDir,
+                );
+            }
+            terminalSessionCreationResultData(&session)
+        });
+        match result {
+            Ok(data) => toolSuccessData(
+                tool,
+                ToolResultData::TerminalSessionCreationResultData(data),
+            ),
+            Err(error) => toolError(
+                tool,
+                format!(
+                    "Error resetting terminal session {}: {}",
+                    sessionId, error.message
+                ),
+            ),
+        }
+    }
+
+    #[allow(non_snake_case)]
     /// Reads the current terminal screen for an interactive session.
     pub fn getSessionScreen(&self, tool: &AITool) -> ToolResult {
         let sessionId = parameterValue(tool, "session_id");
@@ -303,13 +370,14 @@ impl ToolExecutor for TerminalToolExecutor {
 
     fn accessSpec(&self, _tool: &AITool) -> Result<ToolAccessSpec, String> {
         let effect = match self.operation {
-            TerminalToolOperation::GetTerminalInfo | TerminalToolOperation::GetSessionScreen => {
-                ToolEffect::READ
-            }
+            TerminalToolOperation::GetTerminalInfo
+            | TerminalToolOperation::GetSessionScreen
+            | TerminalToolOperation::ListSessions => ToolEffect::READ,
             TerminalToolOperation::CreateSession
             | TerminalToolOperation::ExecuteHiddenCommand
             | TerminalToolOperation::InputInSession
-            | TerminalToolOperation::CloseSession => ToolEffect::WRITE,
+            | TerminalToolOperation::CloseSession
+            | TerminalToolOperation::ResetSession => ToolEffect::WRITE,
         };
         Ok(ToolAccessSpec {
             effect,
@@ -327,6 +395,8 @@ impl ToolExecutor for TerminalToolExecutor {
             TerminalToolOperation::InputInSession => vec![self.tools.inputInSession(tool)],
             TerminalToolOperation::CloseSession => vec![self.tools.closeSession(tool)],
             TerminalToolOperation::GetSessionScreen => vec![self.tools.getSessionScreen(tool)],
+            TerminalToolOperation::ListSessions => vec![self.tools.listSessions(tool)],
+            TerminalToolOperation::ResetSession => vec![self.tools.resetSession(tool)],
         }
     }
 }
@@ -352,12 +422,14 @@ fn validateTerminalTool(operation: TerminalToolOperation, tool: &AITool) -> Tool
                 return invalid("At least one of input or control is required.");
             }
         }
-        TerminalToolOperation::CloseSession | TerminalToolOperation::GetSessionScreen => {
+        TerminalToolOperation::CloseSession
+        | TerminalToolOperation::GetSessionScreen
+        | TerminalToolOperation::ResetSession => {
             if parameterValue(tool, "session_id").is_empty() {
                 return invalid("session_id is required.");
             }
         }
-        TerminalToolOperation::GetTerminalInfo => {}
+        TerminalToolOperation::GetTerminalInfo | TerminalToolOperation::ListSessions => {}
     }
     match operation {
         TerminalToolOperation::ExecuteHiddenCommand => {

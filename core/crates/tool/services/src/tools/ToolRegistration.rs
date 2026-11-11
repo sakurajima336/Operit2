@@ -710,6 +710,18 @@ fn registerTerminalTools(handler: &mut AIToolHandler, terminalTools: StandardTer
         BuiltinToolName::GetTerminalSessionScreen,
         TerminalToolOperation::GetSessionScreen,
     );
+    registerTerminalTool(
+        handler,
+        &terminalTools,
+        BuiltinToolName::ListTerminalSessions,
+        TerminalToolOperation::ListSessions,
+    );
+    registerTerminalTool(
+        handler,
+        &terminalTools,
+        BuiltinToolName::ResetTerminalSession,
+        TerminalToolOperation::ResetSession,
+    );
 }
 
 #[allow(non_snake_case)]
