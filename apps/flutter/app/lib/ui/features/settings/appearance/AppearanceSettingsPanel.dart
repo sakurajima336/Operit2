@@ -478,6 +478,28 @@ class _AppearanceThemeEditor extends StatelessWidget {
                 },
               ),
             ],
+            const Divider(height: 14),
+            SettingsSliderRow(
+              icon: Icons.contrast_outlined,
+              label: l10n.settingsAppearanceBackgroundDim,
+              value: snapshot.backgroundDimAmount.clamp(0, 1),
+              min: 0,
+              max: 1,
+              divisions: 100,
+              valueText: '${(snapshot.backgroundDimAmount * 100).round()}%',
+              onChanged: (value) {
+                themeController.previewThemeSettings(
+                  backgroundDimAmount: value,
+                );
+              },
+              onChangeEnd: (value) {
+                unawaited(
+                  themeController.saveThemeSettings(
+                    backgroundDimAmount: value,
+                  ),
+                );
+              },
+            ),
           ],
         ),
       ],

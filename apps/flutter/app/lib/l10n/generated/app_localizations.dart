@@ -5400,6 +5400,12 @@ abstract class AppLocalizations {
   /// **'Blur strength'**
   String get settingsAppearanceBackgroundBlurRadius;
 
+  /// No description provided for @settingsAppearanceBackgroundDim.
+  ///
+  /// In en, this message translates to:
+  /// **'Background dimming'**
+  String get settingsAppearanceBackgroundDim;
+
   /// No description provided for @settingsAppearanceBackgroundVideoMuted.
   ///
   /// In en, this message translates to:
