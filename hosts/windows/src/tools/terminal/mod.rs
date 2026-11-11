@@ -372,17 +372,59 @@ impl TerminalHost for WindowsTerminalHost {
             renderer,
             onOutput,
         );
-        {
-            let mut state = self.lockState()?;
-            if let Some(session) = state.ptySessions.get_mut(&normalizedSessionId) {
-                // Release the busy flag even if interrupting a broken PTY fails.
-                // The state lock still excludes new commands during cancellation.
-                session.commandRunning = false;
-                if result.as_ref().map_or(true, |receipt| receipt.timedOut) {
-                    if let Some(workingDir) = cancelTimedOutPtyCommand(session)? {
+        let commandTimedOut = result.as_ref().map_or(true, |receipt| receipt.timedOut);
+        if commandTimedOut {
+            // Keep the session busy until the shell has acknowledged the
+            // interrupt. If the command cannot be interrupted at all, close
+            // the session instead of leaving a broken PTY in the table: the
+            // next command then starts from a fresh session.
+            let cancelOutcome = {
+                let mut state = self.lockState()?;
+                match state.ptySessions.get_mut(&normalizedSessionId) {
+                    Some(session) => Some(cancelTimedOutPtyCommand(session)),
+                    None => None,
+                }
+            };
+            match cancelOutcome {
+                Some(Ok(Some(workingDir))) => {
+                    let mut state = self.lockState()?;
+                    if let Some(session) = state.ptySessions.get_mut(&normalizedSessionId) {
+                        session.commandRunning = false;
                         session.workingDir = workingDir;
                     }
-                } else if let Some(workingDir) = result
+                }
+                Some(Ok(None)) => {
+                    let removed = {
+                        let mut state = self.lockState()?;
+                        let removed = state.ptySessions.remove(&normalizedSessionId);
+                        removeSessionMappings(&mut state, &normalizedSessionId);
+                        removed
+                    };
+                    drop(removed);
+                    return Err(HostError::new(format!(
+                        "Terminal session {normalizedSessionId} closed because its command could not be interrupted"
+                    )));
+                }
+                Some(Err(error)) => {
+                    let removed = {
+                        let mut state = self.lockState()?;
+                        let removed = state.ptySessions.remove(&normalizedSessionId);
+                        removeSessionMappings(&mut state, &normalizedSessionId);
+                        removed
+                    };
+                    drop(removed);
+                    return Err(HostError::new(format!(
+                        "Terminal session {normalizedSessionId} closed because its command could not be interrupted: {}",
+                        error.message
+                    )));
+                }
+                None => {}
+            }
+        } else {
+            let mut state = self.lockState()?;
+            if let Some(session) = state.ptySessions.get_mut(&normalizedSessionId) {
+                session.commandRunning = false;
+                if let Some(workingDir) = result
                     .as_ref()
                     .ok()
                     .and_then(|receipt| receipt.workingDir.clone())

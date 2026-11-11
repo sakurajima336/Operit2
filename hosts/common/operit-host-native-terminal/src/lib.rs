@@ -23,6 +23,8 @@ const PTY_OUTPUT_LIMIT: usize = 16 * 1024 * 1024;
 const PTY_PROMPT_MARKER_PREFIX: &[u8] = b"\x1b]133;OperitPrompt=";
 const PTY_PROMPT_MARKER_END: u8 = 7;
 const COMMAND_CANCEL_SETTLE_TIMEOUT_MS: u64 = 3000;
+const COMMAND_CANCEL_SIGINT_SETTLE_TIMEOUT_MS: u64 = 1500;
+const COMMAND_CANCEL_SIGKILL_SETTLE_TIMEOUT_MS: u64 = 1500;
 const PLATFORM: &str = "posix";
 const TERMINAL: &str = "native";
 const PRIMARY_TERMINAL_TYPE: &str = "bash";
@@ -566,17 +568,59 @@ impl TerminalHost for NativePtyTerminalHost {
             commandProtocol,
             onOutput,
         );
-        {
-            let mut state = self.lockState()?;
-            if let Some(session) = state.ptySessions.get_mut(&normalizedSessionId) {
-                // Release the busy flag even if interrupting a broken PTY fails.
-                // The state lock still excludes new commands during cancellation.
-                session.commandRunning = false;
-                if result.as_ref().map_or(true, |receipt| receipt.timedOut) {
-                    if let Some(workingDir) = cancelTimedOutPtyCommand(session)? {
+        let commandTimedOut = result.as_ref().map_or(true, |receipt| receipt.timedOut);
+        if commandTimedOut {
+            // Keep the session busy until the shell has acknowledged the
+            // interrupt. If the command cannot be interrupted at all, close
+            // the session instead of leaving a broken PTY in the table: the
+            // next command then starts from a fresh session.
+            let cancelOutcome = {
+                let mut state = self.lockState()?;
+                match state.ptySessions.get_mut(&normalizedSessionId) {
+                    Some(session) => Some(cancelTimedOutPtyCommand(session)),
+                    None => None,
+                }
+            };
+            match cancelOutcome {
+                Some(Ok(Some(workingDir))) => {
+                    let mut state = self.lockState()?;
+                    if let Some(session) = state.ptySessions.get_mut(&normalizedSessionId) {
+                        session.commandRunning = false;
                         session.workingDir = workingDir;
                     }
-                } else if let Some(workingDir) = result
+                }
+                Some(Ok(None)) => {
+                    let removed = {
+                        let mut state = self.lockState()?;
+                        let removed = state.ptySessions.remove(&normalizedSessionId);
+                        removeSessionMappings(&mut state, &normalizedSessionId);
+                        removed
+                    };
+                    drop(removed);
+                    return Err(HostError::new(format!(
+                        "Terminal session {normalizedSessionId} closed because its command could not be interrupted"
+                    )));
+                }
+                Some(Err(error)) => {
+                    let removed = {
+                        let mut state = self.lockState()?;
+                        let removed = state.ptySessions.remove(&normalizedSessionId);
+                        removeSessionMappings(&mut state, &normalizedSessionId);
+                        removed
+                    };
+                    drop(removed);
+                    return Err(HostError::new(format!(
+                        "Terminal session {normalizedSessionId} closed because its command could not be interrupted: {}",
+                        error.message
+                    )));
+                }
+                None => {}
+            }
+        } else {
+            let mut state = self.lockState()?;
+            if let Some(session) = state.ptySessions.get_mut(&normalizedSessionId) {
+                session.commandRunning = false;
+                if let Some(workingDir) = result
                     .as_ref()
                     .ok()
                     .and_then(|receipt| receipt.workingDir.clone())
@@ -1127,10 +1171,61 @@ fn cancelTimedOutPtyCommand(session: &mut PtySession) -> HostResult<Option<Strin
         writer.flush()?;
     }
 
-    let deadline = Instant::now() + Duration::from_millis(COMMAND_CANCEL_SETTLE_TIMEOUT_MS);
+    // Stage 1: with ISIG enabled the line discipline turns ^C into SIGINT for
+    // the foreground process group, which stops most commands.
+    if let Some(workingDir) = waitForPtyPromptAfterCancel(
+        &session.commandOutput,
+        Duration::from_millis(COMMAND_CANCEL_SETTLE_TIMEOUT_MS),
+    )? {
+        return Ok(Some(workingDir));
+    }
+
+    // Stages 2-3 (unix only): a program in raw mode or one trapping SIGINT
+    // never reacts to the ^C byte, so signal the foreground process group
+    // directly and escalate from SIGINT to SIGKILL.
+    #[cfg(unix)]
+    {
+        if let Some(processGroupId) = session.master.process_group_leader() {
+            if signalPtyProcessGroup(processGroupId, libc::SIGINT) {
+                reinjectPtyPromptMarker(session)?;
+                if let Some(workingDir) = waitForPtyPromptAfterCancel(
+                    &session.commandOutput,
+                    Duration::from_millis(COMMAND_CANCEL_SIGINT_SETTLE_TIMEOUT_MS),
+                )? {
+                    return Ok(Some(workingDir));
+                }
+            }
+            // SIGKILL cannot free a wedged shell: when the shell itself is
+            // the foreground group, killing it would only destroy the
+            // session, which the caller already does when cancellation
+            // reports failure.
+            let shellIsForeground = session
+                .child
+                .process_id()
+                .is_some_and(|pid| pid == processGroupId as u32);
+            if !shellIsForeground && signalPtyProcessGroup(processGroupId, libc::SIGKILL) {
+                reinjectPtyPromptMarker(session)?;
+                if let Some(workingDir) = waitForPtyPromptAfterCancel(
+                    &session.commandOutput,
+                    Duration::from_millis(COMMAND_CANCEL_SIGKILL_SETTLE_TIMEOUT_MS),
+                )? {
+                    return Ok(Some(workingDir));
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
+#[allow(non_snake_case)]
+fn waitForPtyPromptAfterCancel(
+    output: &PtyCommandOutput,
+    timeout: Duration,
+) -> HostResult<Option<String>> {
+    let deadline = Instant::now() + timeout;
     let mut collected = Vec::new();
     while Instant::now() < deadline {
-        let drained = drainPtyCommandOutput(&session.commandOutput, &mut collected, deadline)?;
+        let drained = drainPtyCommandOutput(output, &mut collected, deadline)?;
         if drained == 0 {
             continue;
         }
@@ -1139,6 +1234,29 @@ fn cancelTimedOutPtyCommand(session: &mut PtySession) -> HostResult<Option<Strin
         }
     }
     Ok(None)
+}
+
+#[allow(non_snake_case)]
+fn reinjectPtyPromptMarker(session: &mut PtySession) -> HostResult<()> {
+    if session.commandProtocol != PtyCommandProtocol::ExplicitMarker {
+        return Ok(());
+    }
+    let mut writer = session
+        .writer
+        .lock()
+        .map_err(|_| HostError::new("pty writer mutex poisoned"))?;
+    let markerCommand = format!("__operit_status=$?; {}\r", ptyPromptMarkerCommand());
+    writer.write_all(markerCommand.as_bytes())?;
+    writer.flush()?;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[allow(non_snake_case)]
+fn signalPtyProcessGroup(processGroupId: libc::pid_t, signal: libc::c_int) -> bool {
+    // A negative pid targets every process in the group.
+    let result = unsafe { libc::kill(-processGroupId, signal) };
+    result == 0
 }
 
 #[allow(non_snake_case)]

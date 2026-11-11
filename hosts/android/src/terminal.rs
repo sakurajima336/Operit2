@@ -27,6 +27,8 @@ const PTY_OUTPUT_LIMIT: usize = 16 * 1024 * 1024;
 const PTY_PROMPT_MARKER_PREFIX: &[u8] = b"\x1b]133;OperitPrompt=";
 const PTY_PROMPT_MARKER_END: u8 = 7;
 const COMMAND_CANCEL_SETTLE_TIMEOUT_MS: u64 = 3000;
+const COMMAND_CANCEL_SIGINT_SETTLE_TIMEOUT_MS: u64 = 1500;
+const COMMAND_CANCEL_SIGKILL_SETTLE_TIMEOUT_MS: u64 = 1500;
 const PLATFORM: &str = "android";
 const PROOT_TERMINAL: &str = "proot";
 const ANDROID_SYSTEM_TERMINAL: &str = "android-system";
@@ -422,7 +424,7 @@ impl TerminalHost for AndroidTerminalHost {
         let normalizedSessionId = nonBlank(sessionId, "session_id")?;
         let normalizedCommand = nonBlank(command, "command")?;
         let commandLine = crate::terminal_command::posixCommandLine(&normalizedCommand);
-        let (terminalType, commandOutput, writer) = {
+        let (terminalType, commandOutput, writer, masterFd, shellPid) = {
             let mut state = self.lockState()?;
             let session = state
                 .ptySessions
@@ -439,10 +441,16 @@ impl TerminalHost for AndroidTerminalHost {
             let commandInput = format!("{commandLine}\r");
             writeAndroidPtyBytes(&session.writer, commandInput.as_bytes())?;
             session.commandRunning = true;
+            let shellPid = match session.pid {
+                AndroidPtyProcess::Local(pid) => pid,
+                AndroidPtyProcess::Shizuku(pid) => pid,
+            };
             (
                 session.terminalType.clone(),
                 session.commandOutput.clone(),
                 session.writer.clone(),
+                session.masterFd,
+                shellPid,
             )
         };
         let result = executeAndroidPtyCommandInSession(
@@ -454,7 +462,7 @@ impl TerminalHost for AndroidTerminalHost {
         // Keep the session busy until the shell has acknowledged the interrupt.
         // Waiting outside the registry lock leaves input and close available.
         let settledDirectory = if result.as_ref().map_or(true, |receipt| receipt.timedOut) {
-            cancelTimedOutAndroidPtyCommand(&writer, &commandOutput).map(Some)
+            cancelTimedOutAndroidPtyCommand(&writer, &commandOutput, masterFd, shellPid).map(Some)
         } else {
             Ok(result.as_ref().ok().and_then(|receipt| receipt.workingDir.clone()))
         };
@@ -971,22 +979,75 @@ fn executeAndroidPtyCommandInSession(
 fn cancelTimedOutAndroidPtyCommand(
     writer: &Arc<Mutex<RawFd>>,
     output: &AndroidPtyCommandOutput,
+    masterFd: RawFd,
+    shellPid: i32,
 ) -> HostResult<String> {
     writeAndroidPtyBytes(writer, b"\x03")?;
 
-    let deadline = Instant::now() + Duration::from_millis(COMMAND_CANCEL_SETTLE_TIMEOUT_MS);
+    // Stage 1: with ISIG enabled the line discipline turns ^C into SIGINT for
+    // the foreground process group, which stops most commands.
+    if let Some(workingDir) = waitForAndroidPtyPromptAfterCancel(
+        output,
+        Duration::from_millis(COMMAND_CANCEL_SETTLE_TIMEOUT_MS),
+    )? {
+        return Ok(workingDir);
+    }
+
+    // Stages 2-3: a program in raw mode or one trapping SIGINT never reacts
+    // to the ^C byte, so signal the foreground process group directly and
+    // escalate from SIGINT to SIGKILL.
+    let processGroupId = unsafe { libc::tcgetpgrp(masterFd) };
+    if processGroupId > 0 {
+        if signalAndroidPtyProcessGroup(processGroupId, libc::SIGINT) {
+            if let Some(workingDir) = waitForAndroidPtyPromptAfterCancel(
+                output,
+                Duration::from_millis(COMMAND_CANCEL_SIGINT_SETTLE_TIMEOUT_MS),
+            )? {
+                return Ok(workingDir);
+            }
+        }
+        // SIGKILL cannot free a wedged shell: when the shell itself is the
+        // foreground group, killing it would only destroy the session, which
+        // the caller already does when cancellation reports failure.
+        if shellPid != processGroupId && signalAndroidPtyProcessGroup(processGroupId, libc::SIGKILL)
+        {
+            if let Some(workingDir) = waitForAndroidPtyPromptAfterCancel(
+                output,
+                Duration::from_millis(COMMAND_CANCEL_SIGKILL_SETTLE_TIMEOUT_MS),
+            )? {
+                return Ok(workingDir);
+            }
+        }
+    }
+    Err(HostError::new(
+        "Timed out waiting for the interrupted Android terminal to become ready",
+    ))
+}
+
+#[allow(non_snake_case)]
+fn waitForAndroidPtyPromptAfterCancel(
+    output: &AndroidPtyCommandOutput,
+    timeout: Duration,
+) -> HostResult<Option<String>> {
+    let deadline = Instant::now() + timeout;
     let mut collected = Vec::new();
     while Instant::now() < deadline {
-        let drained =
-            drainAndroidPtyCommandOutput(output, &mut collected, deadline)?;
+        let drained = drainAndroidPtyCommandOutput(output, &mut collected, deadline)?;
         if drained == 0 {
             continue;
         }
         if let Some(marker) = findLastAndroidPtyPromptMarker(&collected)? {
-            return Ok(marker.workingDir);
+            return Ok(Some(marker.workingDir));
         }
     }
-    Err(HostError::new("Timed out waiting for the interrupted Android terminal to become ready"))
+    Ok(None)
+}
+
+#[allow(non_snake_case)]
+fn signalAndroidPtyProcessGroup(processGroupId: libc::pid_t, signal: libc::c_int) -> bool {
+    // A negative pid targets every process in the group.
+    let result = unsafe { libc::kill(-processGroupId, signal) };
+    result == 0
 }
 
 fn drainAndroidPtyCommandOutput(
