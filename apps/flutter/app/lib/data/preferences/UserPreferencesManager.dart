@@ -87,6 +87,7 @@ class UserPreferencesManager {
     'useBackgroundBlur': 'use_background_blur',
     'backgroundBlurRadius': 'background_blur_radius',
     'backgroundDimAmount': 'background_dim_amount',
+    'cardBlurRadius': 'card_blur_radius',
     'transparentSurfaceEnabled': 'transparent_surface_enabled',
     'chatInputFloating': 'chat_input_floating',
     'inputStyle': 'input_style',

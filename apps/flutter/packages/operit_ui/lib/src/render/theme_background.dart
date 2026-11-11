@@ -52,15 +52,14 @@ class ThemeBackground extends StatelessWidget {
             ),
           // Dimming veil above the media: opacity and blur alone cannot fix
           // readability, because neither changes the luminance behind the
-          // content. Dark themes darken with black, light themes lift with
-          // white, so foreground contrast improves either way.
+          // content. The veil always darkens with black, in light themes
+          // too: the setting exists for backgrounds that are too bright,
+          // and the pale surfaces above it gain contrast either way.
           if (hasMedia && themePreferenceSnapshot.backgroundDimAmount > 0)
             AnimatedContainer(
               duration: _backgroundDuration,
               curve: Curves.easeOutCubic,
-              color: (Theme.of(context).brightness == Brightness.dark
-                      ? Colors.black
-                      : Colors.white)
+              color: Colors.black
                   .withValues(
                     alpha: themePreferenceSnapshot.backgroundDimAmount.clamp(
                       0,
