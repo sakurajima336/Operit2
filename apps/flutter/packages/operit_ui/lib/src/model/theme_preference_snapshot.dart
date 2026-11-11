@@ -17,6 +17,7 @@ class ThemePreferenceSnapshot {
     required this.useBackgroundBlur,
     required this.backgroundBlurRadius,
     this.backgroundDimAmount = 0,
+    this.cardBlurRadius = 14,
     required this.transparentSurfaceEnabled,
     required this.chatInputFloating,
     required this.inputStyle,
@@ -124,6 +125,7 @@ class ThemePreferenceSnapshot {
   final bool useBackgroundBlur;
   final double backgroundBlurRadius;
   final double backgroundDimAmount;
+  final double cardBlurRadius;
   final bool transparentSurfaceEnabled;
   final bool chatInputFloating;
   final String inputStyle;
@@ -233,6 +235,7 @@ class ThemePreferenceSnapshot {
       'useBackgroundBlur': useBackgroundBlur,
       'backgroundBlurRadius': backgroundBlurRadius,
       'backgroundDimAmount': backgroundDimAmount,
+      'cardBlurRadius': cardBlurRadius,
       'transparentSurfaceEnabled': transparentSurfaceEnabled,
       'chatInputFloating': chatInputFloating,
       'inputStyle': inputStyle,
@@ -363,6 +366,7 @@ class ThemePreferenceSnapshot {
       backgroundBlurRadius: requiredDouble('backgroundBlurRadius'),
       backgroundDimAmount:
           (json['backgroundDimAmount'] as num?)?.toDouble() ?? 0,
+      cardBlurRadius: (json['cardBlurRadius'] as num?)?.toDouble() ?? 14,
       transparentSurfaceEnabled: requiredBool('transparentSurfaceEnabled'),
       chatInputFloating: requiredBool('chatInputFloating'),
       inputStyle: requiredString('inputStyle'),

@@ -364,6 +364,7 @@ class UserPreferencesManager {
     bool? useBackgroundBlur,
     double? backgroundBlurRadius,
     double? backgroundDimAmount,
+    double? cardBlurRadius,
     bool? transparentSurfaceEnabled,
     bool? chatInputFloating,
     String? inputStyle,
@@ -458,6 +459,7 @@ class UserPreferencesManager {
         'backgroundBlurRadius': backgroundBlurRadius,
       if (backgroundDimAmount != null)
         'backgroundDimAmount': backgroundDimAmount,
+      if (cardBlurRadius != null) 'cardBlurRadius': cardBlurRadius,
       if (transparentSurfaceEnabled != null)
         'transparentSurfaceEnabled': transparentSurfaceEnabled,
       if (chatInputFloating != null) 'chatInputFloating': chatInputFloating,

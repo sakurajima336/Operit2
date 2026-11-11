@@ -39,6 +39,7 @@ class ThemePreferenceDefaults {
     useBackgroundBlur: false,
     backgroundBlurRadius: 12,
     backgroundDimAmount: 0,
+    cardBlurRadius: 14,
     transparentSurfaceEnabled: false,
     chatInputFloating: false,
     inputStyle: INPUT_STYLE_AGENT,

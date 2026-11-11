@@ -1509,6 +1509,7 @@
   "settingsAppearanceBackgroundBlur": "Blur background",
   "settingsAppearanceBackgroundBlurRadius": "Blur strength",
   "settingsAppearanceBackgroundDim": "Background dimming",
+  "settingsAppearanceCardBlur": "Card blur",
   "settingsAppearanceBackgroundVideoMuted": "Mute video background",
   "settingsAppearanceBackgroundVideoLoop": "Loop video background",
   "settingsAppearanceTextSection": "Text",

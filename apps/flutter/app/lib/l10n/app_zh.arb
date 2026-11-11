@@ -1417,6 +1417,7 @@
   "settingsAppearanceBackgroundBlur": "背景模糊",
   "settingsAppearanceBackgroundBlurRadius": "模糊强度",
   "settingsAppearanceBackgroundDim": "背景压暗",
+  "settingsAppearanceCardBlur": "卡片模糊",
   "settingsAppearanceBackgroundVideoMuted": "视频背景静音",
   "settingsAppearanceBackgroundVideoLoop": "视频背景循环",
   "settingsAppearanceTextSection": "文字",

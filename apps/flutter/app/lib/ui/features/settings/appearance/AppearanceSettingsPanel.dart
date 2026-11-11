@@ -500,6 +500,24 @@ class _AppearanceThemeEditor extends StatelessWidget {
                 );
               },
             ),
+            const Divider(height: 14),
+            SettingsSliderRow(
+              icon: Icons.blur_on_outlined,
+              label: l10n.settingsAppearanceCardBlur,
+              value: snapshot.cardBlurRadius.clamp(0, 32),
+              min: 0,
+              max: 32,
+              divisions: 32,
+              valueText: '${snapshot.cardBlurRadius.round()} px',
+              onChanged: (value) {
+                themeController.previewThemeSettings(cardBlurRadius: value);
+              },
+              onChangeEnd: (value) {
+                unawaited(
+                  themeController.saveThemeSettings(cardBlurRadius: value),
+                );
+              },
+            ),
           ],
         ),
       ],

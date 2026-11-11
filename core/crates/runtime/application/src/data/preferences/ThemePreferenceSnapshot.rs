@@ -520,6 +520,10 @@ pub(crate) const EXTENDED_SNAPSHOT_FIELDS: &[SnapshotField] = &[
     // reason: configurations saved before it existed do not own the field and
     // fall back to no dimming.
     SnapshotField { json_key: "backgroundDimAmount", preference_key: "background_dim_amount", kind: FieldKind::Number { min: 0.0, max: 1.0 } },
+    // Frosted-glass card blur radius, added after the released contract for
+    // the same reason: configurations saved before it existed do not own the
+    // field and fall back to the established card blur.
+    SnapshotField { json_key: "cardBlurRadius", preference_key: "card_blur_radius", kind: FieldKind::Number { min: 0.0, max: 32.0 } },
 ];
 
 /// Enumerates the declared ordinary appearance fields without inferring key names.

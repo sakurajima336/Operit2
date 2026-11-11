@@ -2885,6 +2885,9 @@ class AppLocalizationsZh extends AppLocalizations {
   String get settingsAppearanceBackgroundDim => '背景压暗';
 
   @override
+  String get settingsAppearanceCardBlur => '卡片模糊';
+
+  @override
   String get settingsAppearanceBackgroundVideoMuted => '视频背景静音';
 
   @override

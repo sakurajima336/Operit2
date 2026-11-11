@@ -70,11 +70,16 @@ class ThemeGlassSurface extends StatelessWidget {
     this.material = false,
     this.enableBackdropFilter = true,
     this.clip = true,
+    this.blurScale = 1,
   });
 
   final Widget child;
   final Color color;
   final bool transparentSurface;
+
+  /// Scales the established per-layer frost blur radii; 1 keeps the original
+  /// styling, 0 removes the blur while keeping the translucent tint.
+  final double blurScale;
   final BorderRadius borderRadius;
   final BoxBorder? border;
   final List<BoxShadow> shadows;
@@ -130,7 +135,10 @@ class ThemeGlassSurface extends StatelessWidget {
     return _clipBackdrop(
       BackdropFilter(
         backdropGroupKey: _ThemeGlassSurfaceScope.keyOf(context, layer),
-        filter: ui.ImageFilter.blur(sigmaX: style.blur, sigmaY: style.blur),
+        filter: ui.ImageFilter.blur(
+          sigmaX: style.blur * blurScale,
+          sigmaY: style.blur * blurScale,
+        ),
         child: DecoratedBox(
           decoration: decoration,
           // Nested surfaces sample this surface's result, not its backdrop.

@@ -3005,6 +3005,9 @@ class AppLocalizationsEn extends AppLocalizations {
   String get settingsAppearanceBackgroundDim => 'Background dimming';
 
   @override
+  String get settingsAppearanceCardBlur => 'Card blur';
+
+  @override
   String get settingsAppearanceBackgroundVideoMuted => 'Mute video background';
 
   @override

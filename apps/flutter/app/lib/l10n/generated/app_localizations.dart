@@ -5406,6 +5406,12 @@ abstract class AppLocalizations {
   /// **'Background dimming'**
   String get settingsAppearanceBackgroundDim;
 
+  /// No description provided for @settingsAppearanceCardBlur.
+  ///
+  /// In en, this message translates to:
+  /// **'Card blur'**
+  String get settingsAppearanceCardBlur;
+
   /// No description provided for @settingsAppearanceBackgroundVideoMuted.
   ///
   /// In en, this message translates to:

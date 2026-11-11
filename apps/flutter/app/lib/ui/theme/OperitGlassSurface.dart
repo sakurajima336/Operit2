@@ -37,10 +37,10 @@ class OperitGlassSurface extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final snapshot = OperitTheme.of(context).themePreferenceSnapshot;
     return ThemeGlassSurface(
-      transparentSurface: OperitTheme.of(
-        context,
-      ).themePreferenceSnapshot.transparentSurfaceEnabled,
+      transparentSurface: snapshot.transparentSurfaceEnabled,
+      blurScale: snapshot.cardBlurRadius / 14,
       child: child,
       color: color,
       borderRadius: borderRadius,

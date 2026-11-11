@@ -564,6 +564,7 @@ class OperitThemeController {
     double? backgroundImageOpacity,
     double? backgroundBlurRadius,
     double? backgroundDimAmount,
+    double? cardBlurRadius,
     double? fontScale,
   }) {
     // Keep slider previews local until their explicit save operation.
@@ -572,6 +573,7 @@ class OperitThemeController {
       backgroundImageOpacity: backgroundImageOpacity,
       backgroundBlurRadius: backgroundBlurRadius,
       backgroundDimAmount: backgroundDimAmount,
+      cardBlurRadius: cardBlurRadius,
       fontScale: fontScale,
     );
     _themePreferenceSnapshot = snapshot;
@@ -637,6 +639,7 @@ class OperitThemeController {
     bool? useBackgroundBlur,
     double? backgroundBlurRadius,
     double? backgroundDimAmount,
+    double? cardBlurRadius,
     double? fontScale,
     String? customFontPath,
     bool? showThinkingProcess,
@@ -716,6 +719,7 @@ class OperitThemeController {
       useBackgroundBlur: useBackgroundBlur,
       backgroundBlurRadius: backgroundBlurRadius,
       backgroundDimAmount: backgroundDimAmount,
+      cardBlurRadius: cardBlurRadius,
       fontScale: fontScale,
       customFontPath: customFontPath,
       showThinkingProcess: showThinkingProcess,
@@ -989,6 +993,7 @@ ThemePreferenceSnapshot _themePreferenceSnapshotWith(
   double? backgroundImageOpacity,
   double? backgroundBlurRadius,
   double? backgroundDimAmount,
+  double? cardBlurRadius,
   double? fontScale,
 }) {
   return ThemePreferenceSnapshot(
@@ -1007,6 +1012,7 @@ ThemePreferenceSnapshot _themePreferenceSnapshotWith(
     useBackgroundBlur: snapshot.useBackgroundBlur,
     backgroundBlurRadius: backgroundBlurRadius ?? snapshot.backgroundBlurRadius,
     backgroundDimAmount: backgroundDimAmount ?? snapshot.backgroundDimAmount,
+    cardBlurRadius: cardBlurRadius ?? snapshot.cardBlurRadius,
     transparentSurfaceEnabled: snapshot.transparentSurfaceEnabled,
     chatInputFloating: snapshot.chatInputFloating,
     inputStyle: snapshot.inputStyle,
