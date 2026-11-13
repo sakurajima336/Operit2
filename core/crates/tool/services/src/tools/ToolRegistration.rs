@@ -27,7 +27,8 @@ use operit_tools::tools::defaultTool::standard::StandardMusicTools::{
     MusicToolExecutor, MusicToolOperation, StandardMusicTools,
 };
 use operit_tools::tools::defaultTool::standard::StandardSystemOperationTools::{
-    StandardSystemOperationTools, SystemOperationToolExecutor, SystemOperationToolOperation,
+    InstallAppToolExecutor, StandardSystemOperationTools, SystemOperationToolExecutor,
+    SystemOperationToolOperation,
 };
 use operit_tools::tools::defaultTool::standard::StandardTerminalTools::{
     StandardTerminalTools, TerminalToolExecutor, TerminalToolOperation,
@@ -155,6 +156,12 @@ async fn executeSleep(tool: &AITool, context: &HostManager) -> ToolResult {
 /// Registers the public tools with their explicit execution contracts.
 #[allow(non_snake_case)]
 fn registerPublicTools(handler: &mut AIToolHandler, context: &HostManager) {
+    for name in [BuiltinToolName::ListWindows, BuiltinToolName::FocusWindow, BuiltinToolName::GetPageInfo, BuiltinToolName::Tap, BuiltinToolName::LongPress,
+        BuiltinToolName::ClickElement, BuiltinToolName::SetInputText, BuiltinToolName::PressKey, BuiltinToolName::Swipe] {
+        handler.registerBuiltinTool(name, Box::new(
+            crate::tools::defaultTool::standard::StandardUiTools::UiToolExecutor { host: context.uiAutomationHost.clone() }
+        ), ToolRegistrationVisibility::PUBLIC);
+    }
     handler.registerBuiltinTool(
         BuiltinToolName::Sleep,
         RegisteredToolExecutor::Shared(Arc::new(SleepToolExecutor)),
@@ -273,7 +280,10 @@ fn registerPublicTools(handler: &mut AIToolHandler, context: &HostManager) {
         Box::new(ToolGetter::getWebVisitTool(context)),
         ToolRegistrationVisibility::PUBLIC,
     );
-    registerSystemOperationTools(handler, ToolGetter::getSystemOperationTools(context));
+    registerSystemOperationTools(
+        handler,
+        ToolGetter::getSystemOperationTools(context, handler.runtimeSupport()),
+    );
     registerMusicTools(handler, ToolGetter::getMusicTools(context));
     registerBluetoothTools(handler, ToolGetter::getBluetoothTools(context));
     registerChatTools(
@@ -569,11 +579,12 @@ fn registerSystemOperationTools(
         BuiltinToolName::GetSystemSetting,
         SystemOperationToolOperation::GetSystemSetting,
     );
-    registerSystemOperationTool(
-        handler,
-        &systemOperationTools,
+    handler.registerBuiltinTool(
         BuiltinToolName::InstallApp,
-        SystemOperationToolOperation::InstallApp,
+        RegisteredToolExecutor::Asynchronous(Box::new(InstallAppToolExecutor {
+            tools: systemOperationTools.clone(),
+        })),
+        ToolRegistrationVisibility::INTERNAL,
     );
     registerSystemOperationTool(
         handler,

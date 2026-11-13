@@ -338,6 +338,8 @@ struct Operit1MemorySpace {
     profileAutoUpdateEnabled: bool,
     #[serde(default)]
     profileAutoUpdateLocked: bool,
+    #[serde(skip)]
+    userMarkdownEntry: Option<String>,
 }
 
 /// Matches the released memory-space schema's initial profile update setting.
@@ -456,7 +458,7 @@ fn operit1ActiveProfileId(parsed: &ParsedOperit1Snapshot) -> Result<String, Stri
 }
 
 #[allow(non_snake_case)]
-/// Reads current memory-space metadata without interpreting it as structured user profiles.
+/// Adopts registered spaces and live database bindings, matching Kotlin's direct ObjectBox access by ID.
 fn buildOperit1MemorySpaces(
     parsed: &ParsedOperit1Snapshot,
 ) -> Result<BTreeMap<String, Operit1MemorySpace>, String> {
@@ -479,7 +481,7 @@ fn buildOperit1MemorySpaces(
             &key,
             &format!("Operit1 用户偏好缺少记忆库配置：{profileId}"),
         )?;
-        let profile: Operit1MemorySpace = serde_json::from_str(raw)
+        let mut profile: Operit1MemorySpace = serde_json::from_str(raw)
             .map_err(|error| format!("Operit1 记忆库配置格式不正确：{profileId}: {error}"))?;
         if profile.id != profileId {
             return Err(format!(
@@ -490,9 +492,35 @@ fn buildOperit1MemorySpaces(
         if profile.name.trim().is_empty() {
             return Err(format!("Operit1 记忆库名称为空：{profileId}"));
         }
+        profile.userMarkdownEntry = Some(operit1UserMarkdownEntry(&profileId));
         if profiles.insert(profile.id.clone(), profile).is_some() {
             return Err(format!("Operit1 记忆库 ID 重复：{profileId}"));
         }
+    }
+    let bindings = collectOperit1CharacterMemoryProfileBindings(parsed)?;
+    for profileId in std::iter::once(operit1ActiveProfileId(parsed)?)
+        .chain(bindings.into_values())
+    {
+        validateOperit1ProfileId(&profileId)?;
+        if profiles.contains_key(&profileId) {
+            continue;
+        }
+        let databaseEntry = operit1ObjectBoxEntryForProfile(&profileId);
+        if !parsed.archive.hasEntry(&databaseEntry) {
+            return Err(format!("Operit1 引用的记忆库缺少注册信息和数据库：{profileId}"));
+        }
+        let documentEntry = operit1UserMarkdownEntry(&profileId);
+        // The database identity survives even when its registry metadata and profile document do not.
+        profiles.insert(profileId.clone(), Operit1MemorySpace {
+            id: profileId.clone(),
+            name: profileId.clone(),
+            profileAutoUpdateEnabled: enabledProfileUpdates(),
+            profileAutoUpdateLocked: false,
+            userMarkdownEntry: parsed.archive.hasEntry(&documentEntry).then_some(documentEntry),
+        });
+        AppLogger::i("Operit1SnapshotImport", &format!(
+            "Adopting referenced ObjectBox database without registry metadata: {profileId}"
+        ));
     }
     Ok(profiles)
 }
@@ -503,21 +531,11 @@ fn operit1UserMarkdownEntry(profileId: &str) -> String {
     format!("payload/files/memory-space-profiles/{profileId}/user.md")
 }
 
-/// Validates listed memory spaces, bindings and documents; raw snapshots can retain unlisted databases.
+/// Validates documents for adopted spaces; registered spaces must retain their declared document.
 fn validateOperit1MemorySpaces(parsed: &ParsedOperit1Snapshot) -> Result<(), String> {
     let spaces = buildOperit1MemorySpaces(parsed)?;
-    let activeId = operit1ActiveProfileId(parsed)?;
-    if !spaces.contains_key(&activeId) {
-        return Err(format!("Operit1 当前记忆库不在记忆库列表中：{activeId}"));
-    }
-    for profileId in collectOperit1CharacterMemoryProfileBindings(parsed)?.values() {
-        if !spaces.contains_key(profileId) {
-            return Err(format!("Operit1 角色卡绑定了不存在的记忆库：{profileId}"));
-        }
-    }
-    for profileId in spaces.keys() {
-        let entry = operit1UserMarkdownEntry(profileId);
-        let metadata = parsed.archive.entries.get(&entry).ok_or_else(|| {
+    for entry in spaces.values().filter_map(|space| space.userMarkdownEntry.as_ref()) {
+        let metadata = parsed.archive.entries.get(entry).ok_or_else(|| {
             format!("快照缺少记忆库用户文档：{entry}，请使用最新版 Operit1 完成升级后重新导出快照")
         })?;
         // Operit1 limits each document to 12,000 UTF-16 code units.
@@ -525,7 +543,7 @@ fn validateOperit1MemorySpaces(parsed: &ParsedOperit1Snapshot) -> Result<(), Str
             return Err(format!("Operit1 记忆库用户文档超过大小限制：{entry}"));
         }
         let mut bytes = Vec::new();
-        parsed.copyEntryTo(&entry, &mut bytes)?;
+        parsed.copyEntryTo(entry, &mut bytes)?;
         let markdown = std::str::from_utf8(&bytes)
             .map_err(|error| format!("Operit1 记忆库用户文档不是 UTF-8：{entry}: {error}"))?;
         if markdown.encode_utf16().count() > 12_000 {
@@ -533,6 +551,18 @@ fn validateOperit1MemorySpaces(parsed: &ParsedOperit1Snapshot) -> Result<(), Str
         }
     }
     Ok(())
+}
+
+/// Reads a space's source document, including the absent document of an unregistered database.
+fn readOperit1UserMarkdown(
+    parsed: &ParsedOperit1Snapshot,
+    profile: &Operit1MemorySpace,
+) -> Result<Vec<u8>, String> {
+    let mut document = Vec::new();
+    if let Some(entry) = &profile.userMarkdownEntry {
+        parsed.copyEntryTo(entry, &mut document)?;
+    }
+    Ok(document)
 }
 
 #[allow(non_snake_case)]
@@ -623,13 +653,23 @@ fn buildOperit2TtsConfig(parsed: &ParsedOperit1Snapshot) -> Result<Option<TtsCon
             updatedAt: now,
         }));
     }
-    let httpConfigRaw = requiredPreferenceString(
-        preferences,
-        "tts_http_config",
-        &format!("Operit1 TTS 服务缺少 HTTP 配置：{serviceType}"),
-    )?;
-    let httpConfig: Operit1TtsHttpConfig = serde_json::from_str(httpConfigRaw)
+    let httpConfigRaw = match optionalPreferenceString(preferences, "tts_http_config")? {
+        Some(raw) => raw,
+        // Kotlin's absent HTTP preset has an empty URL and represents an unconfigured service.
+        None if serviceType == "HTTP_TTS" => return Ok(None),
+        None => return Err(format!("Operit1 TTS 服务缺少 HTTP 配置：{serviceType}")),
+    };
+    let httpConfig: Operit1TtsHttpConfig = serde_json::from_str(&httpConfigRaw)
         .map_err(|error| format!("Operit1 TTS HTTP 配置格式不正确：{error}"))?;
+    // Kotlin permits saving an empty HTTP URL and validates it only when speech initializes.
+    // It is not a usable provider to adopt, so leave the target speech selection untouched.
+    if serviceType == "HTTP_TTS" && httpConfig.urlTemplate.trim().is_empty() {
+        AppLogger::i(
+            "Operit1SnapshotImport",
+            "Source HTTP TTS is unconfigured; no speech configuration to import",
+        );
+        return Ok(None);
+    }
     use Operit1TtsConfigSource::{Preferences, ProviderCatalog};
     use Operit1TtsVoiceFormat::{Literal, ModelQualified};
     // Declare source-field ownership once; the conversion below follows these contracts uniformly.
@@ -766,7 +806,7 @@ struct Operit1TtsHttpResponsePipelineStep {
 }
 
 #[allow(non_snake_case)]
-/// Resolves a fixed character model to the imported provider and exact source model index.
+/// Resolves a fixed character model using Kotlin's effective saved-index semantics.
 fn resolveOperit1CharacterChatModelBinding(
     parsed: &ParsedOperit1Snapshot,
     preferences: &HashMap<String, Operit1PreferenceValue>,
@@ -788,15 +828,15 @@ fn resolveOperit1CharacterChatModelBinding(
         preferences,
         &format!("character_card_{cardId}_chat_model_index"),
     )?
-    .unwrap_or(0)
-    .max(0);
+    .unwrap_or(0);
     let config = parsed.configById(configId)?;
     let modelIds = splitModelIds(&config.modelName);
+    let modelIndex = operit1EffectiveModelIndex(&modelIds, modelIndex);
     modelIds
         .get(modelIndex as usize)
         .cloned()
         .map(|modelId| Some((operit1ProviderId(&config.id), modelId)))
-        .ok_or_else(|| format!("Operit1 角色卡模型索引越界：{cardId}/{modelIndex}"))
+        .ok_or_else(|| format!("Operit1 角色卡绑定的配置没有模型：{cardId}/{configId}"))
 }
 
 #[allow(non_snake_case)]

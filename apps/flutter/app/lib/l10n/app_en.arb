@@ -173,6 +173,8 @@
   "messageLocatorFavorites": "Favorites",
   "messageLocatorNoFavorites": "No favorite messages yet",
   "messageLocatorLoadFailed": "Could not load messages. Please try again.",
+  "messageTransformFailed": "Failed to process message display: {error}",
+  "@messageTransformFailed": { "placeholders": { "error": { "type": "String" } } },
   "messageLocatorFavoriteFailed": "Could not update favorite. Please try again.",
   "messageLocatorAddFavorite": "Favorite message",
   "messageLocatorRemoveFavorite": "Remove favorite",
@@ -214,6 +216,7 @@
   },
   "messageSenderOther": "Other",
   "hiddenUserMessage": "Hidden user message",
+  "autoTriggeredUserMessage": "AUTO",
   "workspaceSetupTitle": "Set up workspace",
   "workspaceSetupSubtitle": "Provide a dedicated file environment for your AI projects",
   "workspaceCreateTitle": "Create workspace",
@@ -892,8 +895,8 @@
       }
     }
   },
-  "settingsModelCatalogNotDownloaded": "Model details have not been downloaded yet",
-  "settingsModelCatalogRetry": "Retry",
+  "settingsModelCatalogBundled": "Using bundled model details; online updates replace them automatically",
+  "settingsModelCatalogRetry": "Update",
   "settingsModelCustomModel": "Custom model",
   "settingsModelModelId": "Model ID",
   "settingsModelDuplicateModelId": "This model has already been added to this provider.",
@@ -1569,7 +1572,11 @@
   "settingsAppearanceBubbleImageAdjustUser": "Adjust user bubble image",
   "settingsAppearanceBubbleImageAdjustAi": "Adjust AI bubble image",
   "settingsAppearanceBubbleImagePreview": "Preview",
-  "settingsAppearanceBubbleImagePreviewText": "Bubble preview with 9-slice guides",
+  "settingsAppearanceBubbleImagePreviewText": "This is a bubble preview message.\nCheck the corners, edges, and center at their rendered size.",
+  "settingsAppearanceBubbleImageSourceHint": "Original · White: crop boundary. Blue: nine-slice grid. Pinch to zoom and drag to inspect.",
+  "settingsAppearanceBubbleImageFitSource": "Fit original image",
+  "settingsAppearanceBubbleImageGrid": "9-slice",
+  "settingsAppearanceBubbleImageGridHint": "Two horizontal and two vertical cuts form nine regions. Corners stay fixed; edges tile along one axis and the center tiles along both. Stretch mode stretches those regions instead. Boundaries are relative to the cropped image.",
   "settingsAppearanceBubbleImageImportFailed": "Bubble image was not applied: {error}",
   "@settingsAppearanceBubbleImageImportFailed": {
     "placeholders": {
@@ -2482,7 +2489,7 @@
   "@deviceSpaceSyncCounting": {"placeholders": {"count": {"type": "int"}}},
   "deviceSpaceSyncFiles": "Transferring and verifying files",
   "deviceSpaceSyncRetrying": "Sync interrupted. Retrying automatically.",
-  "deviceSpaceSyncPending": "Some data is still pending. Retrying automatically.",
+  "deviceSpaceSyncPending": "Some data is still pending.",
   "deviceSpaceSyncCurrentFile": "Current file: {done} / {total}",
   "@deviceSpaceSyncCurrentFile": {
     "placeholders": {
@@ -2633,5 +2640,40 @@
   "settingsAppearanceDeviceFonts": "Device fonts",
   "settingsAppearanceChooseDeviceFont": "Choose device font",
   "settingsAppearanceNoDeviceFonts": "No matching device fonts",
-  "settingsAppearanceDeviceFontPreview": "The quick brown fox · 0123456789\n字体预览：你好，世界"
+  "settingsAppearanceDeviceFontPreview": "The quick brown fox · 0123456789\n字体预览：你好，世界",
+  "workspaceFileRename": "Rename",
+  "workspaceFileCopy": "Copy",
+  "workspaceFileCut": "Cut",
+  "workspaceFilePaste": "Paste",
+  "workspaceFileName": "Name",
+  "workspaceFileInvalidName": "Enter a valid name without path separators.",
+  "workspaceDeleteFolderTitle": "Delete folder?",
+  "workspaceDeleteFolderMessage": "Delete “{name}” and all its contents? This cannot be undone.",
+  "@workspaceDeleteFolderMessage": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "workspaceFileOperationFailed": "File operation failed: {error}",
+  "@workspaceFileOperationFailed": {
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "workspaceFileCopyName": "{name} (copy {index})",
+  "@workspaceFileCopyName": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      },
+      "index": {
+        "type": "int"
+      }
+    }
+  },
+  "workspaceFileSaving": "This file is being saved. Please try again when saving finishes."
 }

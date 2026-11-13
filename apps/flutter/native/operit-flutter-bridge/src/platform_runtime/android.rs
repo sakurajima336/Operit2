@@ -59,6 +59,9 @@ pub(crate) fn create_host_context(startup: &BridgeStartup) -> Result<HostManager
         )
     }
     .withTerminalHost(Arc::new(AndroidTerminalHost::new()));
+    context = context.withUiAutomationHost(Arc::new(operit_host_api::UiAutomation::OwnerUiAutomationHost {
+        invoke: Arc::new(|operation, parameters| ownerSystemOperation("ui_automation", serde_json::json!({ "operation": operation, "parameters": parameters }))),
+    }));
     context.fileSystemHost = Some(Arc::new(AndroidFileSystemHost::withPresentation(Arc::new(
         |operation, path, title| crate::FlutterOwnerCapabilities::ownerConfirmed(
             "android_file_presentation",
@@ -66,7 +69,7 @@ pub(crate) fn create_host_context(startup: &BridgeStartup) -> Result<HostManager
         ),
     ))));
     if module.is_some() {
-        context = context.withLocalInferenceHost(Arc::new(FlutterLocalInferenceHost));
+        context = context.withLocalInferenceHost(Arc::new(operit_host_local_inference::NativeLocalInferenceHost::withSpeech(Arc::new(FlutterLocalInferenceHost))));
     }
     let system = context
         .systemOperationHost

@@ -173,6 +173,8 @@
   "messageLocatorFavorites": "收藏",
   "messageLocatorNoFavorites": "还没有收藏的消息",
   "messageLocatorLoadFailed": "暂时无法加载消息，请重试",
+  "messageTransformFailed": "消息显示处理失败：{error}",
+  "@messageTransformFailed": { "placeholders": { "error": { "type": "String" } } },
   "messageLocatorFavoriteFailed": "收藏更新失败，请重试",
   "messageLocatorAddFavorite": "收藏消息",
   "messageLocatorRemoveFavorite": "取消收藏",
@@ -214,6 +216,7 @@
   },
   "messageSenderOther": "其他",
   "hiddenUserMessage": "隐藏的用户消息",
+  "autoTriggeredUserMessage": "自动触发",
   "workspaceSetupTitle": "设置工作区",
   "workspaceSetupSubtitle": "为您的AI项目提供一个专属的文件环境",
   "workspaceCreateTitle": "创建工作区",
@@ -885,8 +888,8 @@
       }
     }
   },
-  "settingsModelCatalogNotDownloaded": "模型信息还没有下载",
-  "settingsModelCatalogRetry": "重试",
+  "settingsModelCatalogBundled": "使用内置模型信息，联网更新成功后自动替换",
+  "settingsModelCatalogRetry": "更新",
   "settingsModelCustomModel": "自定义模型",
   "settingsModelModelId": "模型 ID",
   "settingsModelDuplicateModelId": "该模型已添加到当前供应商。",
@@ -1477,7 +1480,11 @@
   "settingsAppearanceBubbleImageAdjustUser": "调整用户气泡图片",
   "settingsAppearanceBubbleImageAdjustAi": "调整 AI 气泡图片",
   "settingsAppearanceBubbleImagePreview": "预览",
-  "settingsAppearanceBubbleImagePreviewText": "这是一条气泡预览，切线展示九宫格区域",
+  "settingsAppearanceBubbleImagePreviewText": "这是一条气泡预览消息。\n可以查看边角和中间区域的实际效果。",
+  "settingsAppearanceBubbleImageSourceHint": "原图 · 白框为裁切边界，蓝线分出九宫格；可双指缩放、拖动查看",
+  "settingsAppearanceBubbleImageFitSource": "完整显示原图",
+  "settingsAppearanceBubbleImageGrid": "九宫格",
+  "settingsAppearanceBubbleImageGridHint": "两横两竖分出九块：四角保留，上下边横向重复、左右边纵向重复，中间双向重复；拉伸模式则拉伸对应区域。起点和终点相对于裁切后的图片。",
   "settingsAppearanceBubbleImageImportFailed": "气泡图片没有生效：{error}",
   "@settingsAppearanceBubbleImageImportFailed": {
     "placeholders": {
@@ -2390,7 +2397,7 @@
   "@deviceSpaceSyncCounting": {"placeholders": {"count": {"type": "int"}}},
   "deviceSpaceSyncFiles": "正在传输并校验文件",
   "deviceSpaceSyncRetrying": "同步暂时中断，稍后自动重试",
-  "deviceSpaceSyncPending": "部分数据尚未处理完成，稍后自动重试",
+  "deviceSpaceSyncPending": "部分数据尚未处理完成",
   "deviceSpaceSyncCurrentFile": "当前文件：{done} / {total}",
   "@deviceSpaceSyncCurrentFile": {
     "placeholders": {
@@ -2541,5 +2548,40 @@
   "settingsAppearanceDeviceFonts": "设备字体",
   "settingsAppearanceChooseDeviceFont": "选择设备字体",
   "settingsAppearanceNoDeviceFonts": "没有匹配的设备字体",
-  "settingsAppearanceDeviceFontPreview": "字体预览：你好，世界\nThe quick brown fox · 0123456789"
+  "settingsAppearanceDeviceFontPreview": "字体预览：你好，世界\nThe quick brown fox · 0123456789",
+  "workspaceFileRename": "重命名",
+  "workspaceFileCopy": "复制",
+  "workspaceFileCut": "剪切",
+  "workspaceFilePaste": "粘贴",
+  "workspaceFileName": "名称",
+  "workspaceFileInvalidName": "请输入有效名称，不能包含路径分隔符。",
+  "workspaceDeleteFolderTitle": "删除文件夹？",
+  "workspaceDeleteFolderMessage": "确定删除“{name}”及其全部内容？此操作无法撤销。",
+  "@workspaceDeleteFolderMessage": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "workspaceFileOperationFailed": "文件操作失败：{error}",
+  "@workspaceFileOperationFailed": {
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "workspaceFileCopyName": "{name}（副本 {index}）",
+  "@workspaceFileCopyName": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      },
+      "index": {
+        "type": "int"
+      }
+    }
+  },
+  "workspaceFileSaving": "文件正在保存，请保存完成后重试。"
 }

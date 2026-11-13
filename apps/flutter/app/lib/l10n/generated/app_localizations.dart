@@ -764,6 +764,12 @@ abstract class AppLocalizations {
   /// **'Could not load messages. Please try again.'**
   String get messageLocatorLoadFailed;
 
+  /// No description provided for @messageTransformFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Failed to process message display: {error}'**
+  String messageTransformFailed(String error);
+
   /// No description provided for @messageLocatorFavoriteFailed.
   ///
   /// In en, this message translates to:
@@ -883,6 +889,12 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Hidden user message'**
   String get hiddenUserMessage;
+
+  /// No description provided for @autoTriggeredUserMessage.
+  ///
+  /// In en, this message translates to:
+  /// **'AUTO'**
+  String get autoTriggeredUserMessage;
 
   /// No description provided for @workspaceSetupTitle.
   ///
@@ -3368,16 +3380,16 @@ abstract class AppLocalizations {
   /// **'Could not update model details, using those from {time}: {error}'**
   String settingsModelCatalogUpdateFailedUsing(String time, String error);
 
-  /// No description provided for @settingsModelCatalogNotDownloaded.
+  /// No description provided for @settingsModelCatalogBundled.
   ///
   /// In en, this message translates to:
-  /// **'Model details have not been downloaded yet'**
-  String get settingsModelCatalogNotDownloaded;
+  /// **'Using bundled model details; online updates replace them automatically'**
+  String get settingsModelCatalogBundled;
 
   /// No description provided for @settingsModelCatalogRetry.
   ///
   /// In en, this message translates to:
-  /// **'Retry'**
+  /// **'Update'**
   String get settingsModelCatalogRetry;
 
   /// No description provided for @settingsModelCustomModel.
@@ -5769,8 +5781,32 @@ abstract class AppLocalizations {
   /// No description provided for @settingsAppearanceBubbleImagePreviewText.
   ///
   /// In en, this message translates to:
-  /// **'Bubble preview with 9-slice guides'**
+  /// **'This is a bubble preview message.\nCheck the corners, edges, and center at their rendered size.'**
   String get settingsAppearanceBubbleImagePreviewText;
+
+  /// No description provided for @settingsAppearanceBubbleImageSourceHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Original · White: crop boundary. Blue: nine-slice grid. Pinch to zoom and drag to inspect.'**
+  String get settingsAppearanceBubbleImageSourceHint;
+
+  /// No description provided for @settingsAppearanceBubbleImageFitSource.
+  ///
+  /// In en, this message translates to:
+  /// **'Fit original image'**
+  String get settingsAppearanceBubbleImageFitSource;
+
+  /// No description provided for @settingsAppearanceBubbleImageGrid.
+  ///
+  /// In en, this message translates to:
+  /// **'9-slice'**
+  String get settingsAppearanceBubbleImageGrid;
+
+  /// No description provided for @settingsAppearanceBubbleImageGridHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Two horizontal and two vertical cuts form nine regions. Corners stay fixed; edges tile along one axis and the center tiles along both. Stretch mode stretches those regions instead. Boundaries are relative to the cropped image.'**
+  String get settingsAppearanceBubbleImageGridHint;
 
   /// No description provided for @settingsAppearanceBubbleImageImportFailed.
   ///
@@ -8307,7 +8343,7 @@ abstract class AppLocalizations {
   /// No description provided for @deviceSpaceSyncPending.
   ///
   /// In en, this message translates to:
-  /// **'Some data is still pending. Retrying automatically.'**
+  /// **'Some data is still pending.'**
   String get deviceSpaceSyncPending;
 
   /// No description provided for @deviceSpaceSyncCurrentFile.
@@ -8807,6 +8843,72 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'The quick brown fox · 0123456789\n字体预览：你好，世界'**
   String get settingsAppearanceDeviceFontPreview;
+
+  /// No description provided for @workspaceFileRename.
+  ///
+  /// In en, this message translates to:
+  /// **'Rename'**
+  String get workspaceFileRename;
+
+  /// No description provided for @workspaceFileCopy.
+  ///
+  /// In en, this message translates to:
+  /// **'Copy'**
+  String get workspaceFileCopy;
+
+  /// No description provided for @workspaceFileCut.
+  ///
+  /// In en, this message translates to:
+  /// **'Cut'**
+  String get workspaceFileCut;
+
+  /// No description provided for @workspaceFilePaste.
+  ///
+  /// In en, this message translates to:
+  /// **'Paste'**
+  String get workspaceFilePaste;
+
+  /// No description provided for @workspaceFileName.
+  ///
+  /// In en, this message translates to:
+  /// **'Name'**
+  String get workspaceFileName;
+
+  /// No description provided for @workspaceFileInvalidName.
+  ///
+  /// In en, this message translates to:
+  /// **'Enter a valid name without path separators.'**
+  String get workspaceFileInvalidName;
+
+  /// No description provided for @workspaceDeleteFolderTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete folder?'**
+  String get workspaceDeleteFolderTitle;
+
+  /// No description provided for @workspaceDeleteFolderMessage.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete “{name}” and all its contents? This cannot be undone.'**
+  String workspaceDeleteFolderMessage(String name);
+
+  /// No description provided for @workspaceFileOperationFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'File operation failed: {error}'**
+  String workspaceFileOperationFailed(String error);
+
+  /// No description provided for @workspaceFileCopyName.
+  ///
+  /// In en, this message translates to:
+  /// **'{name} (copy {index})'**
+  String workspaceFileCopyName(String name, int index);
+
+  /// No description provided for @workspaceFileSaving.
+  ///
+  /// In en, this message translates to:
+  /// **'This file is being saved. Please try again when saving finishes.'**
+  String get workspaceFileSaving;
 }
 
 class _AppLocalizationsDelegate

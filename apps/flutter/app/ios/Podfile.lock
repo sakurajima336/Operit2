@@ -22,11 +22,16 @@ PODS:
     - FlutterMacOS
   - operit_keep_alive (0.1.0):
     - Flutter
+  - operit_system_fonts (0.1.0):
+    - Flutter
+    - FlutterMacOS
   - package_info_plus (0.4.5):
     - Flutter
   - printing (1.0.0):
     - Flutter
   - record_ios (1.2.1):
+    - Flutter
+  - share_plus (0.0.1):
     - Flutter
   - url_launcher_ios (0.0.1):
     - Flutter
@@ -47,9 +52,11 @@ DEPENDENCIES:
   - integration_test (from `.symlinks/plugins/integration_test/ios`)
   - mobile_scanner (from `.symlinks/plugins/mobile_scanner/darwin`)
   - operit_keep_alive (from `.symlinks/plugins/operit_keep_alive/ios`)
+  - operit_system_fonts (from `.symlinks/plugins/operit_system_fonts/darwin`)
   - package_info_plus (from `.symlinks/plugins/package_info_plus/ios`)
   - printing (from `.symlinks/plugins/printing/ios`)
   - record_ios (from `.symlinks/plugins/record_ios/ios`)
+  - share_plus (from `.symlinks/plugins/share_plus/ios`)
   - url_launcher_ios (from `.symlinks/plugins/url_launcher_ios/ios`)
   - video_player_avfoundation (from `.symlinks/plugins/video_player_avfoundation/darwin`)
   - webview_flutter_wkwebview (from `.symlinks/plugins/webview_flutter_wkwebview/darwin`)
@@ -77,12 +84,16 @@ EXTERNAL SOURCES:
     :path: ".symlinks/plugins/mobile_scanner/darwin"
   operit_keep_alive:
     :path: ".symlinks/plugins/operit_keep_alive/ios"
+  operit_system_fonts:
+    :path: ".symlinks/plugins/operit_system_fonts/darwin"
   package_info_plus:
     :path: ".symlinks/plugins/package_info_plus/ios"
   printing:
     :path: ".symlinks/plugins/printing/ios"
   record_ios:
     :path: ".symlinks/plugins/record_ios/ios"
+  share_plus:
+    :path: ".symlinks/plugins/share_plus/ios"
   url_launcher_ios:
     :path: ".symlinks/plugins/url_launcher_ios/ios"
   video_player_avfoundation:
@@ -101,9 +112,11 @@ SPEC CHECKSUMS:
   mdk: d60f5c4a7726bd0732bdd740d65d9de91090b138
   mobile_scanner: 77265f3dc8d580810e91849d4a0811a90467ed5e
   operit_keep_alive: a08349ef11bc1577dd06fb7396e520682ff09acc
+  operit_system_fonts: 90b789bf0b0c39ad0e0b4f6dd4f137e208b97223
   package_info_plus: c0502532a26c7662a62a356cebe2692ec5fe4ec4
   printing: 233e1b73bd1f4a05615548e9b5a324c98588640b
   record_ios: 3b171007ae5de51221a3a76d2b379a7105ca98b5
+  share_plus: 796a4b55a883a34f4f1ff7bbd19436879a5055db
   url_launcher_ios: bb13df5870e8c4234ca12609d04010a21be43dfa
   video_player_avfoundation: e54d03b3b19f64f2c557354f72ce538387541ba6
   webview_flutter_wkwebview: 08f7e3ddafd07a1c7319987f5af4ddb173964b24

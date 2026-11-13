@@ -371,6 +371,11 @@ class AppLocalizationsEn extends AppLocalizations {
       'Could not load messages. Please try again.';
 
   @override
+  String messageTransformFailed(String error) {
+    return 'Failed to process message display: $error';
+  }
+
+  @override
   String get messageLocatorFavoriteFailed =>
       'Could not update favorite. Please try again.';
 
@@ -437,6 +442,9 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get hiddenUserMessage => 'Hidden user message';
+
+  @override
+  String get autoTriggeredUserMessage => 'AUTO';
 
   @override
   String get workspaceSetupTitle => 'Set up workspace';
@@ -1834,11 +1842,11 @@ class AppLocalizationsEn extends AppLocalizations {
   }
 
   @override
-  String get settingsModelCatalogNotDownloaded =>
-      'Model details have not been downloaded yet';
+  String get settingsModelCatalogBundled =>
+      'Using bundled model details; online updates replace them automatically';
 
   @override
-  String get settingsModelCatalogRetry => 'Retry';
+  String get settingsModelCatalogRetry => 'Update';
 
   @override
   String get settingsModelCustomModel => 'Custom model';
@@ -3190,7 +3198,21 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get settingsAppearanceBubbleImagePreviewText =>
-      'Bubble preview with 9-slice guides';
+      'This is a bubble preview message.\nCheck the corners, edges, and center at their rendered size.';
+
+  @override
+  String get settingsAppearanceBubbleImageSourceHint =>
+      'Original · White: crop boundary. Blue: nine-slice grid. Pinch to zoom and drag to inspect.';
+
+  @override
+  String get settingsAppearanceBubbleImageFitSource => 'Fit original image';
+
+  @override
+  String get settingsAppearanceBubbleImageGrid => '9-slice';
+
+  @override
+  String get settingsAppearanceBubbleImageGridHint =>
+      'Two horizontal and two vertical cuts form nine regions. Corners stay fixed; edges tile along one axis and the center tiles along both. Stretch mode stretches those regions instead. Boundaries are relative to the cropped image.';
 
   @override
   String settingsAppearanceBubbleImageImportFailed(String error) {
@@ -4692,8 +4714,7 @@ class AppLocalizationsEn extends AppLocalizations {
       'Sync interrupted. Retrying automatically.';
 
   @override
-  String get deviceSpaceSyncPending =>
-      'Some data is still pending. Retrying automatically.';
+  String get deviceSpaceSyncPending => 'Some data is still pending.';
 
   @override
   String deviceSpaceSyncCurrentFile(String done, String total) {
@@ -5006,4 +5027,45 @@ class AppLocalizationsEn extends AppLocalizations {
   @override
   String get settingsAppearanceDeviceFontPreview =>
       'The quick brown fox · 0123456789\n字体预览：你好，世界';
+
+  @override
+  String get workspaceFileRename => 'Rename';
+
+  @override
+  String get workspaceFileCopy => 'Copy';
+
+  @override
+  String get workspaceFileCut => 'Cut';
+
+  @override
+  String get workspaceFilePaste => 'Paste';
+
+  @override
+  String get workspaceFileName => 'Name';
+
+  @override
+  String get workspaceFileInvalidName =>
+      'Enter a valid name without path separators.';
+
+  @override
+  String get workspaceDeleteFolderTitle => 'Delete folder?';
+
+  @override
+  String workspaceDeleteFolderMessage(String name) {
+    return 'Delete “$name” and all its contents? This cannot be undone.';
+  }
+
+  @override
+  String workspaceFileOperationFailed(String error) {
+    return 'File operation failed: $error';
+  }
+
+  @override
+  String workspaceFileCopyName(String name, int index) {
+    return '$name (copy $index)';
+  }
+
+  @override
+  String get workspaceFileSaving =>
+      'This file is being saved. Please try again when saving finishes.';
 }

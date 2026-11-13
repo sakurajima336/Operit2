@@ -64,9 +64,10 @@ pub(crate) struct PeerSyncStatus {
 
 /// Per-peer scheduling state behind the change-gated synchronization floor.
 ///
-/// Every cycle probes each storage-granted member with the cheap `syncClockDigest`
-/// RPC and runs the expensive exchanges (Space projection, control log,
-/// business replication, blobs) only when something actually changed for that
+/// Direct pairings first probe their bounded, pairing-authorized snapshot header.
+/// Only matching Space authority may proceed to the cheap `syncClockDigest`
+/// RPC. Expensive exchanges (Space projection, control log,
+/// business replication, blobs) run only when something actually changed for that
 /// peer: the remote clock moved, the local synchronized-state summary moved
 /// since the last completed pass, or a previous pass failed and its backoff
 /// elapsed. Space records advance the journal clock, so every snapshot
@@ -89,8 +90,8 @@ struct PeerSyncGate {
     nextFullSyncAllowedAt: i64,
     /// Business failures keep receiving new data without arming connection failure backoff.
     pendingWork: bool,
-    /// A deterministic failure is attempted again only after either peer's state changes.
-    failedState: Option<(Result<String, String>, Result<String, String>)>,
+    /// A correction error stays visible without suppressing the next pass.
+    correctionError: Option<String>,
 }
 
 impl PeerSyncGate {
@@ -416,31 +417,37 @@ impl SpacePersistenceSyncService {
         let localStateSummary = self.localStateSummary().await?;
         let mut cycleDecisions = BTreeMap::<String, bool>::new();
         let membershipBeforeExchange = self.state.spaceStore.space()?.members.into_iter().collect::<BTreeSet<_>>();
-        for peerNodeId in services.peers().outboundPeerNodeIds().map_err(|error| error.to_string())? {
+        // An authenticated carrier is duplex. The listener must reconcile its
+        // inbound peers too before using the old member projection for routing.
+        for peerNodeId in services.peers().pairedPeers().map_err(|error| error.to_string())?.into_iter().map(|peer| peer.nodeId) {
             if !activePeers.contains(&peerNodeId) { continue; }
             match control.nodeIsDisconnected(&peerNodeId) {
                 Ok(false) => {},
                 Ok(true) => continue,
                 Err(error) => { errors.push(format!("Peer {peerNodeId} connection policy: {error}")); continue; }
             }
-            if !self
-                .peerPassRequired(&peerNodeId, &localStateSummary, &mut cycleDecisions)
-                .await
-            {
-                continue;
-            }
             let (projection, networkFailure) = classifySync(crate::fault_isolation::operation(&format!("Peer {peerNodeId} Space projection"),
-                self.exchangePairedDeviceSpaceProjection(&peerNodeId))).await;
-            if let Err(error) = projection {
-                self.recordPeerFailure(&peerNodeId, networkFailure).await;
-                cycleDecisions.insert(peerNodeId.clone(), false);
-                errors.push(format!("CoreNode {peerNodeId} Space projection exchange: {error}"));
-                continue;
-            }
+                async {
+                    if !self.pairedPeerPassRequired(&peerNodeId, &localStateSummary, &mut cycleDecisions).await? {
+                        return Ok(None);
+                    }
+                    self.exchangePairedDeviceSpaceProjection(&peerNodeId).await.map(Some)
+                })).await;
+            let sameSpace = match projection {
+                Ok(Some(sameSpace)) => sameSpace,
+                Ok(None) => continue,
+                Err(error) => {
+                    self.recordPeerFailure(&peerNodeId, networkFailure, &error).await;
+                    cycleDecisions.insert(peerNodeId.clone(), false);
+                    errors.push(format!("CoreNode {peerNodeId} Space projection exchange: {error}"));
+                    continue;
+                }
+            };
             // A paired peer outside the Space membership has no business
             // replication pass; the projection exchange was its whole pass.
-            if !membershipBeforeExchange.contains(&peerNodeId) {
+            if !sameSpace || !membershipBeforeExchange.contains(&peerNodeId) {
                 self.recordPeerPassCompleted(&peerNodeId, false).await?;
+                cycleDecisions.insert(peerNodeId.clone(), false);
             }
         }
         let space = self.state.spaceStore.space()?;
@@ -537,14 +544,14 @@ impl SpacePersistenceSyncService {
                 operit_util::AppLogger::AppLogger::i("SpacePersistenceSyncService", &format!(
                     "sync_pass.done target={targetNodeId} trigger={trigger} businessReplication={allowed} pending={pending} elapsedMs={}",
                     currentTimeMillis() - startedAt));
-                if *allowed {
-                    self.state.progress.finish(&targetNodeId, pending, None, None);
+                if *allowed && pending {
+                    self.state.progress.finish(&targetNodeId, true, None, None);
                 } else {
                     self.state.progress.remove(&targetNodeId);
                 }
             }
             Err(error) => {
-                self.recordPeerFailure(&targetNodeId, networkFailure).await;
+                self.recordPeerFailure(&targetNodeId, networkFailure, error).await;
                 let retryAt = self.state.peerGates.lock().map_err(|error| error.to_string())?
                     .get(&targetNodeId).filter(|gate| gate.consecutiveFailures > 0).map(|gate| gate.nextFullSyncAllowedAt);
                 operit_util::AppLogger::AppLogger::w("SpacePersistenceSyncService", &format!(
@@ -559,7 +566,7 @@ impl SpacePersistenceSyncService {
         result.map(|_| ())
     }
 
-    /// Executes authority, preferences and authorized business replication in order.
+    /// Exchanges preferences after the business receipts so those receipts cannot acknowledge unsent edits.
     async fn synchronizePeer(&self, targetNodeId: &str, limit: usize, force: bool) -> Result<bool, String> {
         if !self.state.nodeRouter.nodeIsReachable(targetNodeId)? {
             return Err(syncLinkError(operit_link::CoreLinkError::new("CORE_NODE_UNREACHABLE", format!(
@@ -627,6 +634,13 @@ impl SpacePersistenceSyncService {
             control.projectPeerControlOperations(targetNodeId, &remote)?;
             self.applyRemovedMemberEffects(&remote)?;
         }
+        // Business receipts include the preference mutation boundary. Capture
+        // them before exchanging preferences: an edit counted by a receipt must
+        // still reach the peer, while later edits reopen the existing gate.
+        let businessReplication = if self.storageReplicationAllowed(targetNodeId)? {
+            self.validateReachableDeviceSpace(targetNodeId).await?;
+            Box::pin(self.synchronizeDomains(targetNodeId, limit, &SYNC_DOMAINS)).await?
+        } else { false };
         // Small device-owned preferences are available to every admitted member;
         // their clocks and payloads are separate from business replica clocks.
         let preferenceStore = operit_store::DevicePreferencesStore::DevicePreferencesStore::new(self.state.localRuntime.runtimeStorageHost());
@@ -653,10 +667,7 @@ impl SpacePersistenceSyncService {
             }
             preferenceStore.merge(&preferences)?;
         }
-        // Admission is not a storage grant. Business replication requires both endpoints to provide storage.
-        if !self.storageReplicationAllowed(targetNodeId)? { return Ok(false); }
-        self.validateReachableDeviceSpace(targetNodeId).await?;
-        self.synchronizeDomains(targetNodeId, limit, &SYNC_DOMAINS).await
+        Ok(businessReplication)
     }
 
     /// Applies the local effects of removals that just reached this device
@@ -687,6 +698,33 @@ impl SpacePersistenceSyncService {
             self.state.localRuntime.runtimeStorageHost(), RUNTIME_SYNC_DIR_PATH);
         store.publishPreferenceOutboxes().map_err(|e|e.to_string())?;
         store.synchronizationSummary().map(|digest|format!("digest:{digest}")).map_err(|e|e.to_string())
+    }
+
+    /// Checks pairing-authorized authority metadata before any Space-scoped clock probe.
+    async fn pairedPeerPassRequired(
+        &self,
+        peer: &str,
+        localStateSummary: &str,
+        cycleDecisions: &mut BTreeMap<String, bool>,
+    ) -> Result<bool, String> {
+        if self.state.peerGates.lock().map_err(|error| error.to_string())?
+            .get(peer).is_some_and(|gate| !gate.backoffElapsed(currentTimeMillis())) {
+            cycleDecisions.insert(peer.to_owned(), false);
+            return Ok(false);
+        }
+        let header: crate::NodeSpaceService::space_projection::SnapshotHeader = callRemoteService(
+            &self.state.nodeRouter, peer, crate::NodeSpaceService::NODE_SPACE_TARGET,
+            "snapshotHeader", Value::Null).await?;
+        let local = self.state.spaceStore.space()?;
+        let manifest = NetworkControlStore::new(self.state.localRuntime.runtimeStorageHost())?
+            .spaceControlManifest(&local.spaceId)?;
+        if header.space != local || !header.departures.is_empty() || header.controlRevision != manifest.revision {
+            // A changed authority boundary must be reconciled through the pairing.
+            // A scoped clock RPC here would reject the very exit that repairs it.
+            cycleDecisions.insert(peer.to_owned(), true);
+            return Ok(true);
+        }
+        Ok(self.peerPassRequired(peer, localStateSummary, cycleDecisions).await)
     }
 
     /// Decides once per cycle whether this cycle must run a full synchronization
@@ -734,30 +772,18 @@ impl SpacePersistenceSyncService {
             let (probe, networkFailure) = classifySync(self.probeRemoteClockSummary(targetNodeId)).await;
             match probe {
                 Ok(summary) => {
-                    if gate.failedState.as_ref() == Some(&(Ok(localStateSummary.to_owned()), Ok(summary.clone()))) {
-                        cycleDecisions.insert(targetNodeId.to_string(), false);
-                        return false;
-                    }
                     if gate.lastRemoteClockSummary.is_none() { reasons.push("no_remote_baseline"); }
                     else if gate.lastRemoteClockSummary.as_deref() != Some(summary.as_str()) { reasons.push("remote_clock_changed"); }
                     if gate.lastLocalStateSummary.is_none() { reasons.push("no_local_baseline"); }
                     else if gate.lastLocalStateSummary.as_deref() != Some(localStateSummary) { reasons.push("local_state_changed"); }
                     !reasons.is_empty()
                 }
-                // The clock is unobservable (the probe was lost). Forcing the
-                // full exchange from here made every cycle re-export the whole
-                // operation journal against an unreachable peer — seconds of
-                // serialization per attempt, indefinitely. Record the failed
-                // pass instead so the exponential backoff governs the retry;
-                // once the peer answers again, the retry converges and the
-                // gate returns to probing.
                 Err(error) => {
-                    if gate.failedState.as_ref() == Some(&(Ok(localStateSummary.to_owned()), Err(error.clone()))) { return false; }
-                    self.recordPeerFailure(targetNodeId, networkFailure).await;
+                    self.recordPeerFailure(targetNodeId, networkFailure, &error).await;
                     operit_util::AppLogger::AppLogger::w("SpacePersistenceSyncService", &format!(
                         "sync_gate.probe_failed target={targetNodeId} networkFailure={networkFailure} retryDelayMs={} error={error}",
                         if networkFailure { peerFullSyncBackoffMs(gate.consecutiveFailures.saturating_add(1)) } else { 0 }));
-                    false
+                    !networkFailure
                 }
             }
         };
@@ -792,7 +818,7 @@ impl SpacePersistenceSyncService {
         if !businessReplication { gate.lastLocalStateSummary = None; gate.lastRemoteClockSummary = None; }
         gate.consecutiveFailures = 0;
         gate.nextFullSyncAllowedAt = 0;
-        gate.failedState = None;
+        gate.correctionError = None;
         Ok(())
     }
 
@@ -806,7 +832,7 @@ impl SpacePersistenceSyncService {
         let gate = gates.get(&target).ok_or_else(||CoreLinkError::internal("Synchronization gate missing"))?;
         if let Err(error) = result { return Err(CoreLinkError::new(if gate.consecutiveFailures > 0 { "PEER_SYNC_NETWORK_FAILED" } else { "PEER_SYNC_CORRECTION_FAILED" }, error)); }
         if gate.consecutiveFailures > 0 { return Err(CoreLinkError::new("PEER_SYNC_NETWORK_FAILED", "Peer synchronization is waiting for connection")); }
-        if gate.failedState.is_some() { return Err(CoreLinkError::new("PEER_SYNC_CORRECTION_FAILED", "Peer synchronization requires changed data or an explicit request")); }
+        if let Some(error) = &gate.correctionError { return Err(CoreLinkError::new("PEER_SYNC_CORRECTION_FAILED", error.clone())); }
         Ok(PeerSyncStatus { local: gate.lastLocalStateSummary.clone(), remote: gate.lastRemoteClockSummary.clone(), pending: gate.pendingWork,
             progress: self.peerProgress(&target) })
     }
@@ -821,14 +847,13 @@ impl SpacePersistenceSyncService {
         }
     }
 
-    /// Only transport faults arm retries; deterministic failures wait for changed state or an explicit request.
-    async fn recordPeerFailure(&self, target: &str, network: bool) {
+    /// Only transport faults back off; correction failures remain eligible immediately.
+    async fn recordPeerFailure(&self, target: &str, network: bool, error: &str) {
         if network { self.recordPeerPassFailed(target); return; }
-        let state = (self.localStateSummary().await, self.probeRemoteClockSummary(target).await);
         if let Ok(mut gates) = self.state.peerGates.lock() {
             let gate = gates.entry(target.to_owned()).or_default();
-            gate.failedState = Some(state);
-            gate.pendingWork = false;
+            gate.correctionError = Some(error.to_owned());
+            gate.pendingWork = true;
             gate.consecutiveFailures = 0;
             gate.nextFullSyncAllowedAt = 0;
         }
@@ -881,167 +906,88 @@ impl SpacePersistenceSyncService {
         limit: usize,
         domains: &[&str],
     ) -> Result<bool, String> {
-        // Pages are bounded by bytes as well as by operation count, so a page
-        // can end before the backlog does. The pass therefore keeps paging until
-        // one exchange finds nothing left; the cap only stops a device that is
-        // writing continuously from holding this pass open forever.
-        let mut pages = 0usize;
-        let mut seenOperationIds = BTreeSet::new();
-        let mut deferredOwners = BTreeSet::new();
-        loop {
-            if !self.storageReplicationAllowed(targetNodeId)? {
-                return Ok(false);
-            }
-            let (remoteClock, localClock) = tokio::join!(
-                biased;
-                callRemote::<Value>(
-                    &self.state.nodeRouter,
-                    targetNodeId,
-                    PeerSyncMethod::SyncClock,
-                    Value::Null,
-                ),
-                self.callLocal::<Value>("syncClock", Value::Null),
-            );
-            let mut localClock = localClock?;
-            validateDomainClock(&localClock, domains, "local")?;
-            let mut remoteClock = remoteClock?;
-            validateDomainClock(&remoteClock, domains, "remote")?;
-            consistency::requireConsistencySupport(&localClock, &remoteClock)?;
-            if let Ok(mut gates) = self.state.peerGates.lock() {
-                gates.entry(targetNodeId.to_owned()).or_default().pendingWork = false;
-            }
-            self.recordPendingWork(targetNodeId, "local receipt", &localClock);
-            self.recordPendingWork(targetNodeId, "remote receipt", &remoteClock);
-            let sharedPending = if pages == 0 {
-                let local: operit_store::SyncOperationStore::SyncReceipt = serde_json::from_value(localClock.clone())
-                    .map_err(|error| error.to_string())?;
-                let remote: operit_store::SyncOperationStore::SyncReceipt = serde_json::from_value(remoteClock.clone())
-                    .map_err(|error| error.to_string())?;
-                pendingOperationIds(&localClock).union(&pendingOperationIds(&remoteClock))
-                    .filter(|id| id.rsplit_once(':').is_some_and(|(origin, sequence)| sequence.parse::<i64>().is_ok_and(|sequence|
-                        local.containsSequence(origin, sequence) && remote.containsSequence(origin, sequence))))
-                    .count()
-            } else { 0 };
-            localClock["includeProgress"] = json!(pages == 0);
-            remoteClock["includeProgress"] = json!(pages == 0);
-            let mut pendingBlobs: Vec<RuntimeFileSyncReference> =
-                serde_json::from_value(localClock["pendingBlobs"].clone())
-                    .map_err(|error| format!("invalid local pending blobs: {error}"))?;
-            pendingBlobs.extend(
-                serde_json::from_value::<Vec<RuntimeFileSyncReference>>(
-                    remoteClock["pendingBlobs"].clone(),
-                )
-                .map_err(|error| format!("invalid remote pending blobs: {error}"))?,
-            );
-            if let Err(error) = self
-                .synchronizeBlobReferences(targetNodeId, pendingBlobs)
-                .await
-            {
-                self.recordPendingWork(targetNodeId, "pending blobs", &json!({"errors": [error]}));
-            }
-            operit_util::AppLogger::AppLogger::trace(
-                "CoreSyncTrace",
-                &format!(
-                    "sync_exchange.clocks target={} local={} remote={}",
-                    targetNodeId,
-                    summarizeSyncClock(&localClock),
-                    summarizeSyncClock(&remoteClock)
-                ),
-            );
-            let (remoteOperations, localOperations) = tokio::join!(
-                biased;
-                callRemote::<Value>(
-                    &self.state.nodeRouter,
-                    targetNodeId,
-                    PeerSyncMethod::SyncOperationsSince,
-                    json!({
-                        "clock": localClock,
-                        "domains": domains,
-                        "limit": limit,
-                    }),
-                ),
-                self.callLocal::<Value>("syncOperationsSince", json!({"clock":remoteClock,"domains":domains,"limit":limit})),
-            );
-            let localOperations = localOperations?;
-            let remoteOperations = remoteOperations?;
-            if pages == 0 {
-                let remaining = localOperations.get("remaining").and_then(Value::as_u64)
-                    .zip(remoteOperations.get("remaining").and_then(Value::as_u64))
-                    .map(|(local, remote)| local.saturating_add(remote));
-                self.state.progress.backlog(targetNodeId, remaining, sharedPending);
-            }
-            if !self.storageReplicationAllowed(targetNodeId)? {
-                return Ok(false);
-            }
-            self.recordPendingWork(targetNodeId, "local export", &localOperations);
-            self.recordPendingWork(targetNodeId, "remote export", &remoteOperations);
-            let operations = mergeSyncOperations(
-                localOperations["operations"].clone(),
-                remoteOperations["operations"].clone(),
-            )?;
-            // Repeated pages still compare independent owners; missing blobs retain their owners as pending.
-            if operations.is_empty() || !pageAddsNewOperations(&mut seenOperationIds, &operations) {
-                if operations.is_empty() && !self.applySynchronizedOperationBatch(targetNodeId, &[], &[], &mut deferredOwners).await? {
-                    return Ok(false);
+        let mut seen = BTreeSet::new();
+        let mut boundary = None;
+        let mut force = false;
+        let mut compatible = true;
+        for _ in 0..3 {
+            for page in 0..MAX_SYNC_PAGES_PER_PASS {
+                if !self.storageReplicationAllowed(targetNodeId)? { return Ok(false); }
+                let exchange: Result<bool, String> = async {
+                    let (remote, local) = tokio::join!(
+                        callRemote::<Value>(&self.state.nodeRouter, targetNodeId, PeerSyncMethod::SyncClock, Value::Null),
+                        self.callLocal::<Value>("syncClock", Value::Null),
+                    );
+                    let (mut local, mut remote) = (local?, remote?);
+                    validateDomainClock(&local, domains, "local")?;
+                    validateDomainClock(&remote, domains, "remote")?;
+                    if let Err(error) = consistency::requireConsistencySupport(&local, &remote) {
+                        compatible = false;
+                        return Err(error);
+                    }
+                    boundary = Some((local.clone(), remote.clone()));
+                    self.recordPendingWork(targetNodeId, "local receipt", &local);
+                    self.recordPendingWork(targetNodeId, "remote receipt", &remote);
+                    let mut blobs: Vec<RuntimeFileSyncReference> = serde_json::from_value(local["pendingBlobs"].clone()).map_err(|e|e.to_string())?;
+                    blobs.extend(serde_json::from_value::<Vec<RuntimeFileSyncReference>>(remote["pendingBlobs"].clone()).map_err(|e|e.to_string())?);
+                    if let Err(error) = self.synchronizeBlobReferences(targetNodeId, blobs).await {
+                        if SYNC_NETWORK_FAILURE.try_with(std::cell::Cell::get).unwrap_or(false) { return Err(error); }
+                        self.recordPendingWork(targetNodeId, "pending blobs", &json!({"errors":[error]}));
+                    }
+                    local["includeProgress"] = json!(page == 0);
+                    remote["includeProgress"] = json!(page == 0);
+                    let (remotePage, localPage) = tokio::join!(
+                        callRemote::<Value>(&self.state.nodeRouter, targetNodeId, PeerSyncMethod::SyncOperationsSince,
+                            json!({"clock":local,"domains":domains,"limit":limit})),
+                        self.callLocal::<Value>("syncOperationsSince", json!({"clock":remote,"domains":domains,"limit":limit})),
+                    );
+                    let (localPage, remotePage) = (localPage?, remotePage?);
+                    if page == 0 {
+                        let remaining = localPage["remaining"].as_u64().zip(remotePage["remaining"].as_u64())
+                            .map(|(a,b)|a.saturating_add(b));
+                        self.state.progress.backlog(targetNodeId, remaining, 0);
+                    }
+                    self.recordPendingWork(targetNodeId, "local export", &localPage);
+                    self.recordPendingWork(targetNodeId, "remote export", &remotePage);
+                    force |= [&local, &remote, &localPage, &remotePage].iter()
+                        .any(|report|report["errors"].as_array().is_some_and(|errors|!errors.is_empty()));
+                    let operations = mergeSyncOperations(localPage["operations"].clone(), remotePage["operations"].clone())?;
+                    let done = operations.is_empty() || !pageAddsNewOperations(&mut seen, &operations);
+                    if !done || operations.is_empty() {
+                        let sizes = syncOperationWireSizes(&operations)?;
+                        if !self.applySynchronizedOperationBatch(targetNodeId, &operations, &sizes).await? { return Ok(true); }
+                    }
+                    boundary = done.then_some((local, remote));
+                    Ok(done)
+                }.await;
+                match exchange {
+                    Ok(false) => continue,
+                    Ok(true) => break,
+                    Err(error) => {
+                        if !compatible || SYNC_NETWORK_FAILURE.try_with(std::cell::Cell::get).unwrap_or(false) { return Err(error); }
+                        self.recordPendingWork(targetNodeId, "incremental exchange", &json!({"errors":[error]}));
+                        force = true;
+                        break;
+                    }
                 }
-                let force = self.state.peerGates.lock().map_err(|e|e.to_string())?.get(targetNodeId).is_some_and(|gate|gate.pendingWork);
-                let complete = self.synchronizeConsistency(targetNodeId, &localClock, &remoteClock, &deferredOwners, force).await?;
-                if !complete && deferredOwners.is_empty() && pages < MAX_SYNC_PAGES_PER_PASS {
-                    pages += 1;
-                    continue;
-                }
-                let mut gates = self.state.peerGates.lock().map_err(|e|e.to_string())?;
-                let gate = gates.entry(targetNodeId.to_owned()).or_default();
-                gate.pendingWork = !complete || !operations.is_empty();
-                if complete && operations.is_empty() {
-                    gate.lastLocalStateSummary = Some(clockStateSummary(&localClock)?);
-                    gate.lastRemoteClockSummary = Some(clockStateSummary(&remoteClock)?);
-                }
-                operit_util::AppLogger::AppLogger::trace("CoreSyncTrace", &format!(
-                    "sync_exchange.idle target={targetNodeId} pages={pages} remaining={} complete={complete}", operations.len()));
-                break;
             }
-            if pages >= MAX_SYNC_PAGES_PER_PASS {
-                self.recordPendingWork(targetNodeId, "remaining pages", &json!({"pending": 1}));
-                operit_util::AppLogger::AppLogger::trace(
-                    "CoreSyncTrace",
-                    &format!(
-                        "sync_exchange.pages_capped target={} pages={} remaining=unknown",
-                        targetNodeId, pages
-                    ),
-                );
-                break;
+            // Repeated/capped pages and replay failures all reach the same final correction.
+            if !self.storageReplicationAllowed(targetNodeId)? { return Ok(false); }
+            if !self.synchronizeConsistency(targetNodeId, boundary.as_ref().map(|(a,b)|(a,b)), force).await? {
+                boundary = None;
+                seen.clear();
+                continue;
             }
-            pages += 1;
-            // Measure once: the page is chunked by these sizes and the trace
-            // records the same number, so an oversized import stays diagnosable
-            // without replaying the encoding after the fact.
-            let sizes = syncOperationWireSizes(&operations)?;
-            operit_util::AppLogger::AppLogger::trace(
-                "CoreSyncTrace",
-                &format!(
-                    "sync_exchange.batch target={} bytes={} {}",
-                    targetNodeId,
-                    sizes.iter().sum::<usize>(),
-                    summarizeSyncOperations(&operations)
-                ),
-            );
-            if !self
-                .applySynchronizedOperationBatch(targetNodeId, &operations, &sizes, &mut deferredOwners)
-                .await?
-            {
-                return Ok(false);
+            let mut gates = self.state.peerGates.lock().map_err(|e|e.to_string())?;
+            let gate = gates.entry(targetNodeId.to_owned()).or_default();
+            gate.pendingWork = false;
+            if let Some((local, remote)) = &boundary {
+                gate.lastLocalStateSummary = Some(clockStateSummary(local)?);
+                gate.lastRemoteClockSummary = Some(clockStateSummary(remote)?);
             }
-            operit_util::AppLogger::AppLogger::trace(
-                "CoreSyncTrace",
-                &format!(
-                    "sync_exchange.batch_received target={} {}",
-                    targetNodeId,
-                    summarizeSyncOperations(&operations)
-                ),
-            );
+            return Ok(true);
         }
-        Ok(true)
+        Err("Synchronization changed during final correction".into())
     }
 
     /// Applies one transport page on both peers, split into messages that fit
@@ -1052,10 +998,10 @@ impl SpacePersistenceSyncService {
         targetNodeId: &str,
         operations: &[Value],
         sizes: &[usize],
-        deferredOwners: &mut BTreeSet<String>,
     ) -> Result<bool, String> {
         if let Err(error) = self.synchronizeRequiredBlobs(targetNodeId, operations).await {
-            self.recordPendingWork(targetNodeId, "blobs", &json!({"errors": [error]}));
+            if SYNC_NETWORK_FAILURE.try_with(std::cell::Cell::get).unwrap_or(false) { return Err(error); }
+            self.recordPendingWork(targetNodeId, "blobs", &json!({"errors":[error]}));
         }
         if !self.storageReplicationAllowed(targetNodeId)? { return Ok(false); }
         self.state.progress.records(targetNodeId, 0);
@@ -1073,8 +1019,8 @@ impl SpacePersistenceSyncService {
                 match result {
                     Ok(report) => {
                         self.recordPendingWork(targetNodeId, &format!("{side} apply"), &report);
-                        deferredOwners.extend(report["pendingOwners"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned));
                         pending.extend(pendingOperationIds(&report));
+                        errors.extend(report["errors"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned));
                     }
                     Err(error) => errors.push(format!("{side} apply: {error}")),
                 }
@@ -1670,16 +1616,6 @@ fn syncPageChunks<'a>(
     Ok(chunks)
 }
 
-/// Summarizes one synchronization clock without logging the complete vector.
-#[allow(non_snake_case)]
-fn summarizeSyncClock(value: &Value) -> String {
-    format!(
-        "origins={}#boundary={}#pending={}#errors={}",
-        value["ranges"].as_object().map_or(0, |ranges|ranges.len()),
-        value["stateSummary"], value["pending"], value["errors"]
-    )
-}
-
 /// Records one page's operation ids and reports whether it added a new identity.
 ///
 /// A page without complete ids is treated as progress so malformed data can
@@ -1703,42 +1639,6 @@ fn pageAddsNewOperations(
     }
     seenOperationIds.extend(pageOperationIds);
     true
-}
-
-/// Summarizes synchronization operations by domain and addressed chat entities.
-#[allow(non_snake_case)]
-fn summarizeSyncOperations(operations: &[Value]) -> String {
-    let mut domainCounts = BTreeMap::<String, usize>::new();
-    let mut chatEntities = BTreeSet::new();
-    let mut createdAt = Vec::new();
-    for value in operations {
-        // Read the fields the summary needs directly: cloning each operation to
-        // deserialize it would copy the whole page once per trace line.
-        let Some(domain) = value.get("domain").and_then(Value::as_str) else {
-            continue;
-        };
-        *domainCounts.entry(domain.to_string()).or_default() += 1;
-        if domain == "chat" {
-            let entityType = value.get("entityType").and_then(Value::as_str).unwrap_or_default();
-            let entityId = value.get("entityId").and_then(Value::as_str).unwrap_or_default();
-            chatEntities.insert(format!("{entityType}/{entityId}"));
-        }
-        createdAt.push(value.get("createdAt").and_then(Value::as_i64).unwrap_or_default());
-    }
-    createdAt.sort();
-    let domains = domainCounts
-        .into_iter()
-        .map(|(domain, count)| format!("{domain}:{count}"))
-        .collect::<Vec<_>>()
-        .join(",");
-    format!(
-        "count={} domains={} chatEntities={} createdAt={}..{}",
-        operations.len(),
-        domains,
-        chatEntities.len(),
-        createdAt.first().copied().unwrap_or_default(),
-        createdAt.last().copied().unwrap_or_default(),
-    )
 }
 
 #[cfg(test)]

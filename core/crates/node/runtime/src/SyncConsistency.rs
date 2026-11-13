@@ -1,4 +1,4 @@
-//! Final content comparison at a stable exchange boundary, excluding incomplete transfers.
+//! Final materialized-content correction also seals originals that cannot be replayed.
 use super::*;
 use operit_store::Transaction::{compare_manifests, digest, Manifest, Source};
 use operit_store::RuntimeFileSyncStore::FileCorrectionReference;
@@ -29,7 +29,7 @@ pub(super) fn requireConsistencySupport(local: &Value, remote: &Value) -> Result
 }
 
 impl SpacePersistenceSyncService {
-    async fn consistencyReports(&self, target: &str, deferred: &BTreeSet<String>) -> Result<(Report, Report), String> {
+    async fn consistencyReports(&self, target: &str) -> Result<(Report, Report), String> {
         let (remote, local) = tokio::join!(
             biased;
             callRemote(
@@ -40,20 +40,19 @@ impl SpacePersistenceSyncService {
             ),
             self.callLocal("syncConsistency", Value::Null),
         );
-        let (mut local, mut remote): (Report, Report) = (local?, remote?);
-        for report in [&mut local, &mut remote] { report.pendingOwners.extend(deferred.iter().cloned()); }
-        Ok((local, remote))
+        Ok((local?, remote?))
     }
 
     /// Structural damage selects the complete peer; every correction is verified before completion.
-    pub(super) async fn synchronizeConsistency(&self, target: &str, local_clock: &Value, remote_clock: &Value, deferred: &BTreeSet<String>, force: bool) -> Result<bool, String> {
-        let (local, remote) = self.consistencyReports(target, deferred).await?;
-        let local_receipt = serde_json::from_value(local_clock.clone()).map_err(|e|e.to_string())?;
-        let remote_receipt = serde_json::from_value(remote_clock.clone()).map_err(|e|e.to_string())?;
-        if !reportsAtExchange(&local, &remote, &local_receipt, &remote_receipt)? { return Ok(false); }
+    pub(super) async fn synchronizeConsistency(&self, target: &str, clocks: Option<(&Value, &Value)>, force: bool) -> Result<bool, String> {
+        let startedAt = currentTimeMillis();
+        let (local, remote) = self.consistencyReports(target).await?;
+        if let Some((a,b)) = clocks {
+            if !reportsAtExchange(&local, &remote, &serde_json::from_value(a.clone()).map_err(|e|e.to_string())?,
+                &serde_json::from_value(b.clone()).map_err(|e|e.to_string())?)? { return Ok(false); }
+        }
         let plans = correctionPlans(&local, &remote, force);
         let correctionCount = plans.len();
-        let startedAt = currentTimeMillis();
         for (a, b, choice) in plans {
             let source = if choice == Source::Local { a } else { b }.expect("source exists");
             operit_util::AppLogger::AppLogger::i("CoreSyncTrace", &format!(
@@ -88,8 +87,9 @@ impl SpacePersistenceSyncService {
                 Err(error) => return Err(error),
             }
         }
-        let (latest_local, latest_remote) = self.consistencyReports(target, deferred).await?;
-        if !reportsAtExchange(&latest_local, &latest_remote, &local_receipt, &remote_receipt)? { return Ok(false); }
+        // Only repairs invalidate the already verified content reports.
+        let (latest_local, latest_remote) = if correctionCount == 0 { (local, remote) }
+            else { self.consistencyReports(target).await? };
         let complete = verifyReports(&latest_local, &latest_remote)?;
         operit_util::AppLogger::AppLogger::i("CoreSyncTrace", &format!(
             "sync_consistency.done target={target} mode=full_snapshot corrections={correctionCount} complete={complete} elapsedMs={}", currentTimeMillis() - startedAt));
@@ -128,14 +128,13 @@ fn correctionPlans<'a>(local: &'a Report, remote: &'a Report, force: bool) -> Ve
     for manifest in &local.manifests { files.entry((&manifest.owner.path,&manifest.owner.backend)).or_insert((None,None)).0 = Some(manifest); }
     for manifest in &remote.manifests { files.entry((&manifest.owner.path,&manifest.owner.backend)).or_insert((None,None)).1 = Some(manifest); }
     files.into_iter().filter_map(|((path,_),(a,b))| {
-        if local.pendingOwners.contains(path) || remote.pendingOwners.contains(path) { return None; }
         let choice = match (a,b) {
             (Some(a),Some(b)) => compare_manifests(a,b).ok()?,
             (Some(_),None) => Source::Local,
             (None,Some(_)) => Source::Remote,
             _ => unreachable!(),
         };
-        let choice = if choice == Source::Equal && (force || local.skipped.contains_key(path) || remote.skipped.contains_key(path)) {
+        let choice = if choice == Source::Equal && (force || local.pendingOwners.contains(path) || remote.pendingOwners.contains(path) || local.skipped.contains_key(path) || remote.skipped.contains_key(path)) {
             let (a,b) = (a?,b?);
             if (&a.revision,&a.node) >= (&b.revision,&b.node) { Source::Local } else { Source::Remote }
         } else { choice };
@@ -216,7 +215,7 @@ mod tests {
         assert!(!verifyReports(&local,&remote).unwrap());
         local.skipped.clear();
         remote.pendingOwners.insert("local".into());
-        assert!(correctionPlans(&local,&remote,false).is_empty());
+        assert_eq!(correctionPlans(&local,&remote,false).len(),1);
         assert!(verifyReports(&local,&remote).is_err());
         remote.pendingOwners.clear();
         remote.errors.push("unreadable storage".into());

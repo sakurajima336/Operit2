@@ -665,6 +665,20 @@ class ChatViewModel {
     return entries;
   }
 
+  Future<void> mutateWorkspaceFile(
+    WorkspaceFileOperation operation,
+    String path,
+    String? destinationPath,
+  ) async {
+    final chatId = await _requiredCurrentChatId();
+    await clients.servicesWorkspaceService.mutateWorkspaceFile(
+      chatId: chatId,
+      operation: operation.name,
+      relativePath: path,
+      destinationPath: destinationPath,
+    );
+  }
+
   /// Lists workspace entries ranked for the active @ mention query.
   Future<List<WorkspaceFileEntry>> listMentionWorkspaceSuggestions(
     String searchQuery,
@@ -738,6 +752,11 @@ typedef ChatUiMessage = core_proxy.ChatMessage;
 
 /// Exposes chat presentation helpers directly on the generated Core message state.
 extension ChatMessagePresentation on core_proxy.ChatMessage {
+  /// Identifies automatic user turns whose source is only shown on request.
+  bool get isHiddenUserPlaceholder =>
+      sender == 'user' &&
+      displayMode == core_proxy.ChatMessageDisplayMode.hiddenPlaceholder;
+
   /// Returns the legacy variant-preview flag for a normal Core message.
   bool get isVariantPreview => false;
 

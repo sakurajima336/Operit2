@@ -5,7 +5,7 @@ use serde_json::{Map, Value};
 
 use operit_host_api::HostManager::HostManager;
 use operit_host_api::TimeUtils::tryCurrentTimeMillisU128;
-use operit_tools::files::VisualFileSystem::VisualFileSystem;
+use operit_vfs::VisualFileSystem::VisualFileSystem;
 use operit_tools::tools::mcp::MCPManager::MCPManager;
 use operit_tools::tools::mcp::MCPToolParameter::MCPToolParameter;
 use operit_tools::tools::ToolExecutionLimits::ToolExecutionLimits;
@@ -44,7 +44,7 @@ impl ImageSaveTarget {
         let turn = turn?;
         let storage = host.runtimeStorageHost.clone()?;
         let directory = turn.fileDirectory(storage.clone()).ok()??;
-        match VisualFileSystem::fromContext(host) {
+        match (host).vfs() {
             Ok(vfs) => Some(Self { vfs, directory }),
             Err(error) => {
                 AppLogger::w(TAG, &format!("MCP image persistence unavailable: {error}"));
@@ -470,7 +470,8 @@ impl AsyncToolExecutor for MCPToolExecutor {
         })
     }
 
-    fn invokeAndStreamAsync<'a>(&'a mut self, tool: &'a AITool, context: &'a crate::ToolExecutionManager::ToolInvocationContext) -> ToolInvocationFuture<'a> {
+    /// Executes an independent request through the owning resource services.
+    fn invokeAndStreamAsync<'a>(&'a self, tool: &'a AITool, context: &'a crate::ToolExecutionManager::ToolInvocationContext) -> ToolInvocationFuture<'a> {
         Box::pin(async move {
             let saveTarget = ImageSaveTarget::resolve(&self.host, context.turnSnapshot());
             vec![self.invoke(tool, saveTarget.as_ref()).await]

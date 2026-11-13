@@ -10,6 +10,7 @@ import 'package:operit_ui/operit_ui.dart';
 import 'package:video_player/video_player.dart';
 
 import '../../core/errors/UnhandledErrorReporter.dart';
+import '../../core/logging/ClientLogger.dart';
 import '../../core/runtime/RuntimeBootstrapManager.dart';
 import '../../data/preferences/UserPreferencesManager.dart';
 import '../../l10n/generated/app_localizations.dart';
@@ -461,7 +462,7 @@ class OperitThemeController {
   final VoidCallback _onChanged;
   final Future<void> Function(ThemeMode) _saveStartupThemeMode;
   final UserPreferencesManager _preferencesManager;
-  StreamSubscription<Map<String, Object?>>? _appearanceSubscription;
+  StreamSubscription<ThemePreferenceSnapshot>? _appearanceSubscription;
   ThemePreferenceSnapshot _themePreferenceSnapshot =
       UserPreferencesManager.defaultThemePreferenceSnapshot;
   Object? _themeLoadError;
@@ -494,19 +495,30 @@ class OperitThemeController {
     if (lifecycle != _lifecycleRevision) return;
     await _reloadThemePreferenceSnapshot();
     if (lifecycle != _lifecycleRevision) return;
-    _appearanceSubscription = _preferencesManager.preferencesFlow().listen(
-      (_) {
-        if (lifecycle != _lifecycleRevision) return;
-        unawaited(_reloadThemePreferenceSnapshot());
-      },
-      onError: (Object error, StackTrace stack) {
-        if (lifecycle != _lifecycleRevision) return;
-        _themePreferenceRevision++;
-        _themeIsPreparing = false;
-        _themeLoadError = error;
-        _onChanged();
-      },
-    );
+    _appearanceSubscription = _preferencesManager
+        .themePreferenceSnapshotFlow()
+        .listen(
+          (snapshot) {
+            if (lifecycle != _lifecycleRevision) return;
+            unawaited(
+              _reloadThemePreferenceSnapshot(committedSnapshot: snapshot),
+            );
+          },
+          onError: (Object error, StackTrace stack) {
+            if (lifecycle != _lifecycleRevision) return;
+            ClientLogger.e(
+              'Appearance preference subscription failed lifecycle=$lifecycle '
+              'hasLoadedTheme=$_hasLoadedState',
+              tag: 'ThemeAppearance',
+              error: error,
+              stackTrace: stack,
+            );
+            _themePreferenceRevision++;
+            _themeIsPreparing = false;
+            _themeLoadError = error;
+            _onChanged();
+          },
+        );
   }
 
   /// Releases the ordinary appearance observer when this controller leaves its runtime.
@@ -769,8 +781,8 @@ class OperitThemeController {
     await _reloadThemePreferenceSnapshot();
   }
 
-  /// Re-reads the ordinary committed appearance and its font resources.
-  Future<void> reloadTheme() => _reloadThemePreferenceSnapshot();
+  /// Re-reads committed appearance and renews its subscription for an explicit retry.
+  Future<void> reloadTheme() => start();
 
   /// Saves ordinary appearance through its synchronized preference owner.
   Future<void> saveAppearanceFields(Map<String, Object?> updates) async {
@@ -779,7 +791,9 @@ class OperitThemeController {
   }
 
   /// Loads an independent appearance configuration without looking up its creation source.
-  Future<void> _reloadThemePreferenceSnapshot() async {
+  Future<void> _reloadThemePreferenceSnapshot({
+    ThemePreferenceSnapshot? committedSnapshot,
+  }) async {
     final lifecycle = _lifecycleRevision;
     final revision = ++_themePreferenceRevision;
 
@@ -787,10 +801,18 @@ class OperitThemeController {
     bool current() =>
         lifecycle == _lifecycleRevision && revision == _themePreferenceRevision;
     if (!_hasLoadedState) _themeIsPreparing = true;
+    var stage = 'read_preferences';
     try {
-      final snapshot = await _preferencesManager
-          .resolveThemePreferenceSnapshot();
+      final snapshot =
+          committedSnapshot ??
+          await _preferencesManager.resolveThemePreferenceSnapshot();
       if (!current()) return;
+      if (_hasLoadedState &&
+          _themeLoadError == null &&
+          mapEquals(snapshot.toJson(), _themePreferenceSnapshot.toJson())) {
+        return;
+      }
+      stage = 'validate_palette';
       final palette = snapshot.themePaletteJson;
       if (palette != null) {
         final colors = jsonDecode(palette) as Map<String, dynamic>;
@@ -798,9 +820,20 @@ class OperitThemeController {
           ThemeVisualSpecV1.colorSchemeFromPalette(colors, brightness);
         }
       }
-      final families = await _prepareCustomFonts(snapshot);
+      stage = 'prepare_fonts';
+      final families =
+          !_hasLoadedState ||
+              !listEquals(
+                _themeFontReferences(snapshot),
+                _themeFontReferences(_themePreferenceSnapshot),
+              )
+          ? await _prepareCustomFonts(snapshot)
+          : const <String, String>{};
       if (!current()) return;
-      await _saveStartupThemeMode(snapshot.themeMode);
+      stage = 'save_startup_theme_mode';
+      if (!_hasLoadedState || snapshot.themeMode != themeMode) {
+        await _saveStartupThemeMode(snapshot.themeMode);
+      }
       if (!current()) return;
       _loadedCustomFontFamilies.addAll(families);
       _themePreferenceSnapshot = snapshot;
@@ -808,8 +841,15 @@ class OperitThemeController {
       _themeIsPreparing = false;
       _hasLoadedState = true;
       _onChanged();
-    } catch (error) {
+    } catch (error, stack) {
       if (!current()) return;
+      ClientLogger.e(
+        'Appearance load failed stage=$stage lifecycle=$lifecycle '
+        'revision=$revision hasLoadedTheme=$_hasLoadedState',
+        tag: 'ThemeAppearance',
+        error: error,
+        stackTrace: stack,
+      );
       _themeLoadError = error;
       _themeIsPreparing = false;
       _onChanged();
@@ -850,23 +890,33 @@ class _OperitThemePreviewState extends State<OperitThemePreview> {
   Future<void>? _preparation;
   late ThemeAssetResolver _resolver;
 
+  /// Prepares this preview's initial asset bindings.
   @override
   void initState() {
     super.initState();
     _prepare();
   }
 
+  /// Updates presentation without rereading unchanged private font assets.
   @override
   void didUpdateWidget(covariant OperitThemePreview oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (!mapEquals(oldWidget.snapshot.toJson(), widget.snapshot.toJson()) ||
         oldWidget.visual != widget.visual ||
         oldWidget.assets != widget.assets) {
-      _prepare();
+      _prepare(
+        prepareFonts:
+            oldWidget.visual != widget.visual ||
+            !listEquals(
+              _themeFontReferences(oldWidget.snapshot),
+              _themeFontReferences(widget.snapshot),
+            ),
+      );
     }
   }
 
-  void _prepare() {
+  /// Rebinds appearance while retaining any existing font preparation future.
+  void _prepare({bool prepareFonts = true}) {
     final visual = widget.visual;
     _resolver = visual == null
         ? widget.assets ?? _assets
@@ -890,9 +940,11 @@ class _OperitThemePreviewState extends State<OperitThemePreview> {
             _usesFontAsset(snapshot.bubbleUserFontType)) ||
         (snapshot.bubbleAiUseCustomFont &&
             _usesFontAsset(snapshot.bubbleAiFontType))) {
-      _preparation = _prepareCustomFonts(snapshot).then((families) {
-        _loadedCustomFontFamilies.addAll(families);
-      });
+      if (prepareFonts) {
+        _preparation = _prepareCustomFonts(snapshot).then((families) {
+          _loadedCustomFontFamilies.addAll(families);
+        });
+      }
     } else {
       _preparation = null;
     }
@@ -970,13 +1022,21 @@ class _PreviewAssetResolver implements ThemeAssetResolver {
 }
 
 class _OperitThemeScope extends InheritedWidget {
-  const _OperitThemeScope({required this.controller, required super.child});
+  /// Captures immutable appearance values for dependency comparisons.
+  _OperitThemeScope({required this.controller, required super.child})
+    : snapshot = controller.themePreferenceSnapshot,
+      suppressAnimation = controller.suppressThemeAnimation;
 
   final OperitThemeController controller;
+  final ThemePreferenceSnapshot snapshot;
+  final bool suppressAnimation;
 
+  /// Leaves theme consumers untouched when unrelated root state changes.
   @override
   bool updateShouldNotify(_OperitThemeScope oldWidget) {
-    return true;
+    return controller != oldWidget.controller ||
+        snapshot != oldWidget.snapshot ||
+        suppressAnimation != oldWidget.suppressAnimation;
   }
 }
 
@@ -1384,15 +1444,7 @@ List<String> _fontFamilyFallbackForSettings({
 Future<Map<String, String>> _prepareCustomFonts(
   ThemePreferenceSnapshot snapshot,
 ) async {
-  final paths = <String?>[
-    if (_usesFontAsset(snapshot.fontType)) snapshot.customFontPath,
-    if (snapshot.bubbleUserUseCustomFont &&
-        _usesFontAsset(snapshot.bubbleUserFontType))
-      snapshot.bubbleUserCustomFontPath,
-    if (snapshot.bubbleAiUseCustomFont &&
-        _usesFontAsset(snapshot.bubbleAiFontType))
-      snapshot.bubbleAiCustomFontPath,
-  ];
+  final paths = _themeFontReferences(snapshot);
   final families = <String, String>{};
   for (final path in paths) {
     if (path == null || path.isEmpty) {
@@ -1410,6 +1462,18 @@ Future<Map<String, String>> _prepareCustomFonts(
   }
   return Map<String, String>.unmodifiable(families);
 }
+
+/// Identifies the exact font assets that require preparation before publication.
+List<String?> _themeFontReferences(ThemePreferenceSnapshot snapshot) =>
+    <String?>[
+      if (_usesFontAsset(snapshot.fontType)) snapshot.customFontPath,
+      if (snapshot.bubbleUserUseCustomFont &&
+          _usesFontAsset(snapshot.bubbleUserFontType))
+        snapshot.bubbleUserCustomFontPath,
+      if (snapshot.bubbleAiUseCustomFont &&
+          _usesFontAsset(snapshot.bubbleAiFontType))
+        snapshot.bubbleAiCustomFontPath,
+    ];
 
 String _customFontFamilyForPath(String path) {
   final family = _loadedCustomFontFamilies[path];

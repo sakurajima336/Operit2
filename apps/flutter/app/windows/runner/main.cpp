@@ -21,6 +21,7 @@
 #include "native_crash_report.h"
 #include "engine_channel_lifetime.h"
 #include "flutter_window.h"
+#include "keyboard_message_normalizer.h"
 #include "operit_runtime_channel.h"
 #include "system_audio_input_channel.h"
 #include "utils.h"
@@ -264,14 +265,16 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
 
     ::MSG msg;
     while (::GetMessage(&msg, nullptr, 0, 0)) {
+      // TranslateMessage must see the same scan code as Flutter so generated
+      // WM_CHAR events preserve the injected key's physical identity too.
+      msg.lParam = NormalizeOperitKeyboardMessage(msg.message, msg.wParam,
+                                                 msg.lParam);
       ::TranslateMessage(&msg);
       ::DispatchMessage(&msg);
     }
 
-    ShutdownOperitRuntimeChannel();
-    ShutdownAllOperitEngineChannels();
-    ShutdownSystemAudioInputChannel();
-    ShutdownOperitCrashChannel();
+    // Destroy all Flutter windows while their host services and COM are alive.
+    window.Destroy();
     ::CoUninitialize();
     return EXIT_SUCCESS;
   } catch (const std::exception& error) {
