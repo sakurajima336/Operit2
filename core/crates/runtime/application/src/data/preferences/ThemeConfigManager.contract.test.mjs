@@ -16,7 +16,7 @@ const appearanceUi = readFileSync(resolve(repository, 'apps/flutter/app/lib/ui/f
 const application = readFileSync(resolve(repository, 'core/crates/runtime/application/src/core/application/OperitApplication.rs'), 'utf8');
 const modules = readFileSync(resolve(here, 'mod.rs'), 'utf8');
 const store = readFileSync(resolve(repository, 'core/crates/persistence/store/src/PreferencesDataStore.rs'), 'utf8');
-const paths = readFileSync(resolve(repository, 'core/crates/foundation/util/src/RuntimeStorageLayout.rs'), 'utf8');
+const paths = readFileSync(resolve(repository, 'core/crates/foundation/host-contract/src/RuntimeStorageLayout.rs'), 'utf8');
 const factoryScanner = readFileSync(resolve(repository, 'core/crates/proxy/scan/src/build_scanner.rs'), 'utf8');
 
 const jsonStart = dart.indexOf('Map<String, Object?> toJson()');
@@ -236,13 +236,20 @@ test('active deletion is refused and custom selection is explicit', () => {
   assert.doesNotMatch(custom, /\.create\(|\.apply\(/);
 });
 
-/// Verifies strict stored state errors and ordinary consistency without manufactured success values.
-test('corrupt catalog, dangling selection and active ordinary divergence remain errors', () => {
+/// Validates catalog integrity on read and appearance consistency only when committing state.
+test('catalog reads allow appearance divergence while writes require synchronized appearance', () => {
   const read = body(manager, 'readState');
-  assert.match(read, /Some\(value\) => serde_json::from_str::<Vec<ThemeConfig>>\(value\)\?/);
-  assert.match(read, /Some\(value\) => serde_json::from_str::<Option<String>>\(value\)\?/);
   assert.match(read, /validateState\(&state\)\?/);
-  assert.match(read, /assertThemePreferenceSnapshot\(preferences,[\s\S]*findConfig\(&state, id\)\?/);
+  assert.doesNotMatch(read, /assertThemePreferenceSnapshot/);
+  assert.match(body(manager, 'writeState'), /assertThemePreferenceSnapshot\(preferences,[\s\S]*findConfig\(state, id\)\?/);
+});
+
+/// Keeps malformed catalog entries and dangling selections as explicit errors.
+test('corrupt catalog and dangling selection remain errors', () => {
+  const read = body(manager, 'readState');
+  assert.match(read, /serde_json::from_value\(value\.clone\(\)\)\?/);
+  assert.match(read, /Some\(value\) => serde_json::from_value::<Option<String>>\(value\.clone\(\)\)\?/);
+  assert.match(read, /validateState\(&state\)\?/);
   assert.match(body(manager, 'validateState'), /Duplicate theme configuration identifier/);
   assert.match(body(manager, 'findConfigIndex'), /Theme configuration not found/);
   assert.match(body(validator, 'assertThemePreferenceSnapshot'), /active ordinary preference differs/);

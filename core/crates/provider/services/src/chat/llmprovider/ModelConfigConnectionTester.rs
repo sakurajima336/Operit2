@@ -9,7 +9,7 @@ use crate::chat::enhance::MultiServiceManager::MultiServiceManager;
 use crate::chat::llmprovider::AIService::{ensure_response_completed, AIService, SendMessageRequest};
 use crate::chat::llmprovider::ThinkingDialect::RequestThinking;
 use crate::runtime_support::ProviderRuntimeContext;
-use operit_model::ModelConfigData::{ApiProviderType, ResolvedModelConfig};
+use operit_model::ModelConfigData::{ApiProviderType, ModelCapabilities, ResolvedModelConfig};
 use operit_model::ModelParameter::{ModelParameter, ParameterCategory, ParameterValueType};
 use operit_model::PromptTurn::{toPromptTurns, PromptTurn, PromptTurnKind};
 use operit_model::ToolPrompt::{ToolParameterSchema, ToolPrompt};
@@ -88,20 +88,20 @@ impl ModelConfigConnectionTester {
         parameters
     }
 
-    /// Runs model connection checks with an explicit provider runtime context.
+    /// Runs model connection checks with the response mode selected by the application.
     pub async fn run(
-        rootDir: PathBuf,
         providerId: &str,
         modelId: &str,
         runtimeContext: ProviderRuntimeContext,
+        stream: bool,
     ) -> Result<ModelConnectionTestReport, String> {
         let config =
             runtimeContext
                 .support()
-                .resolvedModelConfig(rootDir.clone(), providerId, modelId)?;
+                .resolvedModelConfig(providerId, modelId)?;
         let mut items = Vec::new();
 
-        let mut serviceManager = MultiServiceManager::new(rootDir.clone(), runtimeContext);
+        let mut serviceManager = MultiServiceManager::new(runtimeContext);
         let bundleResult = serviceManager
             .createTransientServiceBundleForModel(providerId.to_string(), modelId.to_string());
         let (configForTest, parameters, serviceHandle) = match bundleResult {
@@ -116,9 +116,21 @@ impl ModelConfigConnectionTester {
             }
         };
         let parameters = Self::testParameters(&configForTest.apiProviderType, parameters);
+        let items =
+            Self::testService(serviceHandle, &configForTest.capabilities, parameters, stream).await;
 
+        Ok(Self::report(configForTest, items))
+    }
+
+    /// Runs every supported probe with the same user-selected response mode.
+    async fn testService(
+        mut service: Box<dyn AIService>,
+        capabilities: &ModelCapabilities,
+        parameters: Vec<ModelParameter<Value>>,
+        stream: bool,
+    ) -> Vec<ModelConnectionTestItem> {
+        let mut items = Vec::new();
         {
-            let mut service = serviceHandle;
             Self::runCase(&mut items, ModelConnectionTestType::CHAT, || async {
                 Self::executeTestRequest(
                     &mut service,
@@ -126,7 +138,7 @@ impl ModelConfigConnectionTester {
                         chat_history: vec![PromptTurn::new(PromptTurnKind::USER, "Hi")],
                         model_parameters: parameters.clone(),
                         thinking: RequestThinking::default(),
-                        stream: false,
+                        stream,
                         available_tools: Vec::new(),
                         preserve_think_in_history: false,
                         enable_retry: false,
@@ -138,7 +150,7 @@ impl ModelConfigConnectionTester {
             })
             .await;
 
-            if configForTest.capabilities.toolCall {
+            if capabilities.toolCall {
                 Self::runCase(&mut items, ModelConnectionTestType::TOOL_CALL, || async {
                     let toolTagName = ChatMarkupRegex::generate_random_tool_tag_name();
                     let toolResultTagName = ChatMarkupRegex::generate_random_tool_result_tag_name();
@@ -164,7 +176,7 @@ impl ModelConfigConnectionTester {
                             chat_history: toPromptTurns(&history),
                             model_parameters: parameters.clone(),
                             thinking: RequestThinking::default(),
-                            stream: false,
+                            stream,
                             available_tools: vec![Self::echoToolPrompt()],
                             preserve_think_in_history: false,
                             enable_retry: false,
@@ -177,7 +189,7 @@ impl ModelConfigConnectionTester {
                 .await;
             }
 
-            if configForTest.capabilities.directImage {
+            if capabilities.directImage {
                 Self::runCase(&mut items, ModelConnectionTestType::IMAGE, || async {
                     let imageId = ImagePoolManager::add_image_bytes(
                         include_bytes!("../../../assets/test/1.jpg"),
@@ -197,7 +209,7 @@ impl ModelConfigConnectionTester {
                             chat_history: vec![PromptTurn::new(PromptTurnKind::USER, prompt)],
                             model_parameters: parameters.clone(),
                             thinking: RequestThinking::default(),
-                            stream: false,
+                            stream,
                             available_tools: Vec::new(),
                             preserve_think_in_history: false,
                             enable_retry: false,
@@ -212,7 +224,7 @@ impl ModelConfigConnectionTester {
                 .await;
             }
 
-            if configForTest.capabilities.directAudio {
+            if capabilities.directAudio {
                 Self::runCase(&mut items, ModelConnectionTestType::AUDIO, || async {
                     let audioId = MediaPoolManager::add_media_bytes(
                         include_bytes!("../../../assets/test/1.mp3"),
@@ -231,7 +243,7 @@ impl ModelConfigConnectionTester {
                             chat_history: vec![PromptTurn::new(PromptTurnKind::USER, prompt)],
                             model_parameters: parameters.clone(),
                             thinking: RequestThinking::default(),
-                            stream: false,
+                            stream,
                             available_tools: Vec::new(),
                             preserve_think_in_history: false,
                             enable_retry: false,
@@ -246,7 +258,7 @@ impl ModelConfigConnectionTester {
                 .await;
             }
 
-            if configForTest.capabilities.directVideo {
+            if capabilities.directVideo {
                 Self::runCase(&mut items, ModelConnectionTestType::VIDEO, || async {
                     let videoId = MediaPoolManager::add_media_bytes(
                         include_bytes!("../../../assets/test/1.mp4"),
@@ -265,7 +277,7 @@ impl ModelConfigConnectionTester {
                             chat_history: vec![PromptTurn::new(PromptTurnKind::USER, prompt)],
                             model_parameters: parameters.clone(),
                             thinking: RequestThinking::default(),
-                            stream: false,
+                            stream,
                             available_tools: Vec::new(),
                             preserve_think_in_history: false,
                             enable_retry: false,
@@ -284,7 +296,7 @@ impl ModelConfigConnectionTester {
             service.release();
         }
 
-        Ok(Self::report(configForTest, items))
+        items
     }
 
     /// Executes a connection probe and rejects both request and stream completion failures.

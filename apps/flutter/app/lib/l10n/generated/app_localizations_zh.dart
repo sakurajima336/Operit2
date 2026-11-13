@@ -358,6 +358,11 @@ class AppLocalizationsZh extends AppLocalizations {
   String get messageLocatorLoadFailed => '暂时无法加载消息，请重试';
 
   @override
+  String messageTransformFailed(String error) {
+    return '消息显示处理失败：$error';
+  }
+
+  @override
   String get messageLocatorFavoriteFailed => '收藏更新失败，请重试';
 
   @override
@@ -422,6 +427,9 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get hiddenUserMessage => '隐藏的用户消息';
+
+  @override
+  String get autoTriggeredUserMessage => '自动触发';
 
   @override
   String get workspaceSetupTitle => '设置工作区';
@@ -1773,10 +1781,10 @@ class AppLocalizationsZh extends AppLocalizations {
   }
 
   @override
-  String get settingsModelCatalogNotDownloaded => '模型信息还没有下载';
+  String get settingsModelCatalogBundled => '使用内置模型信息，联网更新成功后自动替换';
 
   @override
-  String get settingsModelCatalogRetry => '重试';
+  String get settingsModelCatalogRetry => '更新';
 
   @override
   String get settingsModelCustomModel => '自定义模型';
@@ -3065,7 +3073,22 @@ class AppLocalizationsZh extends AppLocalizations {
   String get settingsAppearanceBubbleImagePreview => '预览';
 
   @override
-  String get settingsAppearanceBubbleImagePreviewText => '这是一条气泡预览，切线展示九宫格区域';
+  String get settingsAppearanceBubbleImagePreviewText =>
+      '这是一条气泡预览消息。\n可以查看边角和中间区域的实际效果。';
+
+  @override
+  String get settingsAppearanceBubbleImageSourceHint =>
+      '原图 · 白框为裁切边界，蓝线分出九宫格；可双指缩放、拖动查看';
+
+  @override
+  String get settingsAppearanceBubbleImageFitSource => '完整显示原图';
+
+  @override
+  String get settingsAppearanceBubbleImageGrid => '九宫格';
+
+  @override
+  String get settingsAppearanceBubbleImageGridHint =>
+      '两横两竖分出九块：四角保留，上下边横向重复、左右边纵向重复，中间双向重复；拉伸模式则拉伸对应区域。起点和终点相对于裁切后的图片。';
 
   @override
   String settingsAppearanceBubbleImageImportFailed(String error) {
@@ -4506,7 +4529,7 @@ class AppLocalizationsZh extends AppLocalizations {
   String get deviceSpaceSyncRetrying => '同步暂时中断，稍后自动重试';
 
   @override
-  String get deviceSpaceSyncPending => '部分数据尚未处理完成，稍后自动重试';
+  String get deviceSpaceSyncPending => '部分数据尚未处理完成';
 
   @override
   String deviceSpaceSyncCurrentFile(String done, String total) {
@@ -4788,4 +4811,43 @@ class AppLocalizationsZh extends AppLocalizations {
   @override
   String get settingsAppearanceDeviceFontPreview =>
       '字体预览：你好，世界\nThe quick brown fox · 0123456789';
+
+  @override
+  String get workspaceFileRename => '重命名';
+
+  @override
+  String get workspaceFileCopy => '复制';
+
+  @override
+  String get workspaceFileCut => '剪切';
+
+  @override
+  String get workspaceFilePaste => '粘贴';
+
+  @override
+  String get workspaceFileName => '名称';
+
+  @override
+  String get workspaceFileInvalidName => '请输入有效名称，不能包含路径分隔符。';
+
+  @override
+  String get workspaceDeleteFolderTitle => '删除文件夹？';
+
+  @override
+  String workspaceDeleteFolderMessage(String name) {
+    return '确定删除“$name”及其全部内容？此操作无法撤销。';
+  }
+
+  @override
+  String workspaceFileOperationFailed(String error) {
+    return '文件操作失败：$error';
+  }
+
+  @override
+  String workspaceFileCopyName(String name, int index) {
+    return '$name（副本 $index）';
+  }
+
+  @override
+  String get workspaceFileSaving => '文件正在保存，请保存完成后重试。';
 }

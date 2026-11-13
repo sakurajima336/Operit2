@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Cursor;
 
-use operit_host_api::FileSystemHost;
+use operit_vfs::VisualFileSystem::VisualFileSystem;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -470,6 +470,12 @@ pub struct ToolPkgMainRegistration {
     pub chatViewHooks: Vec<ToolPkgRegisteredFunctionHook>,
     #[serde(rename = "chatMessageHooks", default)]
     pub chatMessageHooks: Vec<ToolPkgRegisteredFunctionHook>,
+    /// Declares awaited message text transformations.
+    #[serde(rename = "messageTransformHooks", default)]
+    pub messageTransformHooks: Vec<ToolPkgRegisteredFunctionHook>,
+    /// Declares native display-program preparation handlers.
+    #[serde(default)]
+    pub messageStreamTransforms: Vec<ToolPkgRegisteredFunctionHook>,
     /// Declares one lifecycle initializer for the package-owned conversation namespace.
     #[serde(rename = "chatLifecycleHooks", default)]
     pub chatLifecycleHooks: Vec<ToolPkgRegisteredFunctionHook>,
@@ -584,6 +590,12 @@ pub struct ToolPkgContainerRuntime {
     pub chatViewHooks: Vec<ToolPkgFunctionHookRuntime>,
     #[serde(rename = "chatMessageHooks")]
     pub chatMessageHooks: Vec<ToolPkgFunctionHookRuntime>,
+    /// Contains validated text transformation handlers in registration order.
+    #[serde(rename = "messageTransformHooks")]
+    pub messageTransformHooks: Vec<ToolPkgFunctionHookRuntime>,
+    /// Contains validated native display-program preparation handlers.
+    #[serde(default)]
+    pub messageStreamTransforms: Vec<ToolPkgFunctionHookRuntime>,
     /// Retains the actual exported creation handler validated at package registration.
     #[serde(rename = "chatLifecycleHooks")]
     pub chatLifecycleHooks: Vec<ToolPkgFunctionHookRuntime>,
@@ -797,6 +809,143 @@ pub struct ToolPkgParser;
 pub struct ToolPkgArchiveParser;
 
 impl ToolPkgArchiveParser {
+    /// Reads activation metadata before touching executable entries or their resource payloads.
+    #[allow(non_snake_case)]
+    pub fn readToolPkgManifest(archiveBytes: &[u8]) -> Result<ToolPkgManifest, String> {
+        let mut archive = zip::ZipArchive::new(Cursor::new(archiveBytes))
+            .map_err(|error| error.to_string())?;
+        let index = Self::buildZipEntryIndex(&mut archive);
+        let entry = findManifestEntry(&index.entryNames).ok_or("ToolPkg manifest is missing")?;
+        let text = Self::readZipEntryText(&mut archive, &index, &entry)
+            .ok_or("Cannot read ToolPkg manifest")?;
+        let manifest = parseToolPkgManifest(&text, &entry)?;
+        if manifest.toolpkgId.trim().is_empty() {
+            return Err("manifest.toolpkg_id is required".into());
+        }
+        Ok(manifest)
+    }
+
+    /// Reads installed-package metadata without evaluating scripts or inflating unrelated resources.
+    #[allow(non_snake_case)]
+    pub fn readToolPkgCatalog(
+        archiveBytes: &[u8],
+        sourceType: ToolPkgSourceType,
+        sourcePath: &str,
+        isBuiltIn: bool,
+    ) -> Result<ToolPkgLoadResult, String> {
+        let mut archive = zip::ZipArchive::new(Cursor::new(archiveBytes))
+            .map_err(|error| error.to_string())?;
+        let index = Self::buildZipEntryIndex(&mut archive);
+        let entry = findManifestEntry(&index.entryNames).ok_or("ToolPkg manifest is missing")?;
+        let text = Self::readZipEntryText(&mut archive, &index, &entry)
+            .ok_or("Cannot read ToolPkg manifest")?;
+        let manifest = parseToolPkgManifest(&text, &entry)?;
+        if manifest.toolpkgId.trim().is_empty() {
+            return Err("manifest.toolpkg_id is required".into());
+        }
+        let apiVersion = requireSupportedToolPkgApiVersion(&manifest.apiVersion)?;
+        let mut requires = normalizeRequirements("manifest.requires", &manifest.requires)?;
+        applyCompatibilityRequirements(apiVersion, &manifest.toolpkgId, &mut requires)?;
+        let base = entry.rsplit_once('/').map(|(base, _)| base).unwrap_or("");
+        let mut subpackagePackages = Vec::new();
+        let mut subpackages = Vec::new();
+        for child in &manifest.subpackages {
+            if child.id.trim().is_empty() || child.entry.trim().is_empty() {
+                return Err("ToolPkg subpackage id and entry are required".into());
+            }
+            let path = Self::resolveManifestRelativeZipEntryPath(base, &child.entry)
+                .ok_or("Invalid subpackage entry")?;
+            let source = Self::readZipEntryText(&mut archive, &index, &path)
+                .ok_or_else(|| format!("Cannot read subpackage entry: {}", child.entry))?;
+            let metadata = crate::JsPackageLoader::JsPackageLoader::extract_metadata(&source);
+            let package = crate::JsPackageLoader::JsPackageLoader::parse_metadata(&metadata, "")?;
+            let displayName = if hasLocalizedTextContent(&package.display_name) {
+                package.display_name.clone()
+            } else {
+                localizedTextOf(&package.name)
+            };
+            subpackages.push(ToolPkgSubpackageRuntime {
+                packageName: child.id.trim().into(),
+                containerPackageName: manifest.toolpkgId.clone(),
+                subpackageId: child.id.trim().into(),
+                entryPath: path,
+                displayName,
+                description: package.description.clone(),
+                enabledByDefault: package.enabled_by_default,
+                toolCount: package.tools.len(),
+            });
+            subpackagePackages.push(ToolPackage {
+                name: child.id.trim().into(), is_built_in: isBuiltIn, ..package
+            });
+        }
+        let resources = manifest.resources.iter().map(|resource| {
+            Ok(ToolPkgResourceRuntime {
+                key: resource.key.clone(),
+                path: Self::resolveManifestRelativeResourcePath(base, &resource.path)
+                    .ok_or("Invalid resource path")?,
+                mime: resource.mime.clone(),
+            })
+        }).collect::<Result<Vec<_>, String>>()?;
+        let logoResource = resolveLogoResource(manifest.logo.as_deref(), &resources)?;
+        let displayName = if hasLocalizedTextContent(&manifest.displayName) {
+            manifest.displayName.clone()
+        } else {
+            localizedTextOf(&manifest.toolpkgId)
+        };
+        let description = if hasLocalizedTextContent(&manifest.description) {
+            manifest.description.clone()
+        } else {
+            displayName.clone()
+        };
+        let mut manifestExtensions = manifest.extensionFields.clone();
+        if let Some(scope) = manifest.installationScope {
+            manifestExtensions.insert("installation_scope".into(),
+                serde_json::to_value(scope).map_err(|error| error.to_string())?);
+        }
+        let mainEntry = if manifest.main.is_empty() {
+            String::new()
+        } else {
+            Self::resolveManifestRelativeZipEntryPath(base, &manifest.main)
+                .ok_or("Invalid manifest.main path")?
+        };
+        let marketOrigin = if manifest.main.is_empty() {
+            manifest.extensionFields.get("market_origin")
+                .map(|value| serde_json::from_value::<ToolPkgMarketOrigin>(value.clone()))
+                .transpose().map_err(|error| error.to_string())?
+        } else if sourceType == ToolPkgSourceType::MARKET {
+            let source = Self::readZipEntryText(&mut archive, &index, &mainEntry)
+                .ok_or("Cannot read marketplace provenance from main entry")?;
+            crate::toolpkg::ToolPkgProtection::readMainScriptMarketOrigin(&source, &manifest.toolpkgId)?
+        } else {
+            None
+        };
+        if manifest.main.is_empty() {
+            if let Some(origin) = &marketOrigin {
+                if origin.toolpkgId != manifest.toolpkgId || origin.version != manifest.version || origin.author != manifest.author {
+                    return Err("ToolPkg market origin differs from its manifest".into());
+                }
+            }
+        }
+        Ok(ToolPkgLoadResult {
+            containerPackage: ToolPackage {
+                name: manifest.toolpkgId.clone(), display_name: displayName.clone(),
+                description: description.clone(), author: manifest.author.clone(),
+                enabled_by_default: manifest.enabledByDefault, is_built_in: isBuiltIn,
+                category: "ToolPkg".into(), ..Default::default()
+            },
+            subpackagePackages,
+            containerRuntime: ToolPkgContainerRuntime {
+                packageName: manifest.toolpkgId, displayName, description,
+                version: manifest.version, apiVersion: apiVersion.to_string(), requires,
+                author: manifest.author, sourceType, sourcePath: sourcePath.into(),
+                mainEntry, subpackages, resources, logoResource, manifestExtensions,
+                themes: manifest.themes, license: manifest.license,
+                marketOrigin: marketOrigin.clone(), ..Default::default()
+            },
+            marketOrigin,
+        })
+    }
+
     /// Reads installation restrictions before any registration script can create scoped data.
     #[allow(non_snake_case)]
     pub fn readInstallationScope(archiveBytes: &[u8]) -> Result<Option<crate::javascript::ToolPkgConfigScope>, String> {
@@ -1440,6 +1589,14 @@ impl ToolPkgArchiveParser {
             &mainRegistration.chatMessageHooks,
             TOOLPKG_REGISTRATION_CHAT_MESSAGE_HOOK,
         )?;
+        let messageTransformHooks = validateFunctionHooks(
+            &mainRegistration.messageTransformHooks,
+            TOOLPKG_REGISTRATION_MESSAGE_TRANSFORM_HOOK,
+        )?;
+        let messageStreamTransforms = validateFunctionHooks(
+            &mainRegistration.messageStreamTransforms,
+            TOOLPKG_REGISTRATION_MESSAGE_STREAM_TRANSFORM,
+        )?;
         let chatMessageMenuItems =
             validateChatMessageMenuItems(&mainRegistration.chatMessageMenuItems, entryIndex)?;
         let chatRuntimeHooks = validateFunctionHooks(
@@ -1545,6 +1702,8 @@ impl ToolPkgArchiveParser {
             chatInputHooks,
             chatViewHooks,
             chatMessageHooks,
+            messageTransformHooks,
+            messageStreamTransforms,
             chatLifecycleHooks,
             chatMessageMenuItems,
             chatRuntimeHooks,
@@ -1605,19 +1764,19 @@ impl ToolPkgArchiveParser {
     /// Builds a normalized entry index from an extracted ToolPkg directory.
     #[allow(non_snake_case)]
     pub fn buildDirectoryEntryIndex(
-        fileSystemHost: &dyn FileSystemHost,
+        filesystem: &VisualFileSystem,
         rootDir: &str,
     ) -> ToolPkgEntryIndex {
         let mut normalizedEntryNames = BTreeSet::new();
         let mut entryNamesByNormalizedLowercase = BTreeMap::new();
-        let Ok(rootInfo) = fileSystemHost.fileExists(rootDir) else {
+        let Ok(rootInfo) = filesystem.fileExists(rootDir) else {
             return ToolPkgEntryIndex::default();
         };
         if !rootInfo.exists || !rootInfo.isDirectory {
             return ToolPkgEntryIndex::default();
         }
         collectDirectoryEntryIndex(
-            fileSystemHost,
+            filesystem,
             rootDir,
             rootDir,
             &mut normalizedEntryNames,
@@ -1747,13 +1906,13 @@ impl ToolPkgArchiveParser {
     /// Reads one indexed directory entry as UTF-8 text.
     #[allow(non_snake_case)]
     pub fn readDirectoryEntryText(
-        fileSystemHost: &dyn FileSystemHost,
+        filesystem: &VisualFileSystem,
         rootDir: &str,
         entryIndex: &ToolPkgEntryIndex,
         rawPath: &str,
     ) -> Option<String> {
         let relativePath = entryIndex.resolveEntryName(rawPath)?;
-        let bytes = fileSystemHost
+        let bytes = filesystem
             .readFileBytes(&joinToolPkgHostPath(rootDir, &relativePath))
             .ok()?;
         crate::toolpkg::ToolPkgProtection::decodeUtf8(&bytes).ok()
@@ -1762,31 +1921,31 @@ impl ToolPkgArchiveParser {
     /// Extracts normalized ToolPkg entries from an external ZIP file.
     #[allow(non_snake_case)]
     pub fn extractZipEntriesFromExternal(
-        fileSystemHost: &dyn FileSystemHost,
+        filesystem: &VisualFileSystem,
         zipFilePath: &str,
         destinationDir: &str,
     ) -> bool {
-        let Ok(bytes) = fileSystemHost.readFileBytes(zipFilePath) else {
+        let Ok(bytes) = filesystem.readFileBytes(zipFilePath) else {
             return false;
         };
-        Self::extractZipEntriesFromReader(Cursor::new(bytes), fileSystemHost, destinationDir)
+        Self::extractZipEntriesFromReader(Cursor::new(bytes), filesystem, destinationDir)
     }
 
     /// Extracts normalized ToolPkg entries from embedded archive bytes.
     #[allow(non_snake_case)]
     pub fn extractZipEntriesFromAssetBytes(
         bytes: &'static [u8],
-        fileSystemHost: &dyn FileSystemHost,
+        filesystem: &VisualFileSystem,
         destinationDir: &str,
     ) -> bool {
-        Self::extractZipEntriesFromReader(Cursor::new(bytes), fileSystemHost, destinationDir)
+        Self::extractZipEntriesFromReader(Cursor::new(bytes), filesystem, destinationDir)
     }
 
     /// Extracts normalized ToolPkg entries from a generic seekable reader.
     #[allow(non_snake_case)]
     fn extractZipEntriesFromReader<R: std::io::Read + std::io::Seek>(
         reader: R,
-        fileSystemHost: &dyn FileSystemHost,
+        filesystem: &VisualFileSystem,
         destinationDir: &str,
     ) -> bool {
         let Ok(mut archive) = zip::ZipArchive::new(reader) else {
@@ -1806,7 +1965,7 @@ impl ToolPkgArchiveParser {
             if std::io::Read::read_to_end(&mut entry, &mut content).is_err() {
                 return false;
             }
-            if fileSystemHost
+            if filesystem
                 .writeFileBytes(
                     &joinToolPkgHostPath(destinationDir, &normalizedEntry),
                     &content,
@@ -2455,20 +2614,20 @@ fn duplicateLabel(registryName: &str) -> &'static str {
 #[allow(non_snake_case)]
 /// Recursively adds directory entries to a normalized ToolPkg entry index.
 fn collectDirectoryEntryIndex(
-    fileSystemHost: &dyn FileSystemHost,
+    filesystem: &VisualFileSystem,
     rootDir: &str,
     currentDir: &str,
     normalizedEntryNames: &mut BTreeSet<String>,
     entryNamesByNormalizedLowercase: &mut BTreeMap<String, String>,
 ) {
-    let Ok(entries) = fileSystemHost.listFiles(currentDir) else {
+    let Ok(entries) = filesystem.listFiles(currentDir) else {
         return;
     };
     for entry in entries {
         let path = joinToolPkgHostPath(currentDir, &entry.name);
         if entry.isDirectory {
             collectDirectoryEntryIndex(
-                fileSystemHost,
+                filesystem,
                 rootDir,
                 &path,
                 normalizedEntryNames,

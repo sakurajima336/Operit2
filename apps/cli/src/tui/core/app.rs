@@ -2452,9 +2452,9 @@ impl OperitTui {
             )
             .await
             .and_then(|storage_path| {
-                let package_path = operit_tools::files::VisualFileSystem::VisualFileSystem::runtimePath(&storage_path)?;
-                let vfs = operit_tools::files::VisualFileSystem::VisualFileSystem::fromContext(&context)?;
-                let source = vfs.resolvePath(&package_path)?;
+                let package_path = operit_vfs::VisualFileSystem::VisualFileSystem::runtimePath(&storage_path)?;
+                let vfs = (&context).vfs()?;
+                let source = vfs.file(&package_path)?;
                 crate::cli::install_downloaded_cli_update(
                     &update_target,
                     &source,
@@ -8017,6 +8017,7 @@ mod tests {
                 platform: "linux".to_string(),
                 model: String::new(),
                 coreVersion: None,
+                protocolVersion: None,
                 online,
                 relayHops: None,
                 relayPath: None,
@@ -8358,6 +8359,7 @@ mod tests {
             platform: "linux".to_string(),
             model: String::new(),
             coreVersion: None,
+            protocolVersion: None,
             online,
             relayHops: None,
             relayPath: None,

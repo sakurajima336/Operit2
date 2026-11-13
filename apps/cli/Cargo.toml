@@ -1,6 +1,6 @@
 [package]
 name = "operit-cli"
-version = "2.0.0-preview.31"
+version = "2.0.0-preview.34"
 edition = "2021"
 license = "MIT"
 publish = false
@@ -13,6 +13,8 @@ name = "operit2"
 path = "src/main.rs"
 
 [dependencies]
+operit-host-local-inference = { path = "../../hosts/common/operit-host-local-inference" }
+operit-vfs = { version = "0.1.0", path = "../../core/crates/foundation/vfs" }
 operit-host-data-rescue = { path = "../../hosts/common/operit-host-data-rescue" }
 arboard = "3"
 async-trait = "0.1"

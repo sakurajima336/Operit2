@@ -30,7 +30,7 @@ impl PeerProtocol {
             "Peer message is missing the required protocol identity"))
             .and_then(Self::requireCompatible);
         result.map_err(|mut error| {
-            operit_util::AppLogger::AppLogger::w("RuntimePeerService", &format!(
+            operit_util::AppLogger::AppLogger::trace_detail("RuntimePeerService", &format!(
                 "protocol.rejected phase={phase:?} localProtocol=v{VERSION} remoteProtocol={:?} code={}",
                 protocol.map(|value| value.version), error.code));
             // A missing field does not establish that an installed app is outdated.
@@ -81,5 +81,5 @@ mod tests {
 }
 
 #[cfg(test)]
-#[path = "../build_support/peer_protocol.rs"]
-mod protocol_guard_tests;
+#[path = "../build.rs"]
+mod route_catalog_tests;

@@ -15,6 +15,8 @@ import 'package:operit2/core/proxy/generated/CoreProxyClients.g.dart';
 import 'package:operit2/core/proxy/generated/CoreProxyModels.g.dart';
 import 'package:operit2/data/preferences/UserPreferencesManager.dart';
 import 'package:operit2/ui/common/markdown/MarkdownRemoteImage.dart';
+import 'package:operit2/ui/common/components/M3LoadingIndicator.dart';
+import 'package:operit2/ui/common/markdown/EnhancedCodeBlock.dart';
 import 'package:operit2/ui/common/markdown/MarkdownNodeGrouper.dart';
 import 'support/semantic_markdown_fixture.dart';
 import 'package:operit2/ui/common/markdown/StreamMarkdownRenderer.dart';
@@ -47,6 +49,73 @@ class _PositionPeakController extends ScrollController {
 
 /// Verifies transcript rendering and scroll ownership across asynchronous updates.
 void main() {
+  testWidgets(
+    'keeps initial history loading centered until all projections finish',
+    (tester) async {
+      final scroll = ScrollController();
+      final autoScroll = ValueNotifier(true);
+      final bridge = _ScriptedGeneratedChatBridge()
+        ..deferMessageProjections = true;
+      addTearDown(scroll.dispose);
+      addTearDown(autoScroll.dispose);
+      addTearDown(bridge.dispose);
+      final messages = [
+        for (var index = 1; index <= 3; index++)
+          _aiMessage(
+            timestamp: index,
+            parts: [
+              MessagePart(
+                partId: 'body-$index',
+                sequence: 0,
+                kind: MessagePartKind.markdown,
+                content: 'history message $index',
+                toolCallId: null,
+                toolName: null,
+                attributes: const {},
+              ),
+            ],
+          ),
+      ];
+      Widget render(String chatId) => _chatArea(
+        currentChatId: chatId,
+        bridge: bridge,
+        messages: messages,
+        isLoading: false,
+        scrollController: scroll,
+        autoScrollToBottom: autoScroll,
+      );
+      await tester.pumpWidget(render('first'));
+      expect(bridge.delayedProjections, hasLength(1));
+      expect(find.byType(M3LoadingIndicator), findsOneWidget);
+      expect(find.byType(LinearProgressIndicator), findsNothing);
+      final center = tester.getCenter(find.byType(M3LoadingIndicator));
+      expect(center, tester.getCenter(find.byType(ChatArea)));
+      expect(find.byType(CustomScrollView), findsNothing);
+
+      bridge.completeMessageProjection(0);
+      await tester.pumpAndSettle();
+      expect(find.byType(M3LoadingIndicator), findsNothing);
+      expect(find.byType(CustomScrollView), findsOneWidget);
+      expect(find.text('history message 3'), findsOneWidget);
+
+      await tester.pumpWidget(render('second'));
+      expect(bridge.delayedProjections, hasLength(2));
+      expect(tester.getCenter(find.byType(M3LoadingIndicator)), center);
+      await tester.pumpWidget(render('third'));
+      expect(bridge.delayedProjections, hasLength(3));
+      bridge.completeMessageProjection(1);
+      await tester.pump();
+      expect(find.byType(M3LoadingIndicator), findsOneWidget);
+      expect(find.byType(CustomScrollView), findsNothing);
+      bridge.completeMessageProjection(2);
+      await tester.pumpAndSettle();
+      expect(find.byType(M3LoadingIndicator), findsNothing);
+      expect(find.byType(LinearProgressIndicator), findsNothing);
+      expect(find.text('history message 3'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
   const imageSource =
       '图在这里：\n\n![](operit_art.jpg)\n\n绝对路径：\n\n'
       '![](/operitapp/outputs/2026-11-05_12-34-10-303/operit_art.jpg)\n\n'
@@ -664,6 +733,10 @@ void main() {
         /// Observes the active viewport even while an old keyed viewport unmounts.
         Widget observePaint(Widget child) => CustomPaint(
           foregroundPainter: _ScrollPositionPaintProbe(() {
+            if (find.byType(M3LoadingIndicator).evaluate().isNotEmpty) {
+              expect(find.byType(Scrollable), findsNothing);
+              return;
+            }
             final position = tester
                 .state<ScrollableState>(find.byType(Scrollable).first)
                 .position;
@@ -728,6 +801,9 @@ void main() {
             bodyBuilder: observePaint,
           ),
         );
+        expect(find.byType(M3LoadingIndicator), findsOneWidget);
+        expect(paints, isEmpty);
+        await tester.pump();
         expect(paints, isNotEmpty);
         for (final (pixels, bottom) in paints) {
           expect(
@@ -1349,7 +1425,193 @@ void main() {
     );
   });
 
-  for (final entry in ['initial', 'switch', 'empty snapshot']) {
+  testWidgets('bottom button reanchors only after the latest window is ready', (
+    tester,
+  ) async {
+    final scroll = ScrollController();
+    final autoScroll = ValueNotifier(false);
+    final loaded = Completer<void>();
+    addTearDown(scroll.dispose);
+    addTearDown(autoScroll.dispose);
+    var latestRequests = 0;
+    final parsed = <String>[];
+    final older = List.generate(80, (index) => _heightTestMessage(index));
+    final latest = List.generate(
+      80,
+      (index) => _heightTestMessage(index + 100),
+    );
+    Future<void> render({
+      required bool newer,
+      required bool loading,
+      required List<ChatUiMessage> messages,
+    }) => tester.pumpWidget(
+      _chatArea(
+        messages: messages,
+        isLoading: false,
+        hasNewerDisplayHistory: newer,
+        isLoadingDisplayWindow: loading,
+        scrollController: scroll,
+        autoScrollToBottom: autoScroll,
+        onAutoScrollToBottomChanged: (value) => autoScroll.value = value,
+        onShowLatestDisplayWindow: () {
+          latestRequests++;
+          return loaded.future;
+        },
+        splitMarkdownContent: (content) {
+          parsed.add(content);
+          return _splitMarkdownContent(content);
+        },
+      ),
+    );
+    await render(newer: true, loading: false, messages: older);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('回到底部'));
+    await tester.pump();
+    expect(latestRequests, 1);
+    await render(newer: false, loading: true, messages: latest);
+    await tester.pumpAndSettle();
+    expect(find.text('Height row 100 line 0'), findsOneWidget);
+    parsed.clear();
+    await render(newer: false, loading: false, messages: latest);
+    await tester.pumpAndSettle();
+    expect(find.text('Height row 179 line 0'), findsOneWidget);
+    expect(scroll.position.extentAfter, lessThanOrEqualTo(1));
+    expect(parsed.length, lessThan(20));
+    final position = scroll.position;
+    loaded.complete();
+    await tester.pumpAndSettle();
+    expect(scroll.position, same(position));
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets(
+    'bottom button ignores a latest-window completion after switching chats',
+    (tester) async {
+      final scroll = ScrollController();
+      final autoScroll = ValueNotifier(false);
+      final loaded = Completer<void>();
+      addTearDown(scroll.dispose);
+      addTearDown(autoScroll.dispose);
+      await tester.pumpWidget(
+        _chatArea(
+          messages: List.generate(80, (index) => _heightTestMessage(index)),
+          isLoading: false,
+          hasNewerDisplayHistory: true,
+          scrollController: scroll,
+          autoScrollToBottom: autoScroll,
+          onAutoScrollToBottomChanged: (value) => autoScroll.value = value,
+          onShowLatestDisplayWindow: () => loaded.future,
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('回到底部'));
+      await tester.pump();
+      autoScroll.value = false;
+      await tester.pumpWidget(
+        _chatArea(
+          currentChatId: 'other-chat',
+          messages: List.generate(
+            80,
+            (index) => _heightTestMessage(index + 200),
+          ),
+          isLoading: false,
+          scrollController: scroll,
+          autoScrollToBottom: autoScroll,
+          onAutoScrollToBottomChanged: (value) => autoScroll.value = value,
+        ),
+      );
+      await tester.pumpAndSettle();
+      final position = scroll.position;
+      loaded.complete();
+      await tester.pumpAndSettle();
+      expect(autoScroll.value, isFalse);
+      expect(scroll.position, same(position));
+      expect(find.text('Height row 200 line 0'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
+  for (final live in [false, true]) {
+    testWidgets('bottom button skips intermediate history, live=$live', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(390, 844);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final scroll = ScrollController();
+      final autoScroll = ValueNotifier(false);
+      final stream = StreamController<MarkdownStreamEvent>.broadcast();
+      addTearDown(scroll.dispose);
+      addTearDown(autoScroll.dispose);
+      addTearDown(stream.close);
+      final parsed = <String>[];
+      final messages = List.generate(
+        500,
+        (index) => _aiMessage(
+          timestamp: index + 1,
+          completedAt: live && index == 499 ? 0 : 1,
+          stream: live && index == 499 ? stream.stream : null,
+          parts: [
+            MessagePart(
+              partId: 'bottom-$index',
+              sequence: 0,
+              kind: MessagePartKind.markdown,
+              content: 'Bottom row $index',
+              toolCallId: null,
+              toolName: null,
+              attributes: const {},
+            ),
+          ],
+        ),
+      );
+      await tester.pumpWidget(
+        _chatArea(
+          messages: messages,
+          isLoading: false,
+          scrollController: scroll,
+          autoScrollToBottom: autoScroll,
+          onAutoScrollToBottomChanged: (value) => autoScroll.value = value,
+          splitMarkdownContent: (content) {
+            parsed.add(content);
+            return _splitMarkdownContent(content);
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Bottom row 0'), findsOneWidget);
+      parsed.clear();
+      await tester.tap(find.byTooltip('回到底部'));
+      for (var frame = 0; frame < 20; frame++) {
+        await tester.pump(const Duration(milliseconds: 16));
+      }
+      await tester.pumpAndSettle();
+      expect(autoScroll.value, isTrue);
+      expect(scroll.position.extentAfter, lessThanOrEqualTo(1));
+      expect(
+        parsed.length,
+        lessThan(20),
+        reason: 'Intermediate Markdown requests: ${parsed.length}',
+      );
+      expect(parsed, isNot(contains('Bottom row 250')));
+      if (!live) expect(find.text('Bottom row 499'), findsOneWidget);
+      debugPrint(
+        'Bottom button live=$live: ${parsed.length}/500 Markdown requests',
+      );
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+    });
+  }
+
+  for (final entry in [
+    'initial',
+    'switch',
+    'empty snapshot',
+    'live switch',
+    'code switch',
+  ]) {
     testWidgets('$entry long chat only parses messages near the bottom', (
       tester,
     ) async {
@@ -1359,7 +1621,11 @@ void main() {
       addTearDown(tester.view.resetDevicePixelRatio);
       final scroll = ScrollController();
       final autoScroll = ValueNotifier(true);
+      final code =
+          '```dart\n${List.generate(5000, (index) => 'final value$index = $index;').join('\n')}\n```';
       final parsed = <String>[];
+      final live = StreamController<MarkdownStreamEvent>.broadcast();
+      addTearDown(live.close);
       final messages = List<ChatUiMessage>.generate(
         80,
         (index) => _aiMessage(
@@ -1368,14 +1634,17 @@ void main() {
               partId: 'cold-open-$entry-$index',
               sequence: 0,
               kind: MessagePartKind.markdown,
-              content: '$entry conversation response $index',
+              content: entry == 'code switch' && index == 79
+                  ? code
+                  : '$entry conversation response $index',
               toolCallId: null,
               toolName: null,
               attributes: const {},
             ),
           ],
           timestamp: index + 1,
-          completedAt: 1,
+          stream: entry == 'live switch' && index == 79 ? live.stream : null,
+          completedAt: entry == 'live switch' && index == 79 ? 0 : 1,
         ),
       );
       addTearDown(() {
@@ -1385,8 +1654,10 @@ void main() {
       if (entry != 'initial') {
         await tester.pumpWidget(
           _chatArea(
-            currentChatId: entry == 'switch' ? 'previous-chat' : 'long-chat',
-            message: entry == 'switch'
+            currentChatId: entry.endsWith('switch')
+                ? 'previous-chat'
+                : 'long-chat',
+            message: entry.endsWith('switch')
                 ? _aiMessage(parts: const [], timestamp: 1000)
                 : null,
             isLoading: false,
@@ -1403,16 +1674,57 @@ void main() {
           isLoading: false,
           scrollController: scroll,
           autoScrollToBottom: autoScroll,
-          splitMarkdownContent: (content) {
+          splitMarkdownContent: (content) async {
             parsed.add(content);
-            return _splitMarkdownContent(content);
+            final events = await _splitMarkdownContent(content);
+            return content == code
+                ? [
+                    for (final event in events)
+                      MarkdownStreamEvent.fromJson({
+                        ...event.toJson(),
+                        'nodeType': 'CodeBlock',
+                      }),
+                  ]
+                : events;
           },
         ),
       );
       await tester.pumpAndSettle();
+      if (entry == 'live switch') {
+        for (final event in await _splitMarkdownContent(
+          '$entry conversation response 79',
+        )) {
+          live.add(event);
+        }
+        await tester.pumpAndSettle();
+      }
       // Count all requests, including work from rows that were already unmounted.
-      expect(parsed, contains('$entry conversation response 79'));
-      expect(parsed.length, lessThan(20), reason: 'Parsed: $parsed');
+      if (entry != 'live switch') {
+        expect(
+          parsed,
+          contains(
+            entry == 'code switch' ? code : '$entry conversation response 79',
+          ),
+        );
+      }
+      if (entry == 'code switch') {
+        expect(find.byType(EnhancedCodeBlock), findsOneWidget);
+        expect(
+          find
+              .descendant(
+                of: find.byType(EnhancedCodeBlock),
+                matching: find.byType(Text),
+              )
+              .evaluate()
+              .length,
+          lessThan(150),
+        );
+      }
+      expect(
+        parsed.length,
+        lessThan(20),
+        reason: 'Markdown requests: ${parsed.length}',
+      );
       expect(parsed, isNot(contains('$entry conversation response 0')));
       expect(scroll.offset, scroll.position.maxScrollExtent);
       debugPrint('$entry long chat: ${parsed.length}/80 Markdown requests');
@@ -1722,6 +2034,8 @@ void main() {
         autoScrollToBottom: autoScrollToBottom,
       ),
     );
+    // Static display projections complete through the generated asynchronous client.
+    await tester.pumpAndSettle();
     final previousMessageWidget = tester.widget<CursorStyleChatMessage>(
       find.byType(CursorStyleChatMessage),
     );
@@ -2085,6 +2399,7 @@ void main() {
       ),
     );
 
+    await tester.pumpAndSettle();
     final scrollableContext = tester.element(find.byType(Scrollable).first);
     final metrics = FixedScrollMetrics(
       minScrollExtent: 0,
@@ -2264,6 +2579,16 @@ class _GeneratedFlowRendererHarnessState
 
 /// Emits generated proxy events in the same order as routed chat streaming.
 class _ScriptedGeneratedChatBridge extends OperitRuntimeBridge {
+  bool deferMessageProjections = false;
+  final delayedProjections =
+      <({Object? message, Completer<Uint8List> result})>[];
+
+  /// Completes a selected history projection independently of response order.
+  void completeMessageProjection(int index) {
+    final request = delayedProjections[index];
+    request.result.complete(encodeCoreLink([0, request.message]));
+  }
+
   final StreamController<CoreEvent> _chatEvents =
       StreamController<CoreEvent>.broadcast(sync: true);
   final Map<String, StreamController<CoreEvent>> _streamEventsById =
@@ -2286,6 +2611,16 @@ class _ScriptedGeneratedChatBridge extends OperitRuntimeBridge {
   @override
   Future<Uint8List> callBytes(CoreCallRequest request) async {
     switch (request.methodName) {
+      case 'projectMessagesForDisplay':
+        if (deferMessageProjections) {
+          final result = Completer<Uint8List>();
+          delayedProjections.add((
+            message: (request.args as Map)['messages'],
+            result: result,
+          ));
+          return result.future;
+        }
+        return encodeCoreLink([0, (request.args as Map)['messages']]);
       case 'executeTool':
         final tool = (request.args as Map)['tool'] as Map;
         expect(tool['name'], 'read_file_binary');
@@ -2332,6 +2667,8 @@ class _ScriptedGeneratedChatBridge extends OperitRuntimeBridge {
   @override
   Stream<CoreEvent> watchStream(CoreWatchRequest request) {
     switch (request.propertyName) {
+      case 'messageTransformRevisionFlow':
+        return Stream.value(_rawGeneratedEvent(request, 'Snapshot', 0));
       case 'imageBytes':
         // An unresolved relative source fails until the chat directory arrives.
         return Stream.value(
@@ -2430,6 +2767,21 @@ Widget _streamingStructuredRendererHarness({
   );
 }
 
+_ScriptedGeneratedChatBridge? _defaultChatBridge;
+
+/// Reuses one runtime transport during each test, matching a mounted application's client ownership.
+_ScriptedGeneratedChatBridge _testChatBridge() {
+  if (_defaultChatBridge == null) {
+    final bridge = _ScriptedGeneratedChatBridge();
+    _defaultChatBridge = bridge;
+    addTearDown(() {
+      bridge.dispose();
+      _defaultChatBridge = null;
+    });
+  }
+  return _defaultChatBridge!;
+}
+
 /// Builds a minimal themed transcript around one active AI message.
 Widget _chatArea({
   String currentChatId = 'chat',
@@ -2447,10 +2799,10 @@ Widget _chatArea({
   Widget Function(Widget)? bodyBuilder,
   MarkdownContentSplitter splitMarkdownContent = _splitMarkdownContent,
   RevealMessageForLocator? onRevealMessageForLocator,
+  Future<void> Function()? onShowLatestDisplayWindow,
 }) {
-  final owner = bridge ?? _ScriptedGeneratedChatBridge();
+  final owner = bridge ?? _testChatBridge();
   final clients = GeneratedCoreProxyClients(owner);
-  if (bridge == null) addTearDown(owner.dispose);
   final chatArea = ChatArea(
     messages:
         messages ??
@@ -2473,7 +2825,7 @@ Widget _chatArea({
     onAutoScrollToBottomChanged: onAutoScrollToBottomChanged ?? (_) {},
     onLoadOlderDisplayWindow: () async {},
     onLoadNewerDisplayWindow: () async {},
-    onShowLatestDisplayWindow: () async {},
+    onShowLatestDisplayWindow: onShowLatestDisplayWindow ?? () async {},
     onToggleFavoriteMessage: (timestamp, isFavorite) async {},
     onDeleteMessage: (timestamp) async {},
     onDeleteMessagesFrom: (timestamp) async => true,
