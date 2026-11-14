@@ -470,6 +470,14 @@ jobs:
         # in local builds Gradle runs this sync, so CI must run it first too.
         run: python3 plugins/tools/sync_plugin_packages.py --source runtime --no-hot-reload
 
+      - name: Prepare bundled models.dev catalog
+        # Same class of requirement as above: operit-runtime's build.rs
+        # (since upstream fa999a94) requires the bundled models.dev catalog
+        # snapshot to exist before any cargo compilation; the file is
+        # gitignored and generated at build time, and this mirrors the
+        # identically named step in upstream's own deploy workflow.
+        run: python3 tools/build_scripts/models_dev_bundle.py
+
       - name: Generate Dart proxy artifacts
         run: |
           cargo check --manifest-path core/crates/proxy/local/Cargo.toml --quiet
